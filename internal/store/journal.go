@@ -152,17 +152,27 @@ func (s *Store) ReplaySpool(ctx context.Context, j *Journal, deliver func(*Entry
 	return nil
 }
 
-// ReplayOutbox runs on start: it puts the outbox entries whose Commit landed
-// and drops the uncommitted ones — a ciphertext whose session state was
-// never committed must not reach the relay, since the next send reuses its
-// counter. A put the relay already holds is refused by the receiver's
-// ratchet as a replay; a committed entry never put leaves a counter gap the
-// receiver's skipped-key store absorbs.
+// ErrPermanent is a put no retry can land: the channel is gone, the token is
+// refused, the entry's own bytes are wrong. ReplayOutbox drops such an entry.
+var ErrPermanent = errors.New("store: entry cannot be put")
+
+// ReplayOutbox puts the outbox entries whose Commit landed and drops the
+// uncommitted ones — a ciphertext whose session state was never committed
+// must not reach the relay, since the next send reuses its counter. A put the
+// relay already holds is refused by the receiver's ratchet as a replay; a
+// committed entry never put leaves a counter gap the receiver's skipped-key
+// store absorbs.
+//
+// One entry never blocks the others: a put that returns ErrPermanent drops
+// its entry, any other failure leaves it for the next replay, and either way
+// the entries behind it — other channels, other relays — are tried. Every
+// failure comes back joined, for the caller to report.
 func ReplayOutbox(j *Journal, put func(*Entry) error) error {
 	entries, err := j.Entries()
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, e := range entries {
 		if !e.Committed {
 			if err := j.Remove(e); err != nil {
@@ -170,12 +180,17 @@ func ReplayOutbox(j *Journal, put func(*Entry) error) error {
 			}
 			continue
 		}
-		if err := put(e); err != nil {
-			return err
+		switch err := put(e); {
+		case err == nil:
+		case errors.Is(err, ErrPermanent):
+			errs = append(errs, fmt.Errorf("%s dropped: %w", e.ID, err))
+		default:
+			errs = append(errs, fmt.Errorf("%s waits: %w", e.ID, err))
+			continue
 		}
 		if err := j.Remove(e); err != nil {
 			return err
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

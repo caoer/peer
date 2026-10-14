@@ -166,9 +166,11 @@ func (p *party) accepts(agent string) []string {
 	return nil
 }
 
-// replayOutbox runs on start: it puts the outbox entries whose commit
-// landed (store.ReplayOutbox). An entry whose channel is no longer on the
-// roster is dropped.
+// replayOutbox puts the outbox entries whose commit landed
+// (store.ReplayOutbox): every send, and every serve round. An entry whose
+// channel is no longer on the roster is dropped, as is one the relay can
+// never take; one that failed on something passing waits for the next replay
+// and does not hold up the entries behind it.
 func (p *party) replayOutbox(ctx context.Context) error {
 	r, err := roster.Load(ctx, p.backend)
 	if err != nil {
@@ -181,11 +183,32 @@ func (p *party) replayOutbox(ctx context.Context) error {
 		}
 		typ, err := envelope.ParseType(e.Type)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %v", store.ErrPermanent, err)
 		}
 		_, err = relay.New(pe.Relay, nil).Put(ctx, e.Channel, pe.Token, envelope.Envelope{Type: typ, Body: e.Body})
+		if err != nil && permanentPut(err) {
+			return fmt.Errorf("%w: %v", store.ErrPermanent, err)
+		}
 		return err
 	})
+}
+
+// permanentPut reports whether a relay refusal can never be put: the channel
+// is gone, the token is refused, the request or the envelope itself is wrong.
+// Anything else — a 5xx, a timeout, rate limiting — waits for the next replay.
+func permanentPut(err error) bool {
+	if errors.Is(err, envelope.ErrTooLarge) {
+		return true
+	}
+	for _, p := range []*relay.Error{
+		relay.ErrNoSuchChannel, relay.ErrBadToken, relay.ErrTokenUsed,
+		relay.ErrTooLarge, relay.ErrBadRequest, relay.ErrMethodNotAllowed, relay.ErrNoSuchRoute,
+	} {
+		if errors.Is(err, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // splitAddr cuts "<party>/<agent>" — a protocol address, or a roster

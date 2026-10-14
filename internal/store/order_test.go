@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/caoer/peer/internal/store"
@@ -209,5 +211,42 @@ func TestSendOrderAndOutboxReplay(t *testing.T) {
 	}
 	if len(puts) != 1 || puts[0] != "committed ciphertext" || count(t, outbox) != 0 {
 		t.Fatalf("replay puts %q, %d entries left", puts, count(t, outbox))
+	}
+}
+
+// One entry never holds up the rest: a put that can never land drops its
+// entry, a put that failed on something passing keeps its entry for the next
+// replay, and the entries behind both are tried either way.
+func TestOutboxReplayTriesEveryEntry(t *testing.T) {
+	outbox := journal(t)
+	for _, id := range []string{"gone", "waiting", "good"} {
+		e := &store.Entry{ID: id, Channel: "c1", Type: "msg", Body: []byte(id)}
+		if err := outbox.Add(e); err != nil {
+			t.Fatal(err)
+		}
+		if err := outbox.MarkCommitted(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var puts []string
+	err := store.ReplayOutbox(outbox, func(e *store.Entry) error {
+		puts = append(puts, e.ID)
+		switch e.ID {
+		case "gone":
+			return fmt.Errorf("%w: relay: 404 no_such_channel", store.ErrPermanent)
+		case "waiting":
+			return errors.New("relay: 503 down")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("the replay reported neither failure")
+	}
+	if strings.Join(puts, " ") != "gone waiting good" {
+		t.Fatalf("the replay tried %q, want every entry in order", puts)
+	}
+	es, _ := outbox.Entries()
+	if len(es) != 1 || es[0].ID != "waiting" {
+		t.Fatalf("outbox after the replay: %+v, want the transient entry alone", es)
 	}
 }

@@ -112,13 +112,11 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 // would fail on it the same way.
 var errSpool = errors.New("spool entry does not open")
 
-// start finishes what a crash cut: outbox puts, then spool births. An entry
-// that can never be born — its own address, kind or id refuses — is dropped
-// with its reason, so one such entry cannot stop delivery on every channel.
+// start finishes the spool births a crash cut (the outbox is every round's
+// work, below). An entry that can never be born — its own address, kind or id
+// refuses — is dropped with its reason, so one such entry cannot stop
+// delivery on every channel.
 func (sv *server) start(ctx context.Context) error {
-	if err := sv.p.replayOutbox(ctx); err != nil {
-		fmt.Fprintf(sv.out, "outbox: %v\n", err)
-	}
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
 		_, err := sv.birth(e)
 		if errors.Is(err, deliver.ErrRecord) || errors.Is(err, errSpool) {
@@ -129,9 +127,15 @@ func (sv *server) start(ctx context.Context) error {
 	})
 }
 
-// round pulls every channel that has a session once; one channel's failure
-// does not stop the others.
+// round replays the outbox, then pulls every channel that has a session
+// once; one channel's failure does not stop the others. The outbox is a
+// round's work, not a start's: under serve --every, a long-lived loop is all
+// that runs, and a message whose put failed after its commit goes out on the
+// next round, as peer send promises.
 func (sv *server) round(ctx context.Context) error {
+	if err := sv.p.replayOutbox(ctx); err != nil {
+		fmt.Fprintf(sv.out, "outbox: %v\n", err)
+	}
 	r, err := roster.Load(ctx, sv.p.backend)
 	if err != nil {
 		return err
