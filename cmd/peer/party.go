@@ -155,15 +155,21 @@ func (p *party) signedCard(pk *keys.PartyKeys, relays []string, details bool, no
 	return card.Sign(c, p.root)
 }
 
-// accepts is the kinds the local agent takes, from config's agent list; nil
-// — every kind — for the party itself or an agent config does not list.
+// accepts is the kinds the addressed agent takes, from config's agent list.
+// Nil — every kind — for the party itself, and for an agent config lists
+// without a list of its own. An agent id config does not list is nobody
+// here: it takes nothing, so what the sender addressed to it is quarantined
+// rather than delivered under no rule at all (plan U11 refuses the label).
 func (p *party) accepts(agent string) []string {
+	if agent == "" {
+		return nil
+	}
 	for _, a := range p.cfg.Agents {
 		if a.ID == agent {
 			return a.Accepts
 		}
 	}
-	return nil
+	return []string{}
 }
 
 // replayOutbox puts the outbox entries whose commit landed

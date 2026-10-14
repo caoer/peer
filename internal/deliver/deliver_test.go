@@ -27,6 +27,9 @@ func TestRoute(t *testing.T) {
 		{"doc", []string{"doc"}, Quarantine}, {"doc", nil, Quarantine}, {"file", nil, Quarantine},
 		{"vnd.zt.ping", seat, Quarantine}, {"vnd.zt.ping", nil, Inbox}, {"vnd.zt.ping", []string{"vnd.zt.ping"}, Inbox},
 		{"text", nil, Inbox}, {"text", []string{"task"}, Quarantine},
+		// An empty list is an address nothing here answers to: it takes no
+		// kind, where a nil list takes every kind.
+		{"text", []string{}, Quarantine}, {"vnd.zt.ping", []string{}, Quarantine}, {"ack", []string{}, Quarantine},
 	} {
 		if got := Route(c.kind, c.accepts); got != c.want {
 			t.Errorf("Route(%q, %v) = %s, want %s", c.kind, c.accepts, got, c.want)

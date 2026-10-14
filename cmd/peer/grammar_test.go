@@ -79,6 +79,36 @@ func TestServeDeliversDocumentedVendorKind(t *testing.T) {
 	}
 }
 
+// The accepts border held for the agents the card lists and was open to
+// every other label: an agent id the card does not list took nil accepts,
+// which Route reads as "every kind". A kind refused for the listed agent
+// landed in the inbox when it was addressed one character beside it.
+func TestServeQuarantinesAnAgentTheCardDoesNotList(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+
+	listed, _ := sendOK(t, p.guestDir, "--kind", "question", "--text", "to the listed agent", "zt/advisor")
+	unlisted, _ := sendOK(t, p.guestDir, "--kind", "question", "--text", "to an agent the card does not list", "zt/nosuchagent")
+	beside, _ := sendOK(t, p.guestDir, "--kind", "vnd."+p.guestParty+".run", "--text", "one character beside it", "zt/advisor2")
+	party, _ := sendOK(t, p.guestDir, "--kind", "question", "--text", "to the party itself", "zt")
+
+	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	in := records(t, deliverDirOf(p.hostDir), deliver.Inbox)
+	q := records(t, deliverDirOf(p.hostDir), deliver.Quarantine)
+	for _, id := range []string{listed, unlisted, beside} {
+		if _, ok := q[id]; !ok {
+			t.Errorf("%s is not in quarantine; serve said:\n%s", id, out)
+		}
+	}
+	// The bare party address is the party itself, which takes every kind.
+	if _, ok := in[party]; !ok {
+		t.Errorf("a question to the party itself was not delivered:\n%s", out)
+	}
+	if len(in) != 1 || len(q) != 3 {
+		t.Fatalf("%d records in the inbox, %d in quarantine", len(in), len(q))
+	}
+}
+
 // A committed spool entry whose record can never be written — an older
 // version wrote it, or the bytes rotted — is dropped with its reason instead
 // of failing start, so delivery on every channel keeps running.

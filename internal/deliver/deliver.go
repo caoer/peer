@@ -32,8 +32,9 @@ const (
 // accepts — a peer's method never applies on its own (design §10 #8); a
 // kind outside the agent's accepts list is quarantined — the border for what
 // arrives despite the card (UCC design v2 § 5); everything else is the
-// inbox. A nil accepts takes every kind. A card is not routed: it is the
-// session's own rule.
+// inbox. A nil accepts takes every kind, an empty one takes none — the
+// difference between an agent with no list and an address with no agent
+// behind it. A card is not routed: it is the session's own rule.
 func Route(kind string, accepts []string) Place {
 	if kind == "doc" || kind == "file" {
 		return Quarantine
