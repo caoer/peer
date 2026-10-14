@@ -25,6 +25,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "init":
 		return cmdInit(args[1:], stdout, stderr)
+	case "invite":
+		return cmdInvite(args[1:], stdout, stderr)
+	case "accept":
+		return cmdAccept(args[1:], stdout, stderr)
+	case "confirm":
+		return cmdConfirm(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -40,6 +46,15 @@ func usage(w io.Writer) {
 
 commands:
   init      generate the root key, identity and party keys [--dir D]
+  invite    open a channel for a peer and print the invite link
+            [--dir D] [--relay URL] [--login USER:TOKEN] <name>
+  accept    join the channel a link names and print the verification code
+            [--dir D] [--name N] <link>
+  confirm   check the peer's identity and code, pin its card, send yours
+            [--dir D] [--code 8-digits] <name>
   version   print the version
+
+flags come before the name or link. config.json in the peer directory holds
+relay, login, agents and details.
 `)
 }
