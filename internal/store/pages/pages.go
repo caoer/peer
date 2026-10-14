@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/caoer/peer/internal/store"
 )
@@ -41,12 +42,18 @@ type Backend struct {
 	client             *http.Client
 }
 
+// Timeout bounds one record's request when New is given no client of its
+// own, as the relay client's does: a page that takes the connection and
+// never answers would otherwise hang a serve loop with no log line, which
+// reads exactly like a quiet channel.
+const Timeout = 60 * time.Second
+
 // New opens the store of the page slug on the ccc-pages service at base
 // (https://page.sui.pics) with the owner login `<user>:<token>` as the
-// Bearer; a nil client is http.DefaultClient.
+// Bearer; a nil client is one with Timeout.
 func New(base, slug, bearer string, client *http.Client) *Backend {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: Timeout}
 	}
 	return &Backend{base: strings.TrimRight(base, "/"), slug: slug, bearer: bearer, client: client}
 }
