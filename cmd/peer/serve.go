@@ -18,6 +18,7 @@ import (
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
+	"github.com/caoer/peer/internal/seats"
 	"github.com/caoer/peer/internal/session"
 	"github.com/caoer/peer/internal/status"
 	"github.com/caoer/peer/internal/store"
@@ -89,6 +90,9 @@ type server struct {
 	// (status.go).
 	beat time.Duration
 	page *status.Page
+	// seats is the seat map under ucc (ucc.go), read again every round; nil
+	// without ucc, when delivery is local into dir.
+	seats *seats.Map
 	// Test hooks, nil in production: beforeCommit runs once the spool entry
 	// is written and before the CAS commit; beforeBirth once the commit
 	// landed and before the record is born.
@@ -114,7 +118,11 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &server{p: p, spool: spool, dir: deliverTo, out: out}, nil
+	sv := &server{p: p, spool: spool, dir: deliverTo, out: out}
+	if err := sv.loadSeats(); err != nil {
+		return nil, err
+	}
+	return sv, nil
 }
 
 // errSpool is a spool entry whose bytes are not a message: every replay
@@ -143,6 +151,9 @@ func (sv *server) start(ctx context.Context) error {
 // that runs, and a message whose put failed after its commit goes out on the
 // next round, as peer send promises.
 func (sv *server) round(ctx context.Context) error {
+	if err := sv.loadSeats(); err != nil {
+		return err
+	}
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
 	}
@@ -227,6 +238,12 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 				fmt.Fprintf(sv.out, "%s: waiting at #%d: %v; run peer card accept when you have verified their new card (U13)\n", pe.Name, rec.Seq, err)
 				return nil
 			}
+			if errors.Is(err, errWait) {
+				// Not consumed: the seat's session is not on this root yet
+				// (uccBorder). The cursor stays and the next round pulls it again.
+				fmt.Fprintf(sv.out, "%s: waiting at #%d: %v\n", pe.Name, rec.Seq, err)
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -286,12 +303,16 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	if err == nil {
 		err = c.checkAddress(m)
 	}
+	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard {
+		err = c.sv.uccBorder(m)
+	}
 	// A record the pinned card's keys cannot open is the shape of a peer's
 	// key rotation (design §3.2): its new card and everything after it are
 	// readable only by the version that applies a key change (U13). Moving
 	// the cursor past them would consume that material for good, so the
-	// channel waits here instead — serveChannel stops its pull.
-	if errors.Is(err, session.ErrUntrusted) {
+	// channel waits here instead — serveChannel stops its pull. A seat whose
+	// session is not on this root waits the same way (ucc.go).
+	if errors.Is(err, session.ErrUntrusted) || errors.Is(err, errWait) {
 		return err
 	}
 	if err != nil {
@@ -454,8 +475,13 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 		return "", fmt.Errorf("%w: %v", errSpool, err)
 	}
 	_, agent := splitAddr(m.To)
-	place := deliver.Route(m.Kind, sv.p.accepts(agent))
-	path, born, err := deliver.Write(sv.dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body})
+	dir, place := sv.dir, deliver.Route(m.Kind, sv.p.accepts(agent))
+	if sv.seats != nil {
+		if dir, place, err = sv.uccPlace(m); err != nil {
+			return "", err
+		}
+	}
+	path, born, err := deliver.Write(dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body})
 	if err != nil {
 		return "", err
 	}

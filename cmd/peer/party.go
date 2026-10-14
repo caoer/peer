@@ -54,6 +54,9 @@ type config struct {
 	Deliver string `json:"deliver,omitempty"`
 	// Roster is the private roster page serve keeps current (status.go).
 	Roster rosterConfig `json:"roster,omitempty"`
+	// UCC names the fleet's sessions root and the seat map on it (ucc.go):
+	// with it, Agents come from the map and serve delivers by it.
+	UCC *uccConfig `json:"ucc,omitempty"`
 }
 
 // stateConfig names the state backend: Dir for the file backend, or
@@ -110,6 +113,9 @@ func openParty(dir string) (*party, error) {
 		return nil, err
 	}
 	if err := readJSON(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	if _, err := p.loadSeats(); err != nil {
 		return nil, err
 	}
 	b, err := openBackend(dir, p.cfg, p.id)
