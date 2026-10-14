@@ -31,6 +31,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdAccept(args[1:], stdout, stderr)
 	case "confirm":
 		return cmdConfirm(args[1:], stdout, stderr)
+	case "send":
+		return cmdSend(args[1:], stdout, stderr)
+	case "serve":
+		return cmdServe(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -52,9 +56,14 @@ commands:
             [--dir D] [--name N] <link>
   confirm   check the peer's identity and code, pin its card, send yours
             [--dir D] [--code 8-digits] <name>
+  send      encrypt a message and put it on the peer's channel
+            [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
+  serve     pull every channel, decrypt, deliver into inbox/ or quarantine/
+            [--dir D] [--deliver DIR] [--once] [--every 30s]
   version   print the version
 
 flags come before the name or link. config.json in the peer directory holds
-relay, login, agents and details.
+relay, login, agents, details, state (dir, or page + slug + login) and
+deliver.
 `)
 }

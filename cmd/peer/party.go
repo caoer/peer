@@ -8,19 +8,26 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/caoer/peer/internal/card"
+	"github.com/caoer/peer/internal/envelope"
 	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/relay"
+	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/store"
 	"github.com/caoer/peer/internal/store/file"
+	"github.com/caoer/peer/internal/store/pages"
 )
 
 // Beside init's three files, the peer directory holds:
 const (
-	configFile = "config.json" // the party's relay, owner login, agents and details
-	stateDir   = "state"       // the file store backend
+	configFile = "config.json" // the party's relay, owner login, agents, details, state, deliver
+	stateDir   = "state"       // the file store backend, unless config names another state
 	outboxDir  = "outbox"      // the send outbox (a store.Journal)
+	spoolDir   = "spool"       // the serve spool (a store.Journal)
+	deliverDir = "deliver"     // where serve delivers, unless config names another directory
 )
 
 // prekeysPerChannel is how many one-time prekeys a party deposits on a new
@@ -38,6 +45,40 @@ type config struct {
 	// carries and envelope #0 does not (design §3.3).
 	Agents  []card.Agent    `json:"agents,omitempty"`
 	Details json.RawMessage `json:"details,omitempty"`
+	// State is where the session state lives, shared by every host of the
+	// party that serves (design §3.2): a directory for the file backend, or
+	// a private ccc-pages state page. Absent, it is <dir>/state.
+	State stateConfig `json:"state,omitempty"`
+	// Deliver is the directory serve delivers into — inbox/<id>.md and
+	// quarantine/<id>.md under it. Absent, it is <dir>/deliver.
+	Deliver string `json:"deliver,omitempty"`
+}
+
+// stateConfig names the state backend: Dir for the file backend, or
+// Page + Slug (+ Login, default the config login) for a ccc-pages page.
+type stateConfig struct {
+	Dir   string `json:"dir,omitempty"`
+	Page  string `json:"page,omitempty"`
+	Slug  string `json:"slug,omitempty"`
+	Login string `json:"login,omitempty"`
+}
+
+// openBackend opens the state the config names, sealed when it is a page.
+func openBackend(dir string, cfg config, id *keys.Identity) (store.Backend, error) {
+	st := cfg.State
+	if st.Page != "" || st.Slug != "" {
+		if st.Login == "" {
+			st.Login = cfg.Login
+		}
+		if st.Page == "" || st.Slug == "" || st.Login == "" {
+			return nil, fmt.Errorf("%s: state.page, state.slug and a login (state.login or login) go together", configFile)
+		}
+		return store.Sealed(pages.New(st.Page, st.Slug, st.Login, nil), store.SealKey(id)), nil
+	}
+	if st.Dir == "" {
+		st.Dir = filepath.Join(dir, stateDir)
+	}
+	return file.New(st.Dir)
 }
 
 // party is an opened peer directory.
@@ -69,7 +110,7 @@ func openParty(dir string) (*party, error) {
 	if err := readJSON(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	b, err := file.New(filepath.Join(dir, stateDir))
+	b, err := openBackend(dir, p.cfg, p.id)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +153,46 @@ func (p *party) signedCard(pk *keys.PartyKeys, relays []string, details bool, no
 		c.Details = p.cfg.Details
 	}
 	return card.Sign(c, p.root)
+}
+
+// accepts is the kinds the local agent takes, from config's agent list; nil
+// — every kind — for the party itself or an agent config does not list.
+func (p *party) accepts(agent string) []string {
+	for _, a := range p.cfg.Agents {
+		if a.ID == agent {
+			return a.Accepts
+		}
+	}
+	return nil
+}
+
+// replayOutbox runs on start: it puts the outbox entries whose commit
+// landed (store.ReplayOutbox). An entry whose channel is no longer on the
+// roster is dropped.
+func (p *party) replayOutbox(ctx context.Context) error {
+	r, err := roster.Load(ctx, p.backend)
+	if err != nil {
+		return err
+	}
+	return store.ReplayOutbox(p.outbox, func(e *store.Entry) error {
+		pe := r.ByChannel(e.Channel)
+		if pe == nil {
+			return nil
+		}
+		typ, err := envelope.ParseType(e.Type)
+		if err != nil {
+			return err
+		}
+		_, err = relay.New(pe.Relay, nil).Put(ctx, e.Channel, pe.Token, envelope.Envelope{Type: typ, Body: e.Body})
+		return err
+	})
+}
+
+// splitAddr cuts "<party>/<agent>" — a protocol address, or a roster
+// name with an agent — into its two parts; agent is empty without a slash.
+func splitAddr(s string) (party, agent string) {
+	party, agent, _ = strings.Cut(s, "/")
+	return party, agent
 }
 
 func readJSON(path string, v any) error {
