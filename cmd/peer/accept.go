@@ -74,8 +74,28 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if err != nil {
 		return nil, err
 	}
+	// A previous accept of this link may have joined, kept its row and then
+	// failed: the token on the row is this side's only way back to the
+	// channel, so the handshake goes on from there instead of asking for a
+	// link that cannot be issued again. With a session built there is nothing
+	// left to redo — the host confirms with the code.
+	var guest string
 	if cur := r.ByChannel(l.Channel); cur != nil {
-		return nil, fmt.Errorf("this invite was accepted already (peer %s)", cur.Name)
+		if cur.State != roster.Accepted {
+			return nil, fmt.Errorf("this invite was accepted already (peer %s)", cur.Name)
+		}
+		ch, err := p.store.Channel(ctx, l.Channel)
+		if err != nil {
+			return nil, err
+		}
+		has, err := ch.ContainsSession(ctx, session.Addr)
+		if err != nil {
+			return nil, err
+		}
+		if has {
+			return &acceptResult{name: cur.Name, party: party, channel: l.Channel, code: session.Code(l.Root, p.root.Public())}, nil
+		}
+		name, guest = cur.Name, cur.Token
 	}
 	if cur := r.ByName(name); cur != nil && cur.State == roster.Confirmed {
 		return nil, fmt.Errorf("%s is a confirmed peer already; pick another name with --name", name)
@@ -86,12 +106,14 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	}
 
 	rc := relay.New(l.Relay, nil)
-	guest, err := rc.Join(ctx, l.Channel, l.Token)
-	if errors.Is(err, relay.ErrTokenUsed) {
-		return nil, fmt.Errorf("the invite link was used already: ask %s for a new one", name)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("join: %w", err)
+	if guest == "" {
+		guest, err = rc.Join(ctx, l.Channel, l.Token)
+		if errors.Is(err, relay.ErrTokenUsed) {
+			return nil, fmt.Errorf("the invite link was used already: ask %s for a new one", name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("join: %w", err)
+		}
 	}
 	recs, err := rc.Pull(ctx, l.Channel, guest, -1)
 	if err != nil {
@@ -111,6 +133,16 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	}
 	key, err := session.CurrentKey(c)
 	if err != nil {
+		return nil, err
+	}
+	// The card is the inviter's and the link is spent: keep the row with its
+	// token before any of the work below can fail, so a failure there is
+	// resumable by another peer accept with the same link. A refusal above
+	// this line keeps nothing and the inviter re-invites.
+	if err := roster.Update(ctx, p.backend, func(r *roster.Roster) error {
+		r.Set(roster.Peer{Name: name, Channel: l.Channel, Relay: l.Relay, Side: roster.Guest, Token: guest, State: roster.Accepted})
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	var opk *relay.Prekey
@@ -157,13 +189,6 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	}
 	if _, err := rc.PutPrekeys(ctx, l.Channel, guest, pks); err != nil {
 		return nil, fmt.Errorf("deposit prekeys: %w", err)
-	}
-	err = roster.Update(ctx, p.backend, func(r *roster.Roster) error {
-		r.Set(roster.Peer{Name: name, Channel: l.Channel, Relay: l.Relay, Side: roster.Guest, Token: guest, State: roster.Accepted})
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	return &acceptResult{name: name, party: party, channel: l.Channel, code: session.Code(l.Root, p.root.Public())}, nil
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
+	"github.com/caoer/peer/internal/store"
 )
 
 // cmdConfirm finishes an invite on the host's side: pull the guest's card
@@ -54,12 +55,16 @@ func cmdConfirm(args []string, stdout, stderr io.Writer) int {
 	if res.putErr != nil {
 		fmt.Fprintf(stdout, "the card with details did not reach the relay (%v); it stays in the outbox for replay\n", res.putErr)
 	}
+	if res.keysErr != nil {
+		fmt.Fprintf(stdout, "the party keys were not committed (%v); the one-time prekey this handshake used stays a spare\n", res.keysErr)
+	}
 	return 0
 }
 
 type confirmResult struct {
 	party, channel string
 	putErr         error
+	keysErr        error
 }
 
 func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, error) {
@@ -90,6 +95,19 @@ func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, er
 	ch, err := p.store.Channel(ctx, pe.Channel)
 	if err != nil {
 		return nil, err
+	}
+	// A previous confirm's commit may have landed with its roster write lost
+	// — a crash, a refused write, a keys conflict: the channel then holds the
+	// pinned card and the session while the row still says invited, and the
+	// pull below would find a message where the card was. Finish that confirm
+	// rather than refuse it; the guest's token is spent and cannot be retried.
+	if done, err := confirmLanded(ctx, p, ch, code); err != nil {
+		return nil, err
+	} else if done {
+		if err := confirmRoster(ctx, p, name, pe.Channel); err != nil {
+			return nil, err
+		}
+		return &confirmResult{party: keys.PartyID(ch.Root()), channel: pe.Channel}, nil
 	}
 	k, err := p.keys(ctx)
 	if err != nil {
@@ -141,19 +159,47 @@ func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, er
 		}
 		res.putErr = putErr.Err
 	}
+	// The channel is committed and the card is out. The keys record only
+	// carries the spent one-time prekey, so a failure here — a conflict with
+	// another host's serve, which commits the keys on every PreKey record, or
+	// a refused write — leaves a spare key and is reported; it never leaves
+	// the channel half-confirmed.
 	if err := k.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit party keys: %w", err)
+		res.keysErr = err
 	}
-	err = roster.Update(ctx, p.backend, func(r *roster.Roster) error {
+	if err := confirmRoster(ctx, p, name, pe.Channel); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// confirmLanded reports whether this confirm's own work is on the channel
+// already: the peer's root and card pinned and a session built. The code the
+// caller typed must be the one those two root keys give — a wrong code never
+// finishes a confirm.
+func confirmLanded(ctx context.Context, p *party, ch *store.Channel, code string) (bool, error) {
+	if ch.Root() == nil || ch.Card() == nil {
+		return false, nil
+	}
+	has, err := ch.ContainsSession(ctx, session.Addr)
+	if err != nil || !has {
+		return false, err
+	}
+	if code != session.Code(p.root.Public(), ch.Root()) {
+		return false, errors.New("the code does not match: refusing, re-invite")
+	}
+	return true, nil
+}
+
+// confirmRoster is the last step of a confirm: the peer's row goes confirmed,
+// which is what makes serve pull the channel.
+func confirmRoster(ctx context.Context, p *party, name, channel string) error {
+	return roster.Update(ctx, p.backend, func(r *roster.Roster) error {
 		cur := r.ByName(name)
-		if cur == nil || cur.Channel != pe.Channel {
+		if cur == nil || cur.Channel != channel {
 			return fmt.Errorf("the roster entry for %s changed under this confirm", name)
 		}
 		cur.State = roster.Confirmed
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
 }
