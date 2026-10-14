@@ -69,7 +69,7 @@ func TestAttachmentFiveMBEachWay(t *testing.T) {
 		if fm["kind"] != tc.kind || d.Name != tc.name || d.Size != int64(len(data)) || d.SHA256 != hex.EncodeToString(sum[:]) {
 			t.Fatalf("record %v descriptor %+v", fm, d)
 		}
-		if !strings.HasSuffix(body, "\ncontent: "+id+"/"+tc.name+" (sha256 verified)\n") {
+		if !strings.HasSuffix(body, "\ncontent: "+filepath.Join(q, string(deliver.Quarantine), id, tc.name)+" (sha256 verified)\n") {
 			t.Fatalf("record body does not say where the content is:\n%s", body)
 		}
 		held := srv.Blob(p.channel, d.Blob)
@@ -121,7 +121,7 @@ func TestAttachmentTamperedKeepsNothing(t *testing.T) {
 	}
 
 	srv.SetBlob(p.channel, blobID, orig)
-	out = mustOK(t, "fetch", "--dir", p.hostDir, id)
+	out = mustOK(t, "fetch", "--dir", p.hostDir, filepath.Join(q, id+".md"))
 	if got, err := os.ReadFile(filepath.Join(q, id, "notes.txt")); err != nil || !bytes.Equal(got, data) || !strings.Contains(out, "fetched "+id) {
 		t.Fatalf("peer fetch: %v\n%s", err, out)
 	}

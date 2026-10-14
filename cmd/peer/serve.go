@@ -127,6 +127,7 @@ var errSpool = errors.New("spool entry does not open")
 // delivery on every channel.
 func (sv *server) start(ctx context.Context) error {
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
+		sv.withAttachment(e)
 		_, err := sv.birth(e)
 		if errors.Is(err, deliver.ErrRecord) || errors.Is(err, errSpool) {
 			fmt.Fprintf(sv.out, "dropped %s from the spool: %v\n", e.ID, err)
@@ -342,6 +343,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 			return err
 		}
 	}
+	c.sv.withAttachment(e)
 	if _, err := c.sv.birth(e); err != nil {
 		return err
 	}
@@ -453,11 +455,7 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 	}
 	_, agent := splitAddr(m.To)
 	place := deliver.Route(m.Kind, sv.p.accepts(agent))
-	body := m.Body
-	if isAttachment(m.Kind) {
-		body = sv.attachment(e.Channel, m)
-	}
-	path, born, err := deliver.Write(sv.dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: body})
+	path, born, err := deliver.Write(sv.dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body})
 	if err != nil {
 		return "", err
 	}

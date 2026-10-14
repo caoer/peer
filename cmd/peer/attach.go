@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
+	"github.com/caoer/peer/internal/store"
 )
 
 // runSendFile sends a doc or file message (design §3.5, §5.2): the file is
@@ -68,16 +70,26 @@ func runSendFile(ctx context.Context, warn io.Writer, dir, target, fromAgent, ki
 // isAttachment reports whether a kind carries its content as a blob.
 func isAttachment(kind string) bool { return kind == session.KindDoc || kind == session.KindFile }
 
-// attachment is a doc or file message's record body: the descriptor, then
-// one line saying where the content is or why it is not there. The content
-// is fetched, unwrapped and verified now and written beside the record, as
-// <deliver>/quarantine/<id>/<name>; a failure keeps nothing of it, and
-// peer fetch <id> tries again (the record stays as born). A record already
-// born — a replay — is left as it is and nothing is fetched.
-func (sv *server) attachment(channel string, m *session.Message) []byte {
-	if _, err := os.Stat(filepath.Join(sv.dir, string(deliver.Quarantine), m.ID+".md")); err == nil {
-		return m.Body
+// withAttachment composes a doc or file message's record body before its
+// birth — after the commit, so a crash mid-fetch replays from the spool: the
+// descriptor, then one line naming the content's local path or why it is
+// not there. The content is fetched, unwrapped and verified now and written
+// host-local as <deliver>/quarantine/<id>/<name>, wherever the record itself
+// is born; a failure keeps nothing of it, and peer fetch <id> tries again.
+// The spool entry on disk is untouched: a replay composes again.
+func (sv *server) withAttachment(e *store.Entry) {
+	m, err := session.UnmarshalMessage(e.Body)
+	if err != nil || !isAttachment(m.Kind) {
+		return // birth reports a body that does not open
 	}
+	m.Body = sv.attachment(e.Channel, m)
+	if b, err := json.Marshal(m); err == nil {
+		e.Body = b
+	}
+}
+
+// attachment is the record body for a doc or file message m.
+func (sv *server) attachment(channel string, m *session.Message) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	path, err := sv.fetchAttachment(ctx, channel, m.ID, m.Body)
@@ -86,14 +98,14 @@ func (sv *server) attachment(channel string, m *session.Message) []byte {
 		fmt.Fprintf(sv.out, "%s %s: blob not fetched: %v\n", m.Kind, m.ID, err)
 		return fmt.Appendf(body, "blob not fetched: %v; peer fetch %s tries again\n", err, m.ID)
 	}
-	rel, _ := filepath.Rel(filepath.Join(sv.dir, string(deliver.Quarantine)), path)
 	fmt.Fprintf(sv.out, "fetched %s %s → %s\n", m.Kind, m.ID, path)
-	return fmt.Appendf(body, "content: %s (sha256 verified)\n", filepath.ToSlash(rel))
+	return fmt.Appendf(body, "content: %s (sha256 verified)\n", path)
 }
 
 // fetchAttachment gets the blob a descriptor names from the channel it came
 // on, unwraps and verifies it, and writes it as <deliver>/quarantine/<id>/<name>
-// — never anywhere else. A file already there is kept.
+// — never anywhere else, never under a sessions root. A file already there is
+// kept and not fetched again. The path returned is absolute.
 func (sv *server) fetchAttachment(ctx context.Context, channel, id string, body []byte) (string, error) {
 	d, err := attach.Parse(body)
 	if err != nil {
@@ -101,6 +113,15 @@ func (sv *server) fetchAttachment(ctx context.Context, channel, id string, body 
 	}
 	if !deliver.ValidID(id) {
 		return "", fmt.Errorf("message id %q cannot name a directory", id)
+	}
+	base, err := filepath.Abs(sv.dir)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, string(deliver.Quarantine), id)
+	path := filepath.Join(dir, d.Name)
+	if _, err := os.Stat(path); err == nil {
+		return path, nil // fetched before: a replay, or a second host on this disk
 	}
 	r, err := roster.Load(ctx, sv.p.backend)
 	if err != nil {
@@ -127,11 +148,9 @@ func (sv *server) fetchAttachment(ctx context.Context, channel, id string, body 
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(sv.dir, string(deliver.Quarantine), id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, d.Name)
 	var rnd [4]byte
 	rand.Read(rnd[:])
 	tmp := filepath.Join(dir, ".fetch."+hex.EncodeToString(rnd[:])+".tmp")
@@ -147,7 +166,8 @@ func (sv *server) fetchAttachment(ctx context.Context, channel, id string, body 
 
 // cmdFetch fetches a quarantined doc or file message's content again — for
 // a record whose serve could not (the blob not yet there, the relay away).
-// The channel is the one whose pinned party sent it.
+// The channel is the one whose pinned party sent it; the content lands
+// host-local in <deliver>/quarantine/<id>/<name> as serve's would.
 func cmdFetch(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("fetch", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -156,17 +176,28 @@ func cmdFetch(args []string, stdout, stderr io.Writer) int {
 	if err := fl.Parse(args); err != nil {
 		return 2
 	}
-	if fl.NArg() != 1 || !deliver.ValidID(fl.Arg(0)) {
-		fmt.Fprintln(stderr, "usage: peer fetch [--dir D] [--deliver DIR] <message id>")
+	if fl.NArg() != 1 || fl.Arg(0) == "" {
+		fmt.Fprintln(stderr, "usage: peer fetch [--dir D] [--deliver DIR] <message id | record path>")
 		return 2
 	}
-	id := fl.Arg(0)
 	sv, err := openServer(*dirFlag, *deliverFlag, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "peer fetch: %v\n", err)
 		return 1
 	}
-	path, err := sv.refetch(context.Background(), id)
+	// The record is <deliver>/quarantine/<id>.md, or wherever the path given
+	// says — a fleet host births it under its UCC root.
+	id, record := fl.Arg(0), ""
+	if strings.HasSuffix(id, ".md") {
+		record, id = id, strings.TrimSuffix(filepath.Base(id), ".md")
+	} else {
+		record = filepath.Join(sv.dir, string(deliver.Quarantine), id+".md")
+	}
+	if !deliver.ValidID(id) {
+		fmt.Fprintf(stderr, "peer fetch: %q is not a message id\n", id)
+		return 2
+	}
+	path, err := sv.refetch(context.Background(), id, record)
 	if err != nil {
 		fmt.Fprintf(stderr, "peer fetch: %s: %v\n", id, err)
 		return 1
@@ -177,8 +208,8 @@ func cmdFetch(args []string, stdout, stderr io.Writer) int {
 
 // refetch reads the quarantine record for id and fetches its content from
 // the channel of the party that sent it.
-func (sv *server) refetch(ctx context.Context, id string) (string, error) {
-	rec, err := os.ReadFile(filepath.Join(sv.dir, string(deliver.Quarantine), id+".md"))
+func (sv *server) refetch(ctx context.Context, id, record string) (string, error) {
+	rec, err := os.ReadFile(record)
 	if err != nil {
 		return "", err
 	}

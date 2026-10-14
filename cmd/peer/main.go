@@ -69,7 +69,7 @@ commands:
   status    print every peer from the local store, and its roster page row
             [--dir D] [--json]
   fetch     fetch a quarantined doc or file's content again
-            [--dir D] [--deliver DIR] <message id>
+            [--dir D] [--deliver DIR] <message id | record path>
   version   print the version
 
 flags come before the name or link. config.json in the peer directory holds
