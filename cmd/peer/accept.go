@@ -19,9 +19,10 @@ import (
 
 // cmdAccept joins the channel an invite link names: pin the inviter's root
 // key, redeem the token, verify card #0, take a one-time prekey, run X3DH,
-// send this party's card as #1 inside the session, deposit prekeys, print
-// the verification code (design §3.4 step 2, §4). A refusal keeps nothing;
-// the inviter re-invites.
+// send this party's card as #1 inside the session with the accept proof
+// under the link secret, deposit prekeys, print the verification code and
+// this party's id (design §3.4 step 2, §4). A refusal keeps nothing; the
+// inviter re-invites.
 func cmdAccept(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("accept", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -39,14 +40,14 @@ func cmdAccept(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "peer accept: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "code %s\n", res.code)
+	fmt.Fprintf(stdout, "code %s  your id %s\n", res.code, res.self)
 	fmt.Fprintf(stdout, "joined %s (%s) on channel %s\n", res.name, res.party, res.channel)
-	fmt.Fprintf(stdout, "read the code back to %s in the chat the link came from; they confirm with it.\n", res.name)
+	fmt.Fprintf(stdout, "read the code and your id back to %s in the chat the link came from; they confirm with both.\n", res.name)
 	return 0
 }
 
 type acceptResult struct {
-	name, party, channel, code string
+	name, party, self, channel, code string
 }
 
 func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, error) {
@@ -93,7 +94,7 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 			return nil, err
 		}
 		if has {
-			return &acceptResult{name: cur.Name, party: party, channel: l.Channel, code: session.Code(l.Root, p.root.Public())}, nil
+			return acceptedResult(cur.Name, party, l, p), nil
 		}
 		name, guest = cur.Name, cur.Token
 	}
@@ -135,6 +136,10 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if err != nil {
 		return nil, err
 	}
+	hostIdentity, err := keys.ParseCurve(key.Identity)
+	if err != nil {
+		return nil, err
+	}
 	// The card is the inviter's and the link is spent: keep the row with its
 	// token before any of the work below can fail, so a failure there is
 	// resumable by another peer accept with the same link. A refusal above
@@ -159,6 +164,7 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	ch.PinRoot(l.Root)
 	ch.PinCard(signed)
 	ch.SetCursor(0)
+	ch.SetSecret(l.Secret)
 	s := session.New(ch, k)
 	if err := s.Establish(ctx, key, opk); err != nil {
 		return nil, fmt.Errorf("establish session: %w; refusing", err)
@@ -171,6 +177,9 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if err != nil {
 		return nil, err
 	}
+	// The proof rides on the first card message alone: the host checks it
+	// before any prompt, so a joiner without the secret never reaches a human.
+	m.Proof = session.EncodeProof(session.Proof(l.Secret, l.Channel, l.Root, p.root.Public(), hostIdentity, p.id.PublicKey()))
 	pks, err := session.NewPrekeys(ctx, k, prekeysPerChannel)
 	if err != nil {
 		return nil, err
@@ -190,7 +199,19 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if _, err := rc.PutPrekeys(ctx, l.Channel, guest, pks); err != nil {
 		return nil, fmt.Errorf("deposit prekeys: %w", err)
 	}
-	return &acceptResult{name: name, party: party, channel: l.Channel, code: session.Code(l.Root, p.root.Public())}, nil
+	return acceptedResult(name, party, l, p), nil
+}
+
+// acceptedResult is what accept prints: the code of this invite and the
+// guest's own id, read back together over the chat the link came on.
+func acceptedResult(name, party string, l invite.Link, p *party) *acceptResult {
+	return &acceptResult{
+		name:    name,
+		party:   party,
+		self:    keys.PartyID(p.root.Public()),
+		channel: l.Channel,
+		code:    session.Code(l.Channel, l.Root, p.root.Public(), l.Secret),
+	}
 }
 
 // relaysOf is the card's relay list: the party's own relay when it has one.

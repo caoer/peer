@@ -47,6 +47,10 @@ type channelRecord struct {
 	// Root is the peer's pinned root public key; Card its newest root-signed card.
 	Root []byte      `json:"root,omitempty"`
 	Card *signedCard `json:"card,omitempty"`
+	// Secret is the invite link's secret (design §4): set by invite on the
+	// host and by accept on the guest, the key of the accept proof and an
+	// input of the verification code. Nothing removes it.
+	Secret []byte `json:"secret,omitempty"`
 }
 
 type seenID struct {
@@ -164,6 +168,17 @@ func (c *Channel) Card() *card.Signed {
 func (c *Channel) PinCard(s *card.Signed) {
 	c.rec.Card = &signedCard{Body: append([]byte(nil), s.Body...), Sig: append([]byte(nil), s.Sig...)}
 }
+
+// Secret is the invite link's secret, nil before SetSecret.
+func (c *Channel) Secret() []byte {
+	if c.rec.Secret == nil {
+		return nil
+	}
+	return append([]byte(nil), c.rec.Secret...)
+}
+
+// SetSecret records the invite link's secret.
+func (c *Channel) SetSecret(secret []byte) { c.rec.Secret = append([]byte(nil), secret...) }
 
 // LoadSession is the libsignal session store: a fresh record for an address
 // without one, never nil.

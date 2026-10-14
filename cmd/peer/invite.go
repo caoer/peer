@@ -15,8 +15,9 @@ import (
 )
 
 // cmdInvite opens a channel for a peer: create it on the party's relay, put
-// the card as envelope #0, deposit one-time prekeys, print the link
-// (design §3.4 step 1, §4).
+// the card as envelope #0, deposit one-time prekeys, keep the link secret in
+// the channel record, print the link (design §3.4 step 1, §4). The link is
+// printed once and shown nowhere else.
 func cmdInvite(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("invite", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -38,7 +39,7 @@ func cmdInvite(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, link)
 	fmt.Fprintf(stdout, "send this link to %s over a channel you already trust; it is valid for %s and joins once.\n", name, invite.Validity)
-	fmt.Fprintf(stdout, "when %s reads back the 8-digit code, run: peer confirm %s --code <code>\n", name, name)
+	fmt.Fprintf(stdout, "when %s reads back the 8-digit code and their id, run: peer confirm %s --code <code>; it shows their id to compare\n", name, name)
 	return 0
 }
 
@@ -101,6 +102,22 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 	if _, err := rc.PutPrekeys(ctx, ch.ID, ch.HostToken, pks); err != nil {
 		return "", fmt.Errorf("deposit prekeys: %w", err)
 	}
+	// The link secret lives in the channel record, committed before the
+	// roster names the channel and before the link exists. A crash between
+	// here and the roster write leaves an orphan record; the next invite for
+	// the name mints a new channel.
+	secret, err := invite.NewSecret()
+	if err != nil {
+		return "", err
+	}
+	rec, err := p.store.Channel(ctx, ch.ID)
+	if err != nil {
+		return "", err
+	}
+	rec.SetSecret(secret)
+	if err := rec.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit channel record: %w", err)
+	}
 	err = roster.Update(ctx, p.backend, func(r *roster.Roster) error {
 		if cur := r.ByName(name); cur != nil && cur.State == roster.Confirmed {
 			return fmt.Errorf("%s is a confirmed peer already; pick another name", name)
@@ -111,7 +128,7 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 	if err != nil {
 		return "", err
 	}
-	link, err := invite.New(relayBase, ch.ID, ch.InviteToken, p.root.Public(), now)
+	link, err := invite.New(relayBase, ch.ID, ch.InviteToken, p.root.Public(), secret, now)
 	if err != nil {
 		return "", err
 	}

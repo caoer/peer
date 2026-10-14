@@ -25,7 +25,8 @@ import (
 
 const login = "zt:owner-secret"
 
-var codeRE = regexp.MustCompile(`(?m)^code ([0-9]{8})$`)
+// codeRE matches accept's code line: the 8-digit code and the guest's own id.
+var codeRE = regexp.MustCompile(`(?m)^code ([0-9]{8})  your id (ed25519:[A-Za-z0-9_-]{43})$`)
 
 // newDir is an initialised peer directory with the given config.json.
 func newDir(t *testing.T, cfg config) string {
@@ -128,15 +129,23 @@ func TestInviteAcceptConfirm(t *testing.T) {
 	if n := srv.Prekeys(l.Channel, "h2g"); n != prekeysPerChannel {
 		t.Fatalf("host deposited %d prekeys, want %d", n, prekeysPerChannel)
 	}
+	// The link secret is in the host's sealed channel record before the link exists.
+	_, hch0, _ := channelOf(t, hostDir, "ancan")
+	if hch0.Version() != 1 || !bytes.Equal(hch0.Secret(), l.Secret) {
+		t.Fatalf("host channel after invite: version %d, secret stored %v", hch0.Version(), bytes.Equal(hch0.Secret(), l.Secret))
+	}
 
 	out = mustOK(t, "accept", "--dir", guestDir, "--name", "zt", link)
 	m := codeRE.FindStringSubmatch(out)
 	if m == nil {
-		t.Fatalf("accept printed no code:\n%s", out)
+		t.Fatalf("accept printed no code line:\n%s", out)
 	}
 	code := m[1]
-	if code != session.Code(hostRoot.Public(), guestRoot.Public()) {
-		t.Fatal("printed code is not Code(inviter root, invitee root)")
+	if code != session.Code(l.Channel, hostRoot.Public(), guestRoot.Public(), l.Secret) {
+		t.Fatal("printed code is not Code(channel, inviter root, invitee root, secret)")
+	}
+	if m[2] != keys.PartyID(guestRoot.Public()) {
+		t.Fatalf("code line names %s, want the guest's own id", m[2])
 	}
 	if rows := srv.Envelopes(l.Channel, "g2h"); len(rows) != 1 || rows[0].Type != "prekey" {
 		t.Fatalf("after accept the relay holds %+v", rows)
@@ -148,14 +157,14 @@ func TestInviteAcceptConfirm(t *testing.T) {
 	if gpe.State != roster.Accepted || gpe.Side != roster.Guest || gpe.Channel != l.Channel || !relay.ValidToken(gpe.Token) {
 		t.Fatalf("guest roster %+v", gpe)
 	}
-	if !bytes.Equal(gch.Root(), hostRoot.Public()) || gch.Card() == nil || gch.Cursor() != 0 {
-		t.Fatalf("guest channel: root pinned %v, card %v, cursor %d", gch.Root() != nil, gch.Card() != nil, gch.Cursor())
+	if !bytes.Equal(gch.Root(), hostRoot.Public()) || gch.Card() == nil || gch.Cursor() != 0 || !bytes.Equal(gch.Secret(), l.Secret) {
+		t.Fatalf("guest channel: root pinned %v, card %v, cursor %d, secret stored %v", gch.Root() != nil, gch.Card() != nil, gch.Cursor(), bytes.Equal(gch.Secret(), l.Secret))
 	}
 
-	// A wrong code refuses and keeps nothing.
-	mustRefuse(t, "code does not match", "confirm", "--dir", hostDir, "--code", "00000000", "ancan")
+	// A wrong code refuses, names the peer's id, and keeps nothing.
+	mustRefuse(t, "code does not match for "+keys.PartyID(guestRoot.Public()), "confirm", "--dir", hostDir, "--code", "00000000", "ancan")
 	_, hch, hpe := channelOf(t, hostDir, "ancan")
-	if hch.Version() != 0 || hch.Card() != nil || hch.Root() != nil || hpe.State != roster.Invited {
+	if hch.Version() != hch0.Version() || hch.Card() != nil || hch.Root() != nil || hpe.State != roster.Invited {
 		t.Fatalf("refused confirm kept state: version %d card %v root %v state %s", hch.Version(), hch.Card() != nil, hch.Root() != nil, hpe.State)
 	}
 	if rows := srv.Envelopes(l.Channel, "h2g"); len(rows) != 1 {
@@ -311,10 +320,10 @@ func TestConfirmRefusesIdentityMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code := session.Code(hostRoot.Public(), ancanRoot.Public())
+	code := session.Code(l.Channel, hostRoot.Public(), ancanRoot.Public(), l.Secret)
 	mustRefuse(t, "not the card's", "confirm", "--dir", hostDir, "--code", code, "ancan")
 	_, hch, hpe := channelOf(t, hostDir, "ancan")
-	if hch.Version() != 0 || hch.Card() != nil || hpe.State != roster.Invited {
+	if hch.Version() != 1 || hch.Card() != nil || hpe.State != roster.Invited {
 		t.Fatalf("refused confirm kept state: version %d card %v state %s", hch.Version(), hch.Card() != nil, hpe.State)
 	}
 }
@@ -325,9 +334,10 @@ func TestAcceptRefusesBadLinks(t *testing.T) {
 	_, rc, base := relaytest.Start(t, login)
 	ch, _ := rc.Create(context.Background(), login)
 	root, _ := keys.GenerateRoot()
-	l, _ := invite.New(base, ch.ID, ch.InviteToken, root.Public(), time.Now().Add(-invite.Validity-time.Hour))
+	secret, _ := invite.NewSecret()
+	l, _ := invite.New(base, ch.ID, ch.InviteToken, root.Public(), secret, time.Now().Add(-invite.Validity-time.Hour))
 	mustRefuse(t, "expired", "accept", "--dir", guestDir, l.String())
 	// A link whose root does not sign envelope #0 is refused after the join.
-	l, _ = invite.New(base, ch.ID, ch.InviteToken, root.Public(), time.Now())
+	l, _ = invite.New(base, ch.ID, ch.InviteToken, root.Public(), secret, time.Now())
 	mustRefuse(t, "not the inviter's card", "accept", "--dir", guestDir, l.String())
 }

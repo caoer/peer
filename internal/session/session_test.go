@@ -1,10 +1,12 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,18 +111,91 @@ func record(seq int64, e envelope.Envelope) relay.Record {
 
 func TestCode(t *testing.T) {
 	a, b := newParty(t), newParty(t)
-	code := session.Code(a.root.Public(), b.root.Public())
+	const ch = "0123456789abcdef0123456789abcdef"
+	s1, s2 := bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 16)
+	code := session.Code(ch, a.root.Public(), b.root.Public(), s1)
 	if !regexp.MustCompile(`^[0-9]{8}$`).MatchString(code) {
 		t.Fatalf("code %q is not 8 digits", code)
 	}
-	if code != session.Code(a.root.Public(), b.root.Public()) {
-		t.Fatal("code is not deterministic")
+	if code != session.Code(ch, a.root.Public(), b.root.Public(), s1) {
+		t.Fatal("code is not a function of its inputs")
 	}
-	if code == session.Code(b.root.Public(), a.root.Public()) {
+	// The same pair on two invites: a new secret, a new channel, a new code.
+	if code == session.Code(ch, a.root.Public(), b.root.Public(), s2) {
+		t.Fatal("code ignores the link secret")
+	}
+	if code == session.Code("fedcba9876543210fedcba9876543210", a.root.Public(), b.root.Public(), s1) {
+		t.Fatal("code ignores the channel")
+	}
+	if code == session.Code(ch, b.root.Public(), a.root.Public(), s1) {
 		t.Fatal("code ignores who invited")
 	}
-	if code == session.Code(a.root.Public(), newParty(t).root.Public()) {
+	if code == session.Code(ch, a.root.Public(), newParty(t).root.Public(), s1) {
 		t.Fatal("code ignores the invitee's root")
+	}
+	if !session.CodeMatches(code, code) || session.CodeMatches(code, "00000000") || session.CodeMatches(code[:7], code) {
+		t.Fatal("CodeMatches")
+	}
+}
+
+// The accept proof binds every input; CheckProof admits the exact proof and
+// refuses an absent, malformed, mis-sized or different one.
+func TestProof(t *testing.T) {
+	a, b := newParty(t), newParty(t)
+	const ch = "0123456789abcdef0123456789abcdef"
+	secret := bytes.Repeat([]byte{7}, 16)
+	ai, bi := a.id.PublicKey(), b.id.PublicKey()
+	proof := session.Proof(secret, ch, a.root.Public(), b.root.Public(), ai, bi)
+	if len(proof) != session.ProofSize {
+		t.Fatalf("proof is %d bytes", len(proof))
+	}
+	if !bytes.Equal(proof, session.Proof(secret, ch, a.root.Public(), b.root.Public(), ai, bi)) {
+		t.Fatal("proof is not a function of its inputs")
+	}
+	others := map[string][]byte{
+		"secret":            session.Proof(bytes.Repeat([]byte{8}, 16), ch, a.root.Public(), b.root.Public(), ai, bi),
+		"channel":           session.Proof(secret, "fedcba9876543210fedcba9876543210", a.root.Public(), b.root.Public(), ai, bi),
+		"roots swapped":     session.Proof(secret, ch, b.root.Public(), a.root.Public(), ai, bi),
+		"invitee root":      session.Proof(secret, ch, a.root.Public(), newParty(t).root.Public(), ai, bi),
+		"identities":        session.Proof(secret, ch, a.root.Public(), b.root.Public(), bi, ai),
+		"invitee identity":  session.Proof(secret, ch, a.root.Public(), b.root.Public(), ai, newParty(t).id.PublicKey()),
+		"inviter identity":  session.Proof(secret, ch, a.root.Public(), b.root.Public(), newParty(t).id.PublicKey(), bi),
+		"secret and inputs": session.Proof(nil, ch, a.root.Public(), b.root.Public(), ai, bi),
+	}
+	for name, other := range others {
+		if bytes.Equal(proof, other) {
+			t.Errorf("proof ignores %s", name)
+		}
+	}
+	m := &session.Message{Proof: session.EncodeProof(proof)}
+	if err := session.CheckProof(m, proof); err != nil {
+		t.Fatalf("exact proof: %v", err)
+	}
+	bad := map[string]string{
+		"absent":       "",
+		"other":        session.EncodeProof(others["secret"]),
+		"31 bytes":     session.EncodeProof(proof[:31]),
+		"33 bytes":     session.EncodeProof(append(append([]byte(nil), proof...), 0)),
+		"padded":       session.EncodeProof(proof) + "=",
+		"std alphabet": "+" + session.EncodeProof(proof)[1:],
+		"not base64":   "!" + session.EncodeProof(proof)[1:],
+	}
+	for name, p := range bad {
+		if err := session.CheckProof(&session.Message{Proof: p}, proof); !errors.Is(err, session.ErrProof) {
+			t.Errorf("%s: %v, want ErrProof", name, err)
+		}
+	}
+	// The field survives the message round trip and is absent when empty.
+	msg, _ := session.NewMessage("a", "b", session.KindCard, []byte("x"))
+	b1, _ := msg.Marshal()
+	if strings.Contains(string(b1), `"proof"`) {
+		t.Fatal("empty proof is written")
+	}
+	msg.Proof = session.EncodeProof(proof)
+	b2, _ := msg.Marshal()
+	got, err := session.UnmarshalMessage(b2)
+	if err != nil || got.Proof != msg.Proof {
+		t.Fatalf("proof round trip: %q %v", got.Proof, err)
 	}
 }
 

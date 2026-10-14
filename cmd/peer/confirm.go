@@ -18,11 +18,17 @@ import (
 	"github.com/caoer/peer/internal/store"
 )
 
-// cmdConfirm finishes an invite on the host's side: pull the guest's card
-// (#1) and decrypt it, check that the identity key the session was built
-// with is the card's (design §3.4), check the 8-digit code (§4), pin the
-// card, then send this party's card with details inside the session. A
-// refusal keeps nothing; the host re-invites.
+// stdin is where confirm reads the code when --code is absent.
+var stdin io.Reader = os.Stdin
+
+// cmdConfirm finishes an invite on the host's side, in this order: pull the
+// guest's card (#1) and decrypt it, verify the card's root signature, check
+// that the identity key the session was built with is the card's (design
+// §3.4), verify the accept proof under the link secret (§4) — whoever
+// joined without the secret is refused here, before any human step — show
+// the peer's party id and take the 8-digit code (--code, else stdin), pin
+// the card, then send this party's card with details inside the session. A
+// refusal before the pin commits nothing; the host re-invites.
 func cmdConfirm(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("confirm", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -37,16 +43,18 @@ func cmdConfirm(args []string, stdout, stderr io.Writer) int {
 	}
 	name := fl.Arg(0)
 	code := strings.TrimSpace(*codeFlag)
-	if code == "" {
-		fmt.Fprintf(stderr, "code from %s: ", name)
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil && line == "" {
-			fmt.Fprintf(stderr, "peer confirm: no code given\n")
-			return 2
+	ask := func(party string) (string, error) {
+		if code != "" {
+			return code, nil
 		}
-		code = strings.TrimSpace(line)
+		fmt.Fprintf(stderr, "code from %s (%s), as read back over the chat the link went on: ", name, party)
+		line, err := bufio.NewReader(stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return "", errors.New("no code given")
+		}
+		return strings.TrimSpace(line), nil
 	}
-	res, err := runConfirm(context.Background(), *dirFlag, name, code)
+	res, err := runConfirm(context.Background(), *dirFlag, name, ask)
 	if err != nil {
 		fmt.Fprintf(stderr, "peer confirm: %v\n", err)
 		return 1
@@ -67,7 +75,9 @@ type confirmResult struct {
 	keysErr        error
 }
 
-func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, error) {
+// runConfirm asks the code through ask, called with the peer's party id
+// once the proof has verified and never before.
+func runConfirm(ctx context.Context, dir, name string, ask func(party string) (string, error)) (*confirmResult, error) {
 	dir, err := peerDir(dir)
 	if err != nil {
 		return nil, err
@@ -101,7 +111,7 @@ func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, er
 	// pinned card and the session while the row still says invited, and the
 	// pull below would find a message where the card was. Finish that confirm
 	// rather than refuse it; the guest's token is spent and cannot be retried.
-	if done, err := confirmLanded(ctx, p, ch, code); err != nil {
+	if done, err := confirmLanded(ctx, p, ch, pe.Channel, ask); err != nil {
 		return nil, err
 	} else if done {
 		if err := confirmRoster(ctx, p, name, pe.Channel); err != nil {
@@ -133,8 +143,23 @@ func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, er
 	if err := s.CheckIdentity(c); err != nil {
 		return nil, fmt.Errorf("%w: the party in the session is not the card's; refusing, re-invite", err)
 	}
-	if want := session.Code(p.root.Public(), root); code != want {
-		return nil, errors.New("the code does not match: refusing, re-invite")
+	// The proof: the session's identity keys, both roots and the channel
+	// under the link secret. Checked before the human sees anything.
+	remote, ok := ch.RemoteIdentity(session.Addr)
+	if !ok {
+		return nil, fmt.Errorf("%w: no session identity; refusing, re-invite", session.ErrIdentity)
+	}
+	want := session.Proof(ch.Secret(), pe.Channel, p.root.Public(), root, p.id.PublicKey(), remote)
+	if err := session.CheckProof(m, want); err != nil {
+		return nil, fmt.Errorf("%w: whoever joined does not hold the link's secret; refusing, re-invite", err)
+	}
+	party := keys.PartyID(root)
+	code, err := ask(party)
+	if err != nil {
+		return nil, err
+	}
+	if !session.CodeMatches(code, session.Code(pe.Channel, p.root.Public(), root, ch.Secret())) {
+		return nil, fmt.Errorf("the code does not match for %s: refusing, re-invite", party)
 	}
 	ch.PinRoot(root)
 	ch.PinCard(signed)
@@ -146,7 +171,6 @@ func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, er
 	if err != nil {
 		return nil, err
 	}
-	party := keys.PartyID(root)
 	dm, err := session.CardMessage(p.partyID(), party, own)
 	if err != nil {
 		return nil, err
@@ -174,10 +198,12 @@ func runConfirm(ctx context.Context, dir, name, code string) (*confirmResult, er
 }
 
 // confirmLanded reports whether this confirm's own work is on the channel
-// already: the peer's root and card pinned and a session built. The code the
-// caller typed must be the one those two root keys give — a wrong code never
-// finishes a confirm.
-func confirmLanded(ctx context.Context, p *party, ch *store.Channel, code string) (bool, error) {
+// already: the peer's root and card pinned and a session built. That state
+// exists only past the proof check of the confirm that made it — nothing
+// else pins a card on a host channel before the roster says confirmed — so
+// the proof has verified; the code is asked again and must be this
+// channel's — a wrong code never finishes a confirm.
+func confirmLanded(ctx context.Context, p *party, ch *store.Channel, channel string, ask func(party string) (string, error)) (bool, error) {
 	if ch.Root() == nil || ch.Card() == nil {
 		return false, nil
 	}
@@ -185,8 +211,13 @@ func confirmLanded(ctx context.Context, p *party, ch *store.Channel, code string
 	if err != nil || !has {
 		return false, err
 	}
-	if code != session.Code(p.root.Public(), ch.Root()) {
-		return false, errors.New("the code does not match: refusing, re-invite")
+	party := keys.PartyID(ch.Root())
+	code, err := ask(party)
+	if err != nil {
+		return false, err
+	}
+	if !session.CodeMatches(code, session.Code(channel, p.root.Public(), ch.Root(), ch.Secret())) {
+		return false, fmt.Errorf("the code does not match for %s: refusing, re-invite", party)
 	}
 	return true, nil
 }

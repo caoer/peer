@@ -26,6 +26,10 @@ type Message struct {
 	Kind string    `json:"kind"`
 	At   time.Time `json:"at"`
 	Body []byte    `json:"body"`
+	// Proof is the accept proof (design §4), base64url without padding:
+	// present on the guest's first card message alone, not part of the
+	// signed card bytes, ignored on every other message. CheckProof reads it.
+	Proof string `json:"proof,omitempty"`
 }
 
 // The v1 message kinds (design §3.5). A vendor kind is "vnd.<party>.<name>".

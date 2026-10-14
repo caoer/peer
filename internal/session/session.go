@@ -1,7 +1,8 @@
 // Package session runs the Signal session of one channel over the store's
 // snapshots: X3DH from the peer's card and a one-time prekey, encrypt and
 // decrypt with the libsignal Double Ratchet, the plaintext message format,
-// the send order of plan decision 5 and the 8-digit verification code.
+// the send order of plan decision 5, the accept proof and the 8-digit
+// verification code.
 //
 // Identity trust is the pinned card's: the channel's IsTrustedIdentity
 // (package store) admits only the identity keys the peer's root-signed card
@@ -13,7 +14,10 @@ package session
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -315,17 +319,68 @@ func NewPrekeys(ctx context.Context, k *store.Keys, n int) ([]relay.Prekey, erro
 }
 
 // codeInfo labels the verification code hash; a new value is a new code.
-const codeInfo = "peer verification code v1"
+const codeInfo = "peer verification code v2"
 
-// Code is the channel's 8-digit verification code (design §4): both root
-// keys, inviter first, hashed under a fixed label. The invitee prints it
-// after accept and reads it back over the channel the link came on; the
-// inviter types it at confirm.
-func Code(inviter, invitee ed25519.PublicKey) string {
+// Code is the channel's 8-digit verification code (design §4): the channel
+// id, both root keys (inviter first) and the invite link's secret, hashed
+// under a fixed label — a new invite is a new code, and nothing public
+// derives it. The invitee prints it after accept and reads it back, with its
+// party id, over the chat the link came on; the inviter types it at confirm.
+// Every input is raw bytes: channelID as its 32 hex characters, the roots as
+// 32-byte Ed25519 keys, secret as its 16 decoded bytes.
+func Code(channelID string, inviter, invitee ed25519.PublicKey, secret []byte) string {
 	h := sha256.New()
 	h.Write([]byte(codeInfo))
+	h.Write([]byte(channelID))
 	h.Write(inviter)
 	h.Write(invitee)
+	h.Write(secret)
 	n := binary.BigEndian.Uint64(h.Sum(nil)[:8]) % 100000000
 	return fmt.Sprintf("%08d", n)
+}
+
+// CodeMatches compares the typed code with the channel's in constant time.
+func CodeMatches(typed, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(typed), []byte(want)) == 1
+}
+
+// proofInfo labels the accept proof; a new value is a new proof.
+const proofInfo = "peer accept proof v1"
+
+// ProofSize is the accept proof's length in bytes.
+const ProofSize = sha256.Size
+
+// ErrProof is a first card message whose accept proof is absent or wrong:
+// whoever joined does not hold the link's secret.
+var ErrProof = errors.New("session: the accept proof does not verify")
+
+// Proof is the guest's accept proof (design §4): HMAC-SHA256 under the link
+// secret over the channel id, both roots and both session identity keys, so
+// a party that joined with the token alone — the relay operator — cannot
+// present it. The identity keys are the Curve25519 points the session was
+// built with: on the host its own and Channel.RemoteIdentity; on the guest
+// card #0's current key and its own. Inputs are raw bytes as in Code.
+func Proof(secret []byte, channelID string, inviterRoot, inviteeRoot ed25519.PublicKey, inviterIdentity, inviteeIdentity [32]byte) []byte {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(proofInfo))
+	mac.Write([]byte(channelID))
+	mac.Write(inviterRoot)
+	mac.Write(inviteeRoot)
+	mac.Write(inviterIdentity[:])
+	mac.Write(inviteeIdentity[:])
+	return mac.Sum(nil)
+}
+
+// EncodeProof is the proof as the message carries it: base64url, no padding.
+func EncodeProof(proof []byte) string { return base64.RawURLEncoding.EncodeToString(proof) }
+
+// CheckProof verifies the proof m carries against want. A proof that is
+// absent, does not decode strictly, has another length or differs is
+// ErrProof; the comparison is constant-time.
+func CheckProof(m *Message, want []byte) error {
+	got, err := base64.RawURLEncoding.Strict().DecodeString(m.Proof)
+	if err != nil || len(got) != ProofSize || !hmac.Equal(got, want) {
+		return ErrProof
+	}
+	return nil
 }
