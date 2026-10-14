@@ -345,8 +345,17 @@ func TestMessageFormat(t *testing.T) {
 	if _, err := session.NewMessage("a", "b", "x-custom", nil); !errors.Is(err, session.ErrKind) {
 		t.Fatalf("x- kind: %v", err)
 	}
-	if _, err := session.NewMessage("a", "b", "vnd.zt.ping", nil); err != nil {
+	// A vendor kind is vnd.<party id>.<name>: the shape a delivery record can
+	// carry. A shorter vendor label, or one with a character the record's
+	// frontmatter line cannot hold, is not a kind.
+	party := keys.PartyID(newParty(t).root.Public())
+	if _, err := session.NewMessage("a", "b", "vnd."+party+".ping", nil); err != nil {
 		t.Fatalf("vendor kind: %v", err)
+	}
+	for _, bad := range []string{"vnd.zt.ping", "vnd." + party + ".do thing", "vnd." + party, "vnd."} {
+		if _, err := session.NewMessage("a", "b", bad, nil); !errors.Is(err, session.ErrKind) {
+			t.Errorf("kind %q: %v, want ErrKind", bad, err)
+		}
 	}
 	if _, err := session.UnmarshalMessage([]byte(`{"v":1,"kind":"text"}`)); err == nil {
 		t.Fatal("message without id accepted")

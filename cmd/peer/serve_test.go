@@ -258,8 +258,9 @@ func TestSendServeBothWays(t *testing.T) {
 func TestServeQuarantine(t *testing.T) {
 	_, _, base := relaytest.Start(t, login)
 	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	vendor := "vnd." + p.guestParty + ".ping"
 	ids := map[string]string{}
-	for kind, to := range map[string]string{"doc": "zt/advisor", "file": "zt/advisor", "question": "zt/advisor", "vnd.ancan.ping": "zt", "text": "zt/advisor"} {
+	for kind, to := range map[string]string{"doc": "zt/advisor", "file": "zt/advisor", "question": "zt/advisor", vendor: "zt", "text": "zt/advisor"} {
 		ids[kind], _ = sendOK(t, p.guestDir, "--kind", kind, "--text", "body of "+kind, to)
 	}
 	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
@@ -273,7 +274,7 @@ func TestServeQuarantine(t *testing.T) {
 			t.Errorf("serve did not report %s quarantined:\n%s", kind, out)
 		}
 	}
-	for _, kind := range []string{"vnd.ancan.ping", "text"} {
+	for _, kind := range []string{vendor, "text"} {
 		if _, ok := in[ids[kind]]; !ok {
 			t.Errorf("%s is not in the inbox; serve said:\n%s", kind, out)
 		}

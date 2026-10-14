@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/caoer/peer/internal/deliver"
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
@@ -85,7 +86,15 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 		return nil, errors.New("a card goes out with peer card publish, not peer send")
 	}
 	if !session.ValidKind(kind) {
-		return nil, fmt.Errorf("%w %q", session.ErrKind, kind)
+		return nil, fmt.Errorf("%w %q: a vendor kind is vnd.<party id>.<name>", session.ErrKind, kind)
+	}
+	// The receiver refuses an address its record cannot carry, so refuse it
+	// here: nothing is kept and nothing reaches the peer's spool.
+	if agent != "" && !deliver.ValidAgent(agent) {
+		return nil, fmt.Errorf("agent %q in %q is not an agent id: letters, digits, dot, dash, underscore, at most 64", agent, target)
+	}
+	if fromAgent != "" && !deliver.ValidAgent(fromAgent) {
+		return nil, fmt.Errorf("--from %q is not an agent id: letters, digits, dot, dash, underscore, at most 64", fromAgent)
 	}
 	dir, err := peerDir(dir)
 	if err != nil {

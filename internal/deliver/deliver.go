@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -58,29 +59,61 @@ type Record struct {
 	Body           []byte
 }
 
+// The record grammar: what a field can be and still sit on its frontmatter
+// line. It is the one border — peer send checks what it builds, serve checks
+// what it decrypted, Bytes checks what it writes — so a message that reaches
+// the spool can always be born.
 var (
-	addrRE = regexp.MustCompile(`^ed25519:[A-Za-z0-9_-]{43}(/[!-.0-~]{1,64})?$`)
-	kindRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
-	idRE   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	partyRE  = regexp.MustCompile(`^ed25519:[A-Za-z0-9_-]{43}$`)
+	agentRE  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	kindRE   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+	vendorRE = regexp.MustCompile(`^vnd\.ed25519:[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{1,64}$`)
+	idRE     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
+
+// ErrRecord is a record whose own fields cannot be written. No retry fixes
+// it, so a replay drops the entry instead of failing (serve's start).
+var ErrRecord = errors.New("deliver: record cannot be written")
 
 // ValidID reports whether a message id can name the record's file.
 func ValidID(id string) bool { return idRE.MatchString(id) }
 
+// ValidAgent reports whether agent can be an address's agent segment.
+func ValidAgent(agent string) bool { return agentRE.MatchString(agent) }
+
+// ValidAddr reports whether s is a protocol address — a party id, with an
+// optional agent segment — that a record can carry.
+func ValidAddr(s string) bool {
+	party, agent, hasAgent := strings.Cut(s, "/")
+	if !partyRE.MatchString(party) {
+		return false
+	}
+	return !hasAgent || ValidAgent(agent)
+}
+
+// ValidVendorKind reports whether kind is a vendor kind in the one shape a
+// record carries: vnd.<party id>.<name> (design §3.5).
+func ValidVendorKind(kind string) bool { return vendorRE.MatchString(kind) }
+
 // Bytes is the record as written; a field that cannot sit on its
-// frontmatter line refuses.
+// frontmatter line refuses with ErrRecord. A kind holding the party id's
+// colon is written as a quoted scalar.
 func (r Record) Bytes() ([]byte, error) {
-	if !addrRE.MatchString(r.From) {
-		return nil, fmt.Errorf("deliver: from %q is not a protocol address", r.From)
+	if !ValidAddr(r.From) {
+		return nil, fmt.Errorf("%w: from %q is not a protocol address", ErrRecord, r.From)
 	}
-	if !addrRE.MatchString(r.To) {
-		return nil, fmt.Errorf("deliver: to %q is not a protocol address", r.To)
+	if !ValidAddr(r.To) {
+		return nil, fmt.Errorf("%w: to %q is not a protocol address", ErrRecord, r.To)
 	}
-	if !kindRE.MatchString(r.Kind) {
-		return nil, fmt.Errorf("deliver: kind %q cannot sit on a frontmatter line", r.Kind)
+	if !kindRE.MatchString(r.Kind) && !ValidVendorKind(r.Kind) {
+		return nil, fmt.Errorf("%w: kind %q cannot sit on a frontmatter line", ErrRecord, r.Kind)
+	}
+	kind := r.Kind
+	if strings.ContainsRune(kind, ':') {
+		kind = `"` + kind + `"`
 	}
 	b := fmt.Appendf(nil, "---\nfrom: %s\nto: %s\nkind: %s\nverified: true\nat: %s\n---\n",
-		r.From, r.To, r.Kind, r.At.UTC().Format(time.RFC3339Nano))
+		r.From, r.To, kind, r.At.UTC().Format(time.RFC3339Nano))
 	return append(b, r.Body...), nil
 }
 
@@ -90,7 +123,7 @@ func (r Record) Bytes() ([]byte, error) {
 // the first and keeps it: born is false and the file is untouched.
 func Write(dir string, place Place, id string, r Record) (path string, born bool, err error) {
 	if !ValidID(id) {
-		return "", false, fmt.Errorf("deliver: message id %q cannot name a file", id)
+		return "", false, fmt.Errorf("%w: message id %q cannot name a file", ErrRecord, id)
 	}
 	data, err := r.Bytes()
 	if err != nil {

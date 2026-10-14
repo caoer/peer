@@ -2,6 +2,7 @@ package deliver
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,9 +48,43 @@ func TestRecordBytes(t *testing.T) {
 		{From: "ancan/legal", To: zt, Kind: "text"},
 		{From: ancan, To: zt + "\nkind: ack", Kind: "text"},
 		{From: ancan, To: zt, Kind: "vnd.x y"},
+		{From: ancan, To: zt, Kind: "vnd.ed25519:" + strings.Repeat("C", 43) + ".do thing"},
+		{From: ancan, To: "ed25519:" + strings.Repeat("B", 43) + "/legal team", Kind: "text"},
+		{From: ancan, To: "ed25519:" + strings.Repeat("B", 43) + "/a/b", Kind: "text"},
+		{From: "ed25519:" + strings.Repeat("A", 43) + "/" + strings.Repeat("x", 65), To: zt, Kind: "text"},
 	} {
-		if _, err := bad.Bytes(); err == nil {
-			t.Errorf("%+v: written", bad)
+		if _, err := bad.Bytes(); !errors.Is(err, ErrRecord) {
+			t.Errorf("%+v: %v, want ErrRecord", bad, err)
+		}
+	}
+}
+
+// The documented vendor kind — vnd.<party id>.<name>, so it holds the party
+// id's colon — is a record the writer can write, as a quoted scalar.
+func TestRecordBytesVendorKind(t *testing.T) {
+	kind := "vnd.ed25519:" + strings.Repeat("C", 43) + ".ping"
+	if !ValidVendorKind(kind) {
+		t.Fatalf("%q is not a vendor kind", kind)
+	}
+	b, err := Record{From: ancan, To: zt, Kind: kind, At: time.Now(), Body: []byte("x")}.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "\nkind: \""+kind+"\"\n") {
+		t.Fatalf("record does not carry the kind as a quoted scalar:\n%s", b)
+	}
+}
+
+func TestValidAddr(t *testing.T) {
+	party := "ed25519:" + strings.Repeat("A", 43)
+	for _, good := range []string{party, party + "/legal", party + "/legal.team_2-x"} {
+		if !ValidAddr(good) {
+			t.Errorf("ValidAddr(%q) = false", good)
+		}
+	}
+	for _, bad := range []string{"", "ancan", "ancan/legal", party + "x", party + "/", party + "/a b", party + "/a/b", party + "/" + strings.Repeat("x", 65)} {
+		if ValidAddr(bad) {
+			t.Errorf("ValidAddr(%q) = true", bad)
 		}
 	}
 }

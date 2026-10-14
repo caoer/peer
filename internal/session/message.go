@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/caoer/peer/internal/deliver"
 	"github.com/caoer/peer/internal/envelope"
 )
 
@@ -48,10 +48,10 @@ var kinds = map[string]bool{
 // ErrKind is a message kind outside the v1 set and not a vendor kind.
 var ErrKind = errors.New("session: unknown message kind")
 
-// ValidKind reports whether kind is a v1 kind or a vendor kind.
-func ValidKind(kind string) bool {
-	return kinds[kind] || (strings.HasPrefix(kind, "vnd.") && len(kind) > len("vnd."))
-}
+// ValidKind reports whether kind is a v1 kind or a vendor kind. The vendor
+// branch is the delivery record's grammar — vnd.<party id>.<name> — so a
+// kind this admits is one the receiver can write on a frontmatter line.
+func ValidKind(kind string) bool { return kinds[kind] || deliver.ValidVendorKind(kind) }
 
 // NewMessage makes a message with a fresh id, stamped now.
 func NewMessage(from, to, kind string, body []byte) (*Message, error) {

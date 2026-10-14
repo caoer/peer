@@ -108,13 +108,23 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 	return &server{p: p, spool: spool, dir: deliverTo, out: out}, nil
 }
 
-// start finishes what a crash cut: outbox puts, then spool births.
+// errSpool is a spool entry whose bytes are not a message: every replay
+// would fail on it the same way.
+var errSpool = errors.New("spool entry does not open")
+
+// start finishes what a crash cut: outbox puts, then spool births. An entry
+// that can never be born — its own address, kind or id refuses — is dropped
+// with its reason, so one such entry cannot stop delivery on every channel.
 func (sv *server) start(ctx context.Context) error {
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
 	}
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
 		_, err := sv.birth(e)
+		if errors.Is(err, deliver.ErrRecord) || errors.Is(err, errSpool) {
+			fmt.Fprintf(sv.out, "dropped %s from the spool: %v\n", e.ID, err)
+			return nil
+		}
 		return err
 	})
 }
@@ -269,9 +279,17 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	return c.sv.spool.Remove(e)
 }
 
-// checkAddress is the border: from names the channel's party, to names
-// this party, and the id can name the record's file.
+// checkAddress is the border, before the spool and the commit: from and to
+// are addresses a record can carry, from names the channel's party, to names
+// this party, and the id can name the record's file. A message that passes it
+// can be born, so a committed spool entry never wedges a later start.
 func (c *channelServe) checkAddress(m *session.Message) error {
+	if !deliver.ValidAddr(m.From) {
+		return fmt.Errorf("from %q is not a protocol address", m.From)
+	}
+	if !deliver.ValidAddr(m.To) {
+		return fmt.Errorf("to %q is not a protocol address", m.To)
+	}
 	if from, _ := splitAddr(m.From); from != keys.PartyID(c.ch.Root()) {
 		return fmt.Errorf("from %q is not the channel's party", m.From)
 	}
@@ -365,7 +383,7 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 func (sv *server) birth(e *store.Entry) (string, error) {
 	m, err := session.UnmarshalMessage(e.Body)
 	if err != nil {
-		return "", fmt.Errorf("spool %s: %w", e.ID, err)
+		return "", fmt.Errorf("%w: %v", errSpool, err)
 	}
 	_, agent := splitAddr(m.To)
 	place := deliver.Route(m.Kind, sv.p.accepts(agent))
