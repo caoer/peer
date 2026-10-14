@@ -23,7 +23,7 @@ import (
 
 // Beside init's three files, the peer directory holds:
 const (
-	configFile = "config.json" // the party's relay, owner login, agents, details, state, deliver
+	configFile = "config.json" // the party's relay, owner login, agents, details, state, deliver, roster
 	stateDir   = "state"       // the file store backend, unless config names another state
 	outboxDir  = "outbox"      // the send outbox (a store.Journal)
 	spoolDir   = "spool"       // the serve spool (a store.Journal)
@@ -52,6 +52,8 @@ type config struct {
 	// Deliver is the directory serve delivers into — inbox/<id>.md and
 	// quarantine/<id>.md under it. Absent, it is <dir>/deliver.
 	Deliver string `json:"deliver,omitempty"`
+	// Roster is the private roster page serve keeps current (status.go).
+	Roster rosterConfig `json:"roster,omitempty"`
 }
 
 // stateConfig names the state backend: Dir for the file backend, or

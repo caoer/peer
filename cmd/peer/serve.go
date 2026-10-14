@@ -19,6 +19,7 @@ import (
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
+	"github.com/caoer/peer/internal/status"
 	"github.com/caoer/peer/internal/store"
 )
 
@@ -46,6 +47,10 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 	sv, err := openServer(*dirFlag, *deliverFlag, stdout)
 	if err != nil {
+		fmt.Fprintf(stderr, "peer serve: %v\n", err)
+		return 1
+	}
+	if err := sv.openRoster(*every); err != nil {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1
 	}
@@ -80,6 +85,10 @@ type server struct {
 	spool *store.Journal
 	dir   string
 	out   io.Writer
+	// beat is the serve interval and page the roster page, nil without one
+	// (status.go).
+	beat time.Duration
+	page *status.Page
 	// Test hooks, nil in production: beforeCommit runs once the spool entry
 	// is written and before the CAS commit; beforeBirth once the commit
 	// landed and before the record is born.
@@ -149,6 +158,7 @@ func (sv *server) round(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("%s: %w", pe.Name, err))
 		}
 	}
+	sv.writeRoster(ctx)
 	return errors.Join(errs...)
 }
 
@@ -335,6 +345,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	if _, err := c.sv.birth(e); err != nil {
 		return err
 	}
+	c.sv.noteIn(ctx, c.ch.Name(), rec.Seq, m.At, m.Kind)
 	return c.sv.spool.Remove(e)
 }
 

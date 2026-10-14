@@ -147,8 +147,10 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 		var putErr *session.PutError
 		switch {
 		case err == nil:
+			p.noteOut(ctx, warn, pe.Channel, m.At)
 			return &sendResult{id: m.ID, to: to, kind: kind, seq: rcpt.Seq}, nil
 		case errors.As(err, &putErr):
+			p.noteOut(ctx, warn, pe.Channel, m.At)
 			return &sendResult{id: m.ID, to: to, kind: kind, putErr: putErr.Err}, nil
 		case errors.Is(err, store.ErrConflict) && try < sendTries:
 			// Another host advanced the session: re-encrypt from its state.

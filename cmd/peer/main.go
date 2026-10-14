@@ -35,6 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSend(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "status":
+		return cmdStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -60,10 +62,13 @@ commands:
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
   serve     pull every channel, decrypt, deliver into inbox/ or quarantine/
             [--dir D] [--deliver DIR] [--once] [--every 30s]
+  status    print every peer from the local store, and its roster page row
+            [--dir D] [--json]
   version   print the version
 
 flags come before the name or link. config.json in the peer directory holds
-relay, login, agents, details, state (dir, or page + slug + login) and
-deliver.
+relay, login, agents, details, state (dir, or page + slug + login),
+deliver and roster (page + slug + login: the private roster page serve
+writes each round).
 `)
 }
