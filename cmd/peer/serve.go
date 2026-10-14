@@ -171,6 +171,9 @@ func (sv *server) round(ctx context.Context) error {
 		return err
 	}
 	sv.p.timelineRound(sv.out)
+	if sv.seats != nil {
+		sv.retryServices()
+	}
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
 	}
@@ -696,6 +699,9 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 	_, agent := splitAddr(m.To)
 	dir, place := sv.dir, deliver.Route(m.Kind, sv.p.accepts(agent))
 	if sv.seats != nil {
+		if row, ok := sv.serviceRow(m); ok {
+			return "", sv.toService(row, m, e.Body)
+		}
 		if dir, place, err = sv.uccPlace(m); err != nil {
 			return "", err
 		}

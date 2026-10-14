@@ -13,7 +13,8 @@ import (
 const sess = "year=2026/month=10/14-09-agent-protocol-design"
 
 // The fixture is the first real map: two seats in the protocol session, the
-// human, a service.
+// human, born in the session of the advisor position that relays to him, and
+// a service.
 func TestParse(t *testing.T) {
 	b, err := os.ReadFile("testdata/seats.md")
 	if err != nil {
@@ -30,7 +31,7 @@ func TestParse(t *testing.T) {
 	for _, want := range []Row{
 		{Label: "leader", Kind: Seat, Session: sess, Seat: sess + "/rosters/leader-peer-v1", Accepts: seat},
 		{Label: "cli", Kind: Seat, Session: sess, Seat: sess + "/rosters/worker-cli", Accepts: seat},
-		{Label: "zt", Kind: Human, Accepts: []string{"text", "question", "answer"}},
+		{Label: "zt", Kind: Human, Session: sess, Seat: sess + "/rosters/advisor-agent-protocol-design", Accepts: []string{"text", "question", "answer"}},
 		{Label: "hook", Kind: Service, URL: "https://example.net/peer/hook", Accepts: []string{"text"}},
 	} {
 		got, ok := m.Row(want.Label)
@@ -74,13 +75,17 @@ func TestParseRefuses(t *testing.T) {
 	seat := "[[" + sess + "/rosters/leader-peer-v1]]"
 	for _, c := range []struct{ name, text, reason string }{
 		{"no table", "# Seats\n\nnothing here\n", "no table"},
-		{"no separator", "| label | to | accepts |\n| leader | human | text |\n", "separator"},
-		{"missing column", "| label | to |\n|---|---|\n| leader | human |\n", "no accepts column"},
-		{"bad label", row("the leader", "human", "text"), `label "the leader" is not an agent id`},
-		{"duplicate", row("leader", "human", "text") + "| leader | human | text |\n", `label "leader" appears twice`},
+		{"no separator", "| label | to | accepts |\n| leader | " + seat + " | text |\n", "separator"},
+		{"missing column", "| label | to |\n|---|---|\n| leader | " + seat + " |\n", "no accepts column"},
+		{"bad label", row("the leader", seat, "text"), `label "the leader" is not an agent id`},
+		{"duplicate", row("leader", seat, "text") + "| leader | " + seat + " | text |\n", `label "leader" appears twice`},
+		// A human row names the seat that relays to the person.
+		{"bare human", row("zt", "human", "text"), "none of"},
+		{"human not a seat", row("zt", "human [["+sess+"/advisor]]", "text"), "is not a seat"},
 		{"to none", row("leader", "leader-peer-v1", "text"), "none of"},
-		{"bad service", row("hook", "service ftp://x/y", "text"), "not an http or https URL"},
-		{"service no host", row("hook", "service https:///y", "text"), "not an http or https URL"},
+		{"bad service", row("hook", "service ftp://x/y", "text"), "not an https URL"},
+		{"http service", row("hook", "service http://example.net/hook", "text"), "not an https URL"},
+		{"service no host", row("hook", "service https:///y", "text"), "not an https URL"},
 		{"seat without rosters", row("leader", "[["+sess+"/leader-peer-v1]]", "text"), "is not a seat"},
 		{"seat escaping", row("leader", "[[../"+sess+"/rosters/leader-peer-v1]]", "text"), "is not a seat"},
 		// A pipe splits the cell — an alias has no place in a table.

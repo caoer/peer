@@ -34,9 +34,10 @@ func uccRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for n, body := range map[string]string{
-		"INTENT.md":                 "---\ntype: intent\nsession: 14-09-agent-protocol-design\n---\n# Intent\n",
-		"rosters/leader-peer-v1.md": "---\ntype: roster\nrole: leader\n---\n# leader-peer-v1\n",
-		"rosters/worker-cli.md":     "---\ntype: roster\nrole: worker\n---\n# worker-cli\n",
+		"INTENT.md":                                "---\ntype: intent\nsession: 14-09-agent-protocol-design\n---\n# Intent\n",
+		"rosters/leader-peer-v1.md":                "---\ntype: roster\nrole: leader\n---\n# leader-peer-v1\n",
+		"rosters/worker-cli.md":                    "---\ntype: roster\nrole: worker\n---\n# worker-cli\n",
+		"rosters/advisor-agent-protocol-design.md": "---\ntype: roster\nrole: advisor\n---\n# advisor-agent-protocol-design\n",
 	} {
 		if err := os.WriteFile(filepath.Join(sd, filepath.FromSlash(n)), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -87,11 +88,13 @@ func bornAnywhere(t *testing.T, root, id string) bool {
 
 // A fleet host serves by the map: the card's agents are its rows; text and
 // task to a seat birth the inbox record under the seat's session with
-// exactly the five keys and the protocol addresses; doc, file and a kind
-// outside the row's accepts go to the quarantine beside it; an unmapped
-// label, a human row, a service row and a bare party address are refused at
-// the border with their reason, consumed, and born nowhere — not under the
-// root, not in the local delivery directory.
+// exactly the five keys and the protocol addresses; a question to the human
+// (zt) is a record in the inbox of the position his row names, to: still
+// <party>/zt (the plan's U16 verify, up to the advisor's inbox); doc, file
+// and a kind outside the row's accepts go to the quarantine beside it; an
+// unmapped label and a bare party address are refused at the border with
+// their reason, consumed, and born nowhere — not under the root, not in the
+// local delivery directory.
 func TestServeUCCDelivery(t *testing.T) {
 	_, _, base := relaytest.Start(t, login)
 	root := uccRoot(t)
@@ -115,7 +118,7 @@ func TestServeUCCDelivery(t *testing.T) {
 	for _, c := range []struct{ name, kind, to string }{
 		{"text", "text", "zt/leader"}, {"task", "task", "zt/leader"},
 		{"doc", "doc", "zt/leader"}, {"file", "file", "zt/leader"}, {"vendor", vendor, "zt/leader"},
-		{"nobody", "text", "zt/nobody"}, {"human", "text", "zt/zt"}, {"service", "text", "zt/hook"}, {"bare", "text", "zt"},
+		{"nobody", "text", "zt/nobody"}, {"human", "question", "zt/zt"}, {"bare", "text", "zt"},
 	} {
 		if isAttachment(c.kind) {
 			f := filepath.Join(t.TempDir(), c.name+".md")
@@ -147,8 +150,12 @@ func TestServeUCCDelivery(t *testing.T) {
 			t.Errorf("serve did not report %s quarantined:\n%s", n, out)
 		}
 	}
-	if len(in) != 2 || len(q) != 3 {
+	if len(in) != 3 || len(q) != 3 {
 		t.Fatalf("%d in the inbox, %d quarantined", len(in), len(q))
+	}
+	hm, horder, hbody := parseRecord(t, in[ids["human"]])
+	if !reflect.DeepEqual(horder, []string{"from", "to", "kind", "verified", "at"}) || hm["to"] != p.hostParty+"/zt" || hm["kind"] != "question" || hbody != "body of human" {
+		t.Errorf("the question to zt in the advisor's session inbox: %v %v %q", horder, hm, hbody)
 	}
 	fm, order, body := parseRecord(t, in[ids["text"]])
 	if want := []string{"from", "to", "kind", "verified", "at"}; !reflect.DeepEqual(order, want) {
@@ -159,10 +166,8 @@ func TestServeUCCDelivery(t *testing.T) {
 	}
 
 	for n, reason := range map[string]string{
-		"nobody":  `unmapped label "nobody": refused`,
-		"human":   "not delivered to " + p.hostParty + "/zt: human/service rows are not served by this version (U16)",
-		"service": "not delivered to " + p.hostParty + "/hook: human/service rows are not served by this version (U16)",
-		"bare":    `unmapped label "": refused`,
+		"nobody": `unmapped label "nobody": refused`,
+		"bare":   `unmapped label "": refused`,
 	} {
 		if !strings.Contains(out, "skip ancan #") || !strings.Contains(out, reason) {
 			t.Errorf("serve did not refuse %s with %q:\n%s", n, reason, out)
@@ -174,10 +179,10 @@ func TestServeUCCDelivery(t *testing.T) {
 	if n := len(records(t, deliverDirOf(p.hostDir), deliver.Inbox)) + len(records(t, deliverDirOf(p.hostDir), deliver.Quarantine)); n != 0 {
 		t.Errorf("%d records in the local delivery directory, want none under ucc", n)
 	}
-	// Every record consumed — the guest's card at #1 and the nine messages.
+	// Every record consumed — the guest's card at #1 and the eight messages.
 	_, hch, _ := channelOf(t, p.hostDir, "ancan")
-	if hch.Cursor() != 10 {
-		t.Errorf("cursor %d, want 10", hch.Cursor())
+	if hch.Cursor() != 9 {
+		t.Errorf("cursor %d, want 9", hch.Cursor())
 	}
 	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); strings.Contains(out, "delivered") || strings.Contains(out, "skip") {
 		t.Errorf("a second serve did something:\n%s", out)

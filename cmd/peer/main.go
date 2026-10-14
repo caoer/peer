@@ -84,6 +84,12 @@ commands:
 flags come before the name or link. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),
 deliver, roster (page + slug + login: the private roster page serve writes
-each round) and keys (signedPrekeyEvery, oneTimeMin).
+each round), keys (signedPrekeyEvery, oneTimeMin) and ucc (root, seats,
+serviceRetries: delivery by the fleet's seat map — a seat row's message,
+and a human row's, is an inbox record in the session of the seat the row
+names; a service row's is an HTTPS POST of the record as JSON to the row's
+URL, tried again each round up to serviceRetries, default 20; the POST
+carries no signature: the URL is the service's secret, and verified: true
+means peer verified the sender).
 `)
 }

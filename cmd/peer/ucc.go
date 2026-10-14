@@ -30,6 +30,9 @@ type uccConfig struct {
 	Root string `json:"root"`
 	// Seats is the map's path under the root; default peers/seats.md.
 	Seats string `json:"seats,omitempty"`
+	// ServiceRetries is how many rounds a failed service POST is tried
+	// again before it is quarantined locally (service.go); default 20.
+	ServiceRetries int `json:"serviceRetries,omitempty"`
 }
 
 const seatsFile = "peers/seats.md"
@@ -80,8 +83,10 @@ func (sv *server) loadSeats() error {
 var errWait = errors.New("not on this root")
 
 // seatRow is the map lookup for a message's to — the label after the party.
-// A label the map does not carry is refused; a human or service row is
-// refused until U16 serves it.
+// A label the map does not carry is refused. A human row is delivered as a
+// seat row into the session of the seat that relays to the person, to:
+// still the human's address; that seat decides what the person reads. A
+// service row is delivered by its callback (service.go).
 func (sv *server) seatRow(to string) (seats.Row, error) {
 	_, label := splitAddr(to)
 	if label == "" {
@@ -90,9 +95,6 @@ func (sv *server) seatRow(to string) (seats.Row, error) {
 	row, ok := sv.seats.Row(label)
 	if !ok {
 		return seats.Row{}, fmt.Errorf("unmapped label %q: refused", label)
-	}
-	if row.Kind != seats.Seat {
-		return row, fmt.Errorf("not delivered to %s: human/service rows are not served by this version (U16)", to)
 	}
 	return row, nil
 }
@@ -105,10 +107,10 @@ func (sv *server) sessionDir(row seats.Row) string {
 // uccBorder is the map lookup at the border (§ 5 § Address), after the
 // address check and before the spool and the commit: a refused label is
 // consumed with its reason and born nowhere; a seat whose session is not on
-// this root waits.
+// this root waits. A service row has no session to wait for.
 func (sv *server) uccBorder(m *session.Message) error {
 	row, err := sv.seatRow(m.To)
-	if err != nil {
+	if err != nil || row.Kind == seats.Service {
 		return err
 	}
 	if _, err := os.Stat(sv.sessionDir(row)); err != nil {

@@ -11,7 +11,7 @@
 //	| label  | to                                                                         | accepts                       |
 //	|--------|----------------------------------------------------------------------------|-------------------------------|
 //	| leader | [[year=2026/month=10/14-09-agent-protocol-design/rosters/leader-peer-v1]]  | text task question answer ack |
-//	| zt     | human                                                                      | text question answer          |
+//	| zt     | human [[year=2026/month=10/14-09-agent-protocol-design/rosters/advisor-agent-protocol-design]] | text question answer |
 //	| hook   | service https://example.net/peer/hook                                      | text                          |
 //
 // The columns:
@@ -19,7 +19,10 @@
 //   - label: an agent id, [A-Za-z0-9._-]{1,64}, unique in the map.
 //   - to: a seat — [[<session>/rosters/<role>-<slug>]], the roster record's
 //     path under the root, so the seat's session is the part before
-//     /rosters/ — or human, or service <url> with an http or https URL.
+//     /rosters/ — or human [[<session>/rosters/<role>-<slug>]], a person,
+//     whose messages are born in the session of the seat that relays to
+//     them (UCC's amendment; a bare human names no session and is refused),
+//     or service <url> with an https URL.
 //   - accepts: one or more of the eight kinds — text task question answer doc
 //     file card ack — separated by spaces.
 //
@@ -47,7 +50,7 @@ type Kind int
 
 const (
 	Seat    Kind = iota + 1 // [[<session>/rosters/<role>-<slug>]]
-	Human                   // human
+	Human                   // human [[<session>/rosters/<role>-<slug>]]
 	Service                 // service <url>
 )
 
@@ -67,8 +70,9 @@ func (k Kind) String() string {
 type Row struct {
 	Label string
 	Kind  Kind
-	// Seat rows: Session is the session's path under the root, Seat the
-	// roster record's path under it (the wikilink's text).
+	// Seat rows, and human rows for the seat that relays to the person:
+	// Session is the session's path under the root, Seat the roster
+	// record's path under it (the wikilink's text).
 	Session, Seat string
 	// Service rows: the callback URL.
 	URL string
@@ -195,24 +199,27 @@ func parseRow(label, to, accepts string) (Row, error) {
 		return r, fmt.Errorf("%w: label %q is not an agent id: letters, digits, dot, dash, underscore, at most 64", ErrMap, label)
 	}
 	switch {
-	case to == "human":
-		r.Kind = Human
 	case strings.HasPrefix(to, "service "):
 		raw := strings.TrimSpace(strings.TrimPrefix(to, "service "))
 		u, err := url.Parse(raw)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return r, fmt.Errorf("%w: label %q: service %q is not an http or https URL", ErrMap, label, raw)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return r, fmt.Errorf("%w: label %q: service %q is not an https URL", ErrMap, label, raw)
 		}
 		r.Kind, r.URL = Service, raw
-	case strings.HasPrefix(to, "[[") && strings.HasSuffix(to, "]]"):
-		inner := strings.TrimSuffix(strings.TrimPrefix(to, "[["), "]]")
-		sm := seatRE.FindStringSubmatch(inner)
-		if sm == nil || strings.Contains("/"+inner+"/", "/../") {
-			return r, fmt.Errorf("%w: label %q: %q is not a seat, [[<session>/rosters/<role>-<slug>]]", ErrMap, label, to)
+	case strings.HasPrefix(to, "human [["):
+		var err error
+		r.Kind = Human
+		if r.Session, r.Seat, err = parseSeat(label, strings.TrimSpace(strings.TrimPrefix(to, "human "))); err != nil {
+			return r, err
 		}
-		r.Kind, r.Session, r.Seat = Seat, sm[1], inner
+	case strings.HasPrefix(to, "[[") && strings.HasSuffix(to, "]]"):
+		var err error
+		r.Kind = Seat
+		if r.Session, r.Seat, err = parseSeat(label, to); err != nil {
+			return r, err
+		}
 	default:
-		return r, fmt.Errorf("%w: label %q: to %q is none of [[<session>/rosters/<role>-<slug>]], human, service <url>", ErrMap, label, to)
+		return r, fmt.Errorf("%w: label %q: to %q is none of [[<session>/rosters/<role>-<slug>]], human [[<session>/rosters/<role>-<slug>]], service <url>", ErrMap, label, to)
 	}
 	seen := map[string]bool{}
 	for _, k := range strings.Fields(accepts) {
@@ -228,6 +235,19 @@ func parseRow(label, to, accepts string) (Row, error) {
 		return r, fmt.Errorf("%w: label %q accepts nothing: name one or more of %s", ErrMap, label, strings.Join(Kinds, " "))
 	}
 	return r, nil
+}
+
+// parseSeat reads a seat wikilink: its session and the roster record's path.
+func parseSeat(label, link string) (session, seat string, err error) {
+	inner, ok := strings.CutPrefix(link, "[[")
+	if ok {
+		inner, ok = strings.CutSuffix(inner, "]]")
+	}
+	sm := seatRE.FindStringSubmatch(inner)
+	if !ok || sm == nil || strings.Contains("/"+inner+"/", "/../") {
+		return "", "", fmt.Errorf("%w: label %q: %q is not a seat, [[<session>/rosters/<role>-<slug>]]", ErrMap, label, link)
+	}
+	return sm[1], inner, nil
 }
 
 func known(kind string) bool {

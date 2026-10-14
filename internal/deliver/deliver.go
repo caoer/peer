@@ -3,8 +3,8 @@
 // quarantine, and the record that is the delivery (UCC design v2 § 5
 // § Intake). Receiver types do not branch here: every type is served into
 // the delivery directory — codex, kimi and grok as generic (plan U8),
-// claude-code without UCC, human and service until U16 — and the UCC seat
-// map and wake are U11.
+// claude-code without UCC — and the UCC seat map and wake are U11, its
+// service callback U16.
 package deliver
 
 import (
