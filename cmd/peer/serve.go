@@ -174,6 +174,9 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 	if err := c.load(ctx); err != nil {
 		return err
 	}
+	// asked is the cursor a gap was already pulled again at, so one bad page
+	// costs one extra pull and never loops.
+	asked := int64(-2)
 	for {
 		recs, err := c.rc.Pull(ctx, pe.Channel, pe.Token, c.ch.Cursor())
 		if err != nil {
@@ -181,6 +184,19 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 		}
 		if len(recs) == 0 {
 			return nil
+		}
+		// A page that starts past the cursor's next seq would carry the
+		// cursor over the envelopes between, which Pull never asks for again
+		// — and the ratchet is still holding their message keys. So a gap is
+		// asked for once more before it is believed; a gap the relay answers
+		// twice is the relay's own and is reported, not hidden.
+		if cur := c.ch.Cursor(); recs[0].Seq > cur+1 {
+			if asked != cur {
+				asked = cur
+				fmt.Fprintf(sv.out, "%s: the relay answered #%d with the cursor at #%d; asking again\n", pe.Name, recs[0].Seq, cur)
+				continue
+			}
+			fmt.Fprintf(sv.out, "%s: #%d to #%d are not on the relay; going on from #%d\n", pe.Name, cur+1, recs[0].Seq-1, recs[0].Seq)
 		}
 		for _, rec := range recs {
 			err := c.receive(ctx, rec)
