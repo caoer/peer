@@ -57,6 +57,9 @@ type config struct {
 	// UCC names the fleet's sessions root and the seat map on it (ucc.go):
 	// with it, Agents come from the map and serve delivers by it.
 	UCC *uccConfig `json:"ucc,omitempty"`
+	// Timelines are the peers' collaboration pages serve and send write
+	// each message on (timeline.go), by peer name.
+	Timelines map[string]timelineConfig `json:"timelines,omitempty"`
 }
 
 // stateConfig names the state backend: Dir for the file backend, or
@@ -95,6 +98,8 @@ type party struct {
 	backend store.Backend
 	store   *store.Store
 	outbox  *store.Journal
+	// tl is the current round of timeline writes (timeline.go).
+	tl *timelineState
 }
 
 // openParty reads the identity, the root key and config when present, and
@@ -199,7 +204,10 @@ func (p *party) replayOutbox(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("%w: %v", store.ErrPermanent, err)
 		}
-		_, err = relay.New(pe.Relay, nil).Put(ctx, e.Channel, pe.Token, envelope.Envelope{Type: typ, Body: e.Body})
+		rcpt, err := relay.New(pe.Relay, nil).Put(ctx, e.Channel, pe.Token, envelope.Envelope{Type: typ, Body: e.Body})
+		if err == nil {
+			p.timelineSent(ctx, e.ID, rcpt.Seq)
+		}
 		if err != nil && permanentPut(err) {
 			return fmt.Errorf("%w: %v", store.ErrPermanent, err)
 		}

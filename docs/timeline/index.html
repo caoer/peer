@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>peer · channel timeline</title>
+<!--
+  A channel's decrypted message timeline (peer design §8, the collaboration
+  page). peer serve and peer send write one peer-timeline@1 record per message
+  under tl.<channel>.<in|out>.<seq>; this page lists them and shows them by
+  their at stamp, newest last. Publish it private, with the data store on:
+
+    page-publish index.html --private --data on --no-bundle --title 'peer timeline <name>'
+
+  then name the slug in the peer's config.json "timelines" entry.
+  #c=<channel id> limits the list to one channel; without it every tl. record
+  on the page is listed. Every string from a record reaches the DOM through
+  textContent.
+-->
+<style>
+  :root { color-scheme: light dark; --muted: #8a8f98; --line: #8a8f9833; --in: #2f7d4f; --out: #3a63b8; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  #state { color: var(--muted); font-size: .9rem; }
+  ol { list-style: none; padding: 0; margin: 1.5rem 0; }
+  li { border-top: 1px solid var(--line); padding: .75rem 0; }
+  .meta { display: flex; gap: .75rem; flex-wrap: wrap; font-size: .85rem; color: var(--muted); }
+  .dir { font-weight: 600; }
+  .dir.in { color: var(--in); }
+  .dir.out { color: var(--out); }
+  .kind { font-family: ui-monospace, monospace; }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .25rem; }
+  .file { font-family: ui-monospace, monospace; font-size: .9rem; }
+  button { font: inherit; }
+</style>
+<header>
+  <h1>Channel timeline</h1>
+  <span id="state">loading…</span>
+  <button id="reload" type="button">Reload</button>
+</header>
+<ol id="list"></ol>
+<script>
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const SLUG = (() => {
+    const p = location.pathname.split("/").filter(Boolean);
+    return p[0] === "a" && p[1] ? decodeURIComponent(p[1]) : null;
+  })();
+  const CHANNEL_RE = /^[a-z0-9]{1,100}$/;
+  const SCHEMA = "peer-timeline@1";
+  const MAX_PAGES = 200;
+
+  function prefix() {
+    const c = new URLSearchParams(location.hash.slice(1)).get("c");
+    return c && CHANNEL_RE.test(c) ? "tl." + c + "." : "tl.";
+  }
+
+  async function listAll(pre) {
+    const out = [];
+    let after = null;
+    for (let pages = 0; pages < MAX_PAGES; pages++) {
+      // prefix and values ride on every request; a cursor alone lists the whole store.
+      let url = "/d/" + encodeURIComponent(SLUG) + "?prefix=" + encodeURIComponent(pre) + "&values=1";
+      if (after) url += "&after=" + encodeURIComponent(after);
+      const res = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
+      let body = null;
+      try { body = await res.json(); } catch (e) { /* reported below */ }
+      const items = body && (body.keys || body.items);
+      if (!res.ok || !Array.isArray(items)) {
+        throw new Error((body && body.error) || "the listing answered " + res.status);
+      }
+      out.push(...items);
+      after = typeof body.cursor === "string" && body.cursor ? body.cursor : null;
+      if (!after) break;
+    }
+    return out;
+  }
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function bodyOf(r) {
+    const b = r.body;
+    if (typeof b === "string") return el("div", "body", b);
+    if (b && b.event === "card") return el("div", "body", "card exchanged");
+    if (b && typeof b.name === "string") {
+      const mime = typeof b.mime === "string" && b.mime ? " · " + b.mime : "";
+      return el("div", "body file", b.name + " · " + Number(b.size) + " bytes" + mime + " · sha256 " + String(b.sha256));
+    }
+    return el("div", "body", JSON.stringify(b));
+  }
+
+  function render(records) {
+    const list = $("list");
+    list.replaceChildren();
+    for (const r of records) {
+      const li = el("li");
+      const meta = el("div", "meta");
+      const dir = r.dir === "out" ? "out" : "in";
+      meta.append(
+        el("span", "dir " + dir, dir === "in" ? "received" : "sent"),
+        el("span", "kind", String(r.kind)),
+        el("time", "", new Date(r.at).toLocaleString()),
+        el("span", "", String(r.from) + " → " + String(r.to)),
+      );
+      li.append(meta, bodyOf(r));
+      list.append(li);
+    }
+  }
+
+  async function load() {
+    if (!SLUG) { $("state").textContent = "not served from a page"; return; }
+    $("state").textContent = "loading…";
+    try {
+      const items = await listAll(prefix());
+      const records = [];
+      for (const it of items) {
+        const v = it && it.value;
+        if (!v || v.schema !== SCHEMA || !v.data || typeof v.data !== "object") continue;
+        if (typeof v.data.at !== "string" || isNaN(Date.parse(v.data.at))) continue;
+        records.push(v.data);
+      }
+      records.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || String(a.id).localeCompare(String(b.id)));
+      render(records);
+      $("state").textContent = records.length + (records.length === 1 ? " message" : " messages") + " · " + new Date().toLocaleTimeString();
+    } catch (e) {
+      $("state").textContent = "could not list: " + e.message;
+    }
+  }
+
+  $("reload").addEventListener("click", load);
+  window.addEventListener("hashchange", load);
+  setInterval(load, 30000);
+  load();
+})();
+</script>
+</html>

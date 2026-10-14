@@ -22,6 +22,7 @@ import (
 	"github.com/caoer/peer/internal/session"
 	"github.com/caoer/peer/internal/status"
 	"github.com/caoer/peer/internal/store"
+	"github.com/caoer/peer/internal/timeline"
 )
 
 // cmdServe pulls every channel with a session, decrypts, and delivers
@@ -134,12 +135,17 @@ var errSpool = errors.New("spool entry does not open")
 // refuses — is dropped with its reason, so one such entry cannot stop
 // delivery on every channel.
 func (sv *server) start(ctx context.Context) error {
+	sv.p.timelineRound(sv.out)
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
+		plain := e.Body
 		sv.withAttachment(e)
 		_, err := sv.birth(e)
 		if errors.Is(err, deliver.ErrRecord) || errors.Is(err, errSpool) {
 			fmt.Fprintf(sv.out, "dropped %s from the spool: %v\n", e.ID, err)
 			return nil
+		}
+		if err == nil {
+			sv.timelineSpooled(ctx, e, plain)
 		}
 		return err
 	})
@@ -154,6 +160,7 @@ func (sv *server) round(ctx context.Context) error {
 	if err := sv.loadSeats(); err != nil {
 		return err
 	}
+	sv.p.timelineRound(sv.out)
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
 	}
@@ -326,7 +333,11 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 		return c.commit(ctx, rec)
 	}
 	if m.Kind == session.KindCard {
-		return c.receiveCard(ctx, s, rec, m)
+		if err := c.receiveCard(ctx, s, rec, m); err != nil {
+			return err
+		}
+		c.sv.p.writeTimeline(ctx, c.pe.Name, c.ch.Name(), timeline.In, rec.Seq, m)
+		return nil
 	}
 	plain, err := m.Marshal()
 	if err != nil {
@@ -369,6 +380,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 		return err
 	}
 	c.sv.noteIn(ctx, c.ch.Name(), rec.Seq, m.At, m.Kind)
+	c.sv.p.writeTimeline(ctx, c.pe.Name, c.ch.Name(), timeline.In, rec.Seq, m)
 	return c.sv.spool.Remove(e)
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
 	"github.com/caoer/peer/internal/store"
+	"github.com/caoer/peer/internal/timeline"
 )
 
 // cmdSend encrypts one message for a peer and puts it on the channel in
@@ -116,6 +117,7 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 	if err != nil {
 		return nil, err
 	}
+	p.timelineRound(warn)
 	if err := p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(warn, "peer send: outbox: %v\n", err)
 	}
@@ -142,9 +144,11 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 		switch {
 		case err == nil:
 			p.noteOut(ctx, warn, pe.Channel, m.At)
+			p.writeTimeline(ctx, pe.Name, pe.Channel, timeline.Out, rcpt.Seq, m)
 			return &sendResult{id: m.ID, to: to, kind: kind, seq: rcpt.Seq}, nil
 		case errors.As(err, &putErr):
 			p.noteOut(ctx, warn, pe.Channel, m.At)
+			p.timelinePending(pe, m)
 			return &sendResult{id: m.ID, to: to, kind: kind, putErr: putErr.Err}, nil
 		case errors.Is(err, store.ErrConflict) && try < sendTries:
 			// Another host advanced the session: re-encrypt from its state.
