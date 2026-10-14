@@ -206,20 +206,34 @@ func (c *channelServe) load(ctx context.Context) (err error) {
 
 // commit writes the channel under CAS, then the party keys when a PreKey
 // message spent a one-time prekey — after, so a crash between leaves a
-// spare key, never a session without its key. A keys commit another host
-// beat leaves the spent key as a spare and reloads.
+// spare key, never a session without its key.
 func (c *channelServe) commit(ctx context.Context, rec relay.Record) error {
 	if err := c.ch.Commit(ctx); err != nil {
 		return err
 	}
+	c.commitKeys(ctx, rec)
+	return nil
+}
+
+// commitKeys writes the party keys when a PreKey message spent a one-time
+// prekey. It runs after the channel commit landed, so its failure costs a
+// spare key and nothing else: the spent key stays available, which is what a
+// keys conflict already leaves. It is reported, never returned — the message
+// whose channel commit landed is this host's to deliver (decision 5: a
+// duplicate at most, never a loss).
+func (c *channelServe) commitKeys(ctx context.Context, rec relay.Record) {
 	if rec.Env.Type != envelope.Prekey {
-		return nil
+		return
 	}
 	err := c.k.Commit(ctx)
 	if errors.Is(err, store.ErrConflict) {
+		// Another host committed the keys: its record is the truth, and the
+		// key this message spent stays a spare there too.
 		c.k, err = c.sv.p.keys(ctx)
 	}
-	return err
+	if err != nil {
+		fmt.Fprintf(c.sv.out, "%s #%d: party keys not committed (%v); the spent one-time prekey stays a spare\n", c.pe.Name, rec.Seq, err)
+	}
 }
 
 // receive handles one pulled record. A record that does not open — at or
@@ -261,13 +275,23 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 			return err
 		}
 	}
-	if err := c.commit(ctx, rec); err != nil {
-		c.sv.spool.Remove(e)
+	// Only a conflict says the commit kept nothing: another host's state is
+	// the truth, so this entry is this host's to drop and the message comes
+	// again from the committed cursor. Any other error may have landed the
+	// write — the pages backend answers after the PUT went out — so the entry
+	// stays on disk for ReplaySpool's seen check, which births it once.
+	if err := c.ch.Commit(ctx); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			c.sv.spool.Remove(e)
+		}
 		return err
 	}
 	if err := c.sv.spool.MarkCommitted(e); err != nil {
 		return err
 	}
+	// The channel commit landed: cursor and seen id are durable, so nothing
+	// after this may cost the message.
+	c.commitKeys(ctx, rec)
 	if c.sv.beforeBirth != nil {
 		if err := c.sv.beforeBirth(e); err != nil {
 			return err
@@ -353,11 +377,7 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 		if err != nil {
 			return err
 		}
-		if rec.Env.Type == envelope.Prekey {
-			if err := c.k.Commit(ctx); err != nil && !errors.Is(err, store.ErrConflict) {
-				return err
-			}
-		}
+		c.commitKeys(ctx, rec)
 	}
 	err = roster.Update(ctx, c.sv.p.backend, func(r *roster.Roster) error {
 		cur := r.ByName(c.pe.Name)
