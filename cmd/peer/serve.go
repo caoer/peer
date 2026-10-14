@@ -453,7 +453,11 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 	}
 	_, agent := splitAddr(m.To)
 	place := deliver.Route(m.Kind, sv.p.accepts(agent))
-	path, born, err := deliver.Write(sv.dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body})
+	body := m.Body
+	if isAttachment(m.Kind) {
+		body = sv.attachment(e.Channel, m)
+	}
+	path, born, err := deliver.Write(sv.dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: body})
 	if err != nil {
 		return "", err
 	}

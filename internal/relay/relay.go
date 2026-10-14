@@ -31,9 +31,14 @@ const (
 	maxAnswer        = 8 << 20  // a pull page holds ~4 MiB of body text
 	maxSmallAnswer   = 64 << 10 // every other answer
 	maxLanding       = 256 << 10
+	// MaxBlob is the relay's cap on one blob, in ciphertext bytes (64 MiB).
+	MaxBlob = 64 << 20
+	// blobTimeout bounds one blob put or get: a whole 64 MiB at 1 MB/s.
+	blobTimeout = 2 * time.Minute
 )
 
 var (
+	blobRE    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	channelRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	tokenRE   = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 )
@@ -71,7 +76,11 @@ var (
 	ErrRateLimited      = &Error{Status: 429, Code: "rate_limited"}
 	ErrMethodNotAllowed = &Error{Status: 405, Code: "method_not_allowed"}
 	ErrNoSuchRoute      = &Error{Status: 404, Code: "no_such_route"}
+	ErrNoSuchBlob       = &Error{Status: 404, Code: "no_such_blob"}
 )
+
+// ValidBlobID reports whether id has the contract's blob form (32 lowercase hex).
+func ValidBlobID(id string) bool { return blobRE.MatchString(id) }
 
 // ErrAnswer means the relay's answer broke the contract.
 var ErrAnswer = errors.New("relay: answer breaks the contract")
@@ -291,6 +300,81 @@ func (c *Client) TakePrekey(ctx context.Context, id, token string) (k Prekey, ok
 		return Prekey{}, false, fmt.Errorf("%w: take pub: %v", ErrAnswer, err)
 	}
 	return Prekey{ID: *out.ID, Pub: pub}, true, nil
+}
+
+// Blob is a blob put answer: the id the relay gave it and its size.
+type Blob struct {
+	ID   string `json:"blob"`
+	Size int64  `json:"size"`
+}
+
+// PutBlob stores data — an attachment's ciphertext, raw bytes — on the
+// channel for the other side to get. One over MaxBlob never leaves the host.
+func (c *Client) PutBlob(ctx context.Context, id, token string, data []byte) (Blob, error) {
+	if err := checkIDs(id, token); err != nil {
+		return Blob{}, err
+	}
+	if len(data) == 0 || len(data) > MaxBlob {
+		return Blob{}, fmt.Errorf("relay: a blob is 1..%d bytes, this one %d: %w", MaxBlob, len(data), ErrTooLarge)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/c/"+id+"/blobs", bytes.NewReader(data))
+	if err != nil {
+		return Blob{}, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	b, err := c.send(req, maxSmallAnswer)
+	if err != nil {
+		return Blob{}, err
+	}
+	var out Blob
+	if err := json.Unmarshal(b, &out); err != nil {
+		return Blob{}, fmt.Errorf("%w: %v", ErrAnswer, err)
+	}
+	if !ValidBlobID(out.ID) || out.Size != int64(len(data)) {
+		return Blob{}, fmt.Errorf("%w: blob answer %+v for %d bytes", ErrAnswer, out, len(data))
+	}
+	return out, nil
+}
+
+// GetBlob reads a blob the other side put, whole; at most MaxBlob bytes.
+func (c *Client) GetBlob(ctx context.Context, id, token, blob string) ([]byte, error) {
+	if err := checkIDs(id, token); err != nil {
+		return nil, err
+	}
+	if !ValidBlobID(blob) {
+		return nil, fmt.Errorf("relay: bad blob id %q", blob)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/c/"+id+"/blobs/"+blob, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return c.send(req, MaxBlob)
+}
+
+// send does one blob request and returns a 200 answer's bytes, at most
+// limit. A blob takes longer than the client's JSON timeout allows, so it
+// runs under blobTimeout instead.
+func (c *Client) send(req *http.Request, limit int64) ([]byte, error) {
+	hc := *c.http
+	hc.Timeout = blobTimeout
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, answerError(resp.StatusCode, b)
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%w: answer over %d bytes", ErrAnswer, limit)
+	}
+	return b, nil
 }
 
 // Landing fetches the invite landing text for a channel.

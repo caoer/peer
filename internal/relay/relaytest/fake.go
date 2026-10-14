@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -34,6 +35,13 @@ type channel struct {
 	inviteUsed          bool
 	env                 map[string][]Row // by dir
 	prekeys             map[string][]relay.Prekey
+	blobs               map[string]blob // by blob id
+}
+
+// blob is one stored blob and the dir of the side that put it.
+type blob struct {
+	dir  string
+	data []byte
 }
 
 // Server is the fake relay; serve it with httptest.
@@ -81,6 +89,46 @@ func (s *Server) Prekeys(id, side string) int {
 	return 0
 }
 
+// Blob is the bytes the relay holds for blob id on channel id, nil when none.
+func (s *Server) Blob(id, blobID string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ch := s.channels[id]; ch != nil {
+		return append([]byte(nil), ch.blobs[blobID].data...)
+	}
+	return nil
+}
+
+// Blobs lists the blob ids channel id holds, in no order.
+func (s *Server) Blobs(id string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []string
+	if ch := s.channels[id]; ch != nil {
+		for b := range ch.blobs {
+			ids = append(ids, b)
+		}
+	}
+	return ids
+}
+
+// SetBlob replaces a stored blob's bytes (a tampering relay); nil drops it.
+func (s *Server) SetBlob(id, blobID string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := s.channels[id]
+	if ch == nil {
+		return
+	}
+	if data == nil {
+		delete(ch.blobs, blobID)
+		return
+	}
+	b := ch.blobs[blobID]
+	b.data = append([]byte(nil), data...)
+	ch.blobs[blobID] = b
+}
+
 func token() string {
 	b := make([]byte, 32)
 	rand.Read(b)
@@ -113,7 +161,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rand.Read(b)
 		id := hex.EncodeToString(b)
 		s.channels[id] = &channel{host: token(), invite: token(),
-			env: map[string][]Row{}, prekeys: map[string][]relay.Prekey{}}
+			env: map[string][]Row{}, prekeys: map[string][]relay.Prekey{}, blobs: map[string]blob{}}
 		ok(relay.Channel{ID: id, HostToken: s.channels[id].host, InviteToken: s.channels[id].invite})
 		return
 	}
@@ -226,6 +274,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k := ch.prekeys[other][0]
 		ch.prekeys[other] = ch.prekeys[other][1:]
 		ok(k)
+	case parts[1] == "blobs" && r.Method == http.MethodPost:
+		data, err := io.ReadAll(io.LimitReader(r.Body, relay.MaxBlob+1))
+		switch {
+		case err != nil || len(data) == 0:
+			fail(w, relay.ErrBadRequest)
+			return
+		case len(data) > relay.MaxBlob:
+			fail(w, relay.ErrTooLarge)
+			return
+		}
+		b := make([]byte, 16)
+		rand.Read(b)
+		id := hex.EncodeToString(b)
+		ch.blobs[id] = blob{dir: own, data: data}
+		ok(relay.Blob{ID: id, Size: int64(len(data))})
+	case strings.HasPrefix(parts[1], "blobs/") && r.Method == http.MethodGet:
+		// A side reads what the other side put, as with envelopes.
+		b, found := ch.blobs[strings.TrimPrefix(parts[1], "blobs/")]
+		if !found || b.dir != other {
+			fail(w, relay.ErrNoSuchBlob)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(b.data)
 	default:
 		fail(w, relay.ErrNoSuchRoute)
 	}

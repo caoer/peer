@@ -37,6 +37,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stdout, stderr)
 	case "status":
 		return cmdStatus(args[1:], stdout, stderr)
+	case "fetch":
+		return cmdFetch(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -60,10 +62,14 @@ commands:
             [--dir D] [--code 8-digits] <name>
   send      encrypt a message and put it on the peer's channel
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
-  serve     pull every channel, decrypt, deliver into inbox/ or quarantine/
+            (--kind doc|file: --file is attached, encrypted, as a blob)
+  serve     pull every channel, decrypt, deliver into inbox/ or quarantine/;
+            a doc or file's content lands in quarantine/<id>/<name>
             [--dir D] [--deliver DIR] [--once] [--every 30s]
   status    print every peer from the local store, and its roster page row
             [--dir D] [--json]
+  fetch     fetch a quarantined doc or file's content again
+            [--dir D] [--deliver DIR] <message id>
   version   print the version
 
 flags come before the name or link. config.json in the peer directory holds

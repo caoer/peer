@@ -261,6 +261,12 @@ func TestServeQuarantine(t *testing.T) {
 	vendor := "vnd." + p.guestParty + ".ping"
 	ids := map[string]string{}
 	for kind, to := range map[string]string{"doc": "zt/advisor", "file": "zt/advisor", "question": "zt/advisor", vendor: "zt", "text": "zt/advisor"} {
+		if isAttachment(kind) {
+			f := filepath.Join(t.TempDir(), kind+".md")
+			os.WriteFile(f, []byte("body of "+kind), 0o600)
+			ids[kind], _ = sendOK(t, p.guestDir, "--kind", kind, "--file", f, to)
+			continue
+		}
 		ids[kind], _ = sendOK(t, p.guestDir, "--kind", kind, "--text", "body of "+kind, to)
 	}
 	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
@@ -282,9 +288,10 @@ func TestServeQuarantine(t *testing.T) {
 	if len(q) != 3 || len(in) != 2 {
 		t.Fatalf("%d quarantined, %d in the inbox", len(q), len(in))
 	}
-	fm, _, body := parseRecord(t, q[ids["doc"]])
-	if fm["kind"] != "doc" || fm["verified"] != "true" || body != "body of doc" {
-		t.Fatalf("doc record %v %q", fm, body)
+	fm, _, _ := parseRecord(t, q[ids["doc"]])
+	content, err := os.ReadFile(filepath.Join(deliverDirOf(p.hostDir), string(deliver.Quarantine), ids["doc"], "doc.md"))
+	if fm["kind"] != "doc" || fm["verified"] != "true" || string(content) != "body of doc" {
+		t.Fatalf("doc record %v, content %q %v", fm, content, err)
 	}
 }
 

@@ -28,13 +28,22 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 	kindFlag := fl.String("kind", session.KindText, "message kind: text task question answer doc file ack, or vnd.<party>.<name>")
 	fromFlag := fl.String("from", "", "the sending agent's id on your card (default none: the party itself)")
 	textFlag := fl.String("text", "", "the body (default --file, else stdin)")
-	fileFlag := fl.String("file", "", "read the body from this file")
+	fileFlag := fl.String("file", "", "doc and file kinds: the file to attach; other kinds: read the body from this file")
 	if err := fl.Parse(args); err != nil {
 		return 2
 	}
 	if fl.NArg() != 1 || fl.Arg(0) == "" {
 		fmt.Fprintln(stderr, "usage: peer send [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]")
 		return 2
+	}
+	if *kindFlag == session.KindDoc || *kindFlag == session.KindFile {
+		if *fileFlag == "" || *textFlag != "" {
+			fmt.Fprintf(stderr, "peer send: a %s message is a file: --file F, and no --text\n", *kindFlag)
+			return 2
+		}
+		return printSent(stdout, stderr, func() (*sendResult, error) {
+			return runSendFile(context.Background(), stderr, *dirFlag, fl.Arg(0), *fromFlag, *kindFlag, *fileFlag)
+		})
 	}
 	var body []byte
 	switch {
@@ -58,7 +67,14 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 		}
 		body = b
 	}
-	res, err := runSend(context.Background(), stderr, *dirFlag, fl.Arg(0), *fromFlag, *kindFlag, body)
+	return printSent(stdout, stderr, func() (*sendResult, error) {
+		return runSend(context.Background(), stderr, *dirFlag, fl.Arg(0), *fromFlag, *kindFlag, body)
+	})
+}
+
+// printSent runs one send and prints its receipt or refusal.
+func printSent(stdout, stderr io.Writer, send func() (*sendResult, error)) int {
+	res, err := send()
 	if err != nil {
 		fmt.Fprintf(stderr, "peer send: %v\n", err)
 		return 1
@@ -96,31 +112,9 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 	if fromAgent != "" && !deliver.ValidAgent(fromAgent) {
 		return nil, fmt.Errorf("--from %q is not an agent id: letters, digits, dot, dash, underscore, at most 64", fromAgent)
 	}
-	dir, err := peerDir(dir)
+	p, pe, ch, err := sendTarget(ctx, dir, name)
 	if err != nil {
 		return nil, err
-	}
-	p, err := openParty(dir)
-	if err != nil {
-		return nil, err
-	}
-	r, err := roster.Load(ctx, p.backend)
-	if err != nil {
-		return nil, err
-	}
-	pe := r.ByName(name)
-	if pe == nil {
-		return nil, fmt.Errorf("no peer named %s", name)
-	}
-	ch, err := p.store.Channel(ctx, pe.Channel)
-	if err != nil {
-		return nil, err
-	}
-	if has, _ := ch.ContainsSession(ctx, session.Addr); !has {
-		if pe.Side == roster.Host {
-			return nil, fmt.Errorf("no session with %s yet: they accept the link, then you run peer confirm %s", name, name)
-		}
-		return nil, fmt.Errorf("no session with %s yet", name)
 	}
 	if err := p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(warn, "peer send: outbox: %v\n", err)
@@ -164,4 +158,36 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 			return nil, err
 		}
 	}
+}
+
+// sendTarget is the party and the peer a send goes to, refused when there is
+// no such peer or no session with it yet.
+func sendTarget(ctx context.Context, dir, name string) (*party, *roster.Peer, *store.Channel, error) {
+	dir, err := peerDir(dir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	p, err := openParty(dir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	r, err := roster.Load(ctx, p.backend)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pe := r.ByName(name)
+	if pe == nil {
+		return nil, nil, nil, fmt.Errorf("no peer named %s", name)
+	}
+	ch, err := p.store.Channel(ctx, pe.Channel)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if has, _ := ch.ContainsSession(ctx, session.Addr); !has {
+		if pe.Side == roster.Host {
+			return nil, nil, nil, fmt.Errorf("no session with %s yet: they accept the link, then you run peer confirm %s", name, name)
+		}
+		return nil, nil, nil, fmt.Errorf("no session with %s yet", name)
+	}
+	return p, pe, ch, nil
 }
