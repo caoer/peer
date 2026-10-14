@@ -99,7 +99,8 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 	if err := k.Commit(ctx); err != nil {
 		return "", fmt.Errorf("commit party keys: %w", err)
 	}
-	if _, err := rc.PutPrekeys(ctx, ch.ID, ch.HostToken, pks); err != nil {
+	deposited, err := rc.PutPrekeys(ctx, ch.ID, ch.HostToken, pks)
+	if err != nil {
 		return "", fmt.Errorf("deposit prekeys: %w", err)
 	}
 	// The link secret lives in the channel record, committed before the
@@ -115,6 +116,8 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 		return "", err
 	}
 	rec.SetSecret(secret)
+	rec.SetDeposited(deposited)
+	rec.SetAnnounced(k.PartyKeys.SignedPrekey.ID())
 	if err := rec.Commit(ctx); err != nil {
 		return "", fmt.Errorf("commit channel record: %w", err)
 	}

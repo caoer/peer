@@ -132,9 +132,14 @@ func runConfirm(ctx context.Context, dir, name string, ask func(party string) (s
 		return nil, fmt.Errorf("nothing from %s yet: they have not run peer accept", name)
 	}
 	s := session.New(ch, k)
+	prekeys := len(k.PartyKeys.Prekeys)
 	m, err := s.Receive(ctx, recs[0])
 	if err != nil {
 		return nil, fmt.Errorf("envelope #%d does not open as %s's card: %w; refusing, re-invite", recs[0].Seq, name, err)
+	}
+	if len(k.PartyKeys.Prekeys) < prekeys {
+		// The guest's PreKey message spent one of the keys invite deposited.
+		ch.SpendDeposit()
 	}
 	c, signed, root, err := session.PeerCard(m)
 	if err != nil {
@@ -163,6 +168,7 @@ func runConfirm(ctx context.Context, dir, name string, ask func(party string) (s
 	}
 	ch.PinRoot(root)
 	ch.PinCard(signed)
+	ch.SetAnnounced(k.PartyKeys.SignedPrekey.ID())
 
 	// Send commits the channel (session, identity, cursor, pin) before the
 	// put; the party keys (the used one-time prekey gone) commit after it,

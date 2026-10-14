@@ -117,43 +117,66 @@ func (k *Keys) RemovePreKey(ctx context.Context, id uint32) error {
 	return nil
 }
 
-// LoadSignedPreKey is the libsignal signed-prekey store: nil, nil unless id
-// is the current signed prekey.
+// LoadSignedPreKey is the libsignal signed-prekey store: the current signed
+// prekey or the one the last rotation replaced, nil, nil for any other id.
 func (k *Keys) LoadSignedPreKey(ctx context.Context, id uint32) (*record.SignedPreKey, error) {
-	if k.PartyKeys == nil || k.PartyKeys.SignedPrekey == nil || k.PartyKeys.SignedPrekey.ID() != id {
-		return nil, nil
+	for _, r := range k.signedPrekeys() {
+		if r.ID() == id {
+			return r, nil
+		}
 	}
-	return k.PartyKeys.SignedPrekey, nil
+	return nil, nil
 }
 
-// LoadSignedPreKeys lists the current signed prekey.
+// signedPrekeys lists the signed prekeys held: the current one, then the previous.
+func (k *Keys) signedPrekeys() []*record.SignedPreKey {
+	if k.PartyKeys == nil {
+		return nil
+	}
+	var out []*record.SignedPreKey
+	for _, r := range []*record.SignedPreKey{k.PartyKeys.SignedPrekey, k.PartyKeys.PreviousSignedPrekey} {
+		if r != nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// LoadSignedPreKeys lists the current signed prekey and the previous one.
 func (k *Keys) LoadSignedPreKeys(ctx context.Context) ([]*record.SignedPreKey, error) {
-	if k.PartyKeys == nil || k.PartyKeys.SignedPrekey == nil {
-		return nil, nil
-	}
-	return []*record.SignedPreKey{k.PartyKeys.SignedPrekey}, nil
+	return k.signedPrekeys(), nil
 }
 
-// StoreSignedPreKey makes r the current signed prekey; the record holds one.
+// StoreSignedPreKey makes r the current signed prekey; the one it replaces
+// becomes the previous.
 func (k *Keys) StoreSignedPreKey(ctx context.Context, id uint32, r *record.SignedPreKey) error {
 	if k.PartyKeys == nil {
 		return ErrNoKeys
+	}
+	if cur := k.PartyKeys.SignedPrekey; cur != nil && cur.ID() != id {
+		k.PartyKeys.PreviousSignedPrekey = cur
 	}
 	k.PartyKeys.SignedPrekey = r
 	return nil
 }
 
-// ContainsSignedPreKey reports whether id is the current signed prekey.
+// ContainsSignedPreKey reports whether id is a signed prekey held.
 func (k *Keys) ContainsSignedPreKey(ctx context.Context, id uint32) (bool, error) {
 	r, _ := k.LoadSignedPreKey(ctx, id)
 	return r != nil, nil
 }
 
-// RemoveSignedPreKey drops the current signed prekey when it is id; a record
-// without one cannot be committed.
+// RemoveSignedPreKey drops the signed prekey id, current or previous; a
+// record without a current one cannot be committed.
 func (k *Keys) RemoveSignedPreKey(ctx context.Context, id uint32) error {
-	if r, _ := k.LoadSignedPreKey(ctx, id); r != nil {
+	if k.PartyKeys == nil {
+		return nil
+	}
+	if r := k.PartyKeys.SignedPrekey; r != nil && r.ID() == id {
 		k.PartyKeys.SignedPrekey = nil
+	}
+	if r := k.PartyKeys.PreviousSignedPrekey; r != nil && r.ID() == id {
+		k.PartyKeys.PreviousSignedPrekey = nil
 	}
 	return nil
 }

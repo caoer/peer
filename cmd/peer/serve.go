@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/caoer/peer/internal/card"
 	"github.com/caoer/peer/internal/deliver"
 	"github.com/caoer/peer/internal/envelope"
 	"github.com/caoer/peer/internal/keys"
@@ -98,7 +100,15 @@ type server struct {
 	// is written and before the CAS commit; beforeBirth once the commit
 	// landed and before the record is born.
 	beforeCommit, beforeBirth func(*store.Entry) error
+	// rotationReminded is set once this process has said that the signed
+	// prekey is due and the root to announce a new one is elsewhere.
+	rotationReminded bool
 }
+
+// errParked is a channel that waits on the human: a card naming a new
+// identity key is held on it, and nothing behind it is served until peer keys
+// accept or reject answers.
+var errParked = errors.New("channel parked on a key change")
 
 func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 	dir, err := peerDir(dir)
@@ -164,6 +174,9 @@ func (sv *server) round(ctx context.Context) error {
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
 	}
+	if err := sv.rotate(ctx); err != nil {
+		fmt.Fprintf(sv.out, "signed prekey: %v\n", err)
+	}
 	r, err := roster.Load(ctx, sv.p.backend)
 	if err != nil {
 		return err
@@ -179,6 +192,32 @@ func (sv *server) round(ctx context.Context) error {
 	}
 	sv.writeRoster(ctx)
 	return errors.Join(errs...)
+}
+
+// rotate replaces the signed prekey when it is older than
+// keys.signedPrekeyEvery (design §3.2: serve rotates it, no human). The new
+// key is announced by the card, which the root key alone signs: a host
+// without root.json says so once and leaves the rotation to peer card
+// publish, run where the root is.
+func (sv *server) rotate(ctx context.Context) error {
+	k, err := sv.p.keys(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if sv.p.root != nil {
+		_, err := rotateIfDue(ctx, sv.p, k, now, sv.out)
+		return err
+	}
+	every, err := sv.p.cfg.signedPrekeyEvery()
+	if err != nil {
+		return err
+	}
+	if age := now.Sub(k.PartyKeys.SignedPrekeyIssued()); age >= every && !sv.rotationReminded {
+		sv.rotationReminded = true
+		fmt.Fprintf(sv.out, "signed prekey %d is %s old, past keys.signedPrekeyEvery %s: run peer card publish where %s is; it rotates and announces the new one\n", k.PartyKeys.SignedPrekey.ID(), age.Round(time.Hour), every, rootFile)
+	}
+	return nil
 }
 
 // serves reports whether a channel has a session to serve: the guest's from
@@ -203,6 +242,12 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 	if err := c.load(ctx); err != nil {
 		return err
 	}
+	if c.parked() {
+		return nil
+	}
+	if err := c.announce(ctx); err != nil {
+		fmt.Fprintf(sv.out, "%s: card not sent: %v\n", pe.Name, err)
+	}
 	// asked is the cursor a gap was already pulled again at, so one bad page
 	// costs one extra pull and never loops.
 	asked := int64(-2)
@@ -212,7 +257,9 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 			return fmt.Errorf("pull: %w", err)
 		}
 		if len(recs) == 0 {
-			return nil
+			// Caught up: the channel's one-time prekeys are restocked here,
+			// where the deposit count is current.
+			return c.restock(ctx)
 		}
 		// A page that starts past the cursor's next seq would carry the
 		// cursor over the envelopes between, which Pull never asks for again
@@ -238,11 +285,9 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 				}
 				break
 			}
-			if errors.Is(err, session.ErrUntrusted) {
-				// Parked: the cursor stays before this record, so the channel
-				// has it still when a key change can be applied. Nothing
-				// behind it is delivered until then, and every round says so.
-				fmt.Fprintf(sv.out, "%s: waiting at #%d: %v; run peer card accept when you have verified their new card (U13)\n", pe.Name, rec.Seq, err)
+			if errors.Is(err, errParked) {
+				// The peer's new card is held and the line is printed; nothing
+				// behind it is served until the human answers.
 				return nil
 			}
 			if errors.Is(err, errWait) {
@@ -264,6 +309,86 @@ func (c *channelServe) load(ctx context.Context) (err error) {
 	}
 	c.k, err = c.sv.p.keys(ctx)
 	return err
+}
+
+// parked reports whether the channel waits on the human for a held card,
+// and says so every round.
+func (c *channelServe) parked() bool {
+	held, seq := c.ch.Held()
+	if held == nil {
+		return false
+	}
+	pc, err := card.Verify(held, c.ch.Root())
+	if err != nil {
+		fmt.Fprintf(c.sv.out, "%s: waiting at #%d: the held card does not verify (%v); peer keys reject %s discards it\n", c.pe.Name, seq, err, c.pe.Name)
+		return true
+	}
+	fmt.Fprint(c.sv.out, holdLine(c.pe.Name, pc, seq))
+	return true
+}
+
+// announce sends this party's card on a confirmed channel whose last card
+// carried another signed prekey than the current one — after a rotation, or
+// never sent — when the root key is here to sign it. The send commits the
+// channel, so the snapshots are reloaded after it.
+func (c *channelServe) announce(ctx context.Context) error {
+	if c.sv.p.root == nil || c.pe.State != roster.Confirmed || c.ch.Announced() == c.k.PartyKeys.SignedPrekey.ID() {
+		return nil
+	}
+	if err := c.sv.p.publish(ctx, c.k, c.pe, c.sv.out); err != nil {
+		return err
+	}
+	return c.load(ctx)
+}
+
+// restock deposits one-time prekeys on the channel when the count the relay
+// is believed to hold for this side falls below keys.oneTimeMin: up to
+// prekeysPerChannel again, the private halves committed before the public
+// halves go out (as invite and accept do), and the relay's count answer
+// recorded. A deposit the relay refuses takes its keys back out of the
+// record, so a relay that is down does not fill it with spares.
+func (c *channelServe) restock(ctx context.Context) error {
+	min := c.sv.p.cfg.oneTimeMin()
+	if c.ch.Deposited() >= min {
+		return nil
+	}
+	n := prekeysPerChannel - c.ch.Deposited()
+	pks, err := session.NewPrekeys(ctx, c.k, n)
+	if err != nil {
+		return err
+	}
+	if err := c.k.Commit(ctx); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			// Another host committed the keys — its round restocks too.
+			c.k, err = c.sv.p.keys(ctx)
+		}
+		return err
+	}
+	count, err := c.rc.PutPrekeys(ctx, c.pe.Channel, c.pe.Token, pks)
+	if err != nil {
+		for _, pk := range pks {
+			c.k.RemovePreKey(ctx, pk.ID)
+		}
+		if cerr := c.k.Commit(ctx); cerr != nil {
+			return fmt.Errorf("restock: %w; %d undeposited keys stay spares (%v)", err, len(pks), cerr)
+		}
+		return fmt.Errorf("restock: %w", err)
+	}
+	for try := 1; ; try++ {
+		c.ch.SetDeposited(count)
+		err := c.ch.Commit(ctx)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, store.ErrConflict) || try >= sendTries {
+			return fmt.Errorf("restock: deposited %d, the relay holds %d, but the count is not recorded: %w", len(pks), count, err)
+		}
+		if c.ch, err = c.sv.p.store.Channel(ctx, c.pe.Channel); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(c.sv.out, "%s: deposited %d one-time prekeys; the relay holds %d\n", c.pe.Name, len(pks), count)
+	return nil
 }
 
 // commit writes the channel under CAS, then the party keys when a PreKey
@@ -306,20 +431,29 @@ func (c *channelServe) commitKeys(ctx context.Context, rec relay.Record) {
 func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	s := session.New(c.ch, c.k)
 	before := c.ch.Cursor()
+	prekeys := len(c.k.PartyKeys.Prekeys)
 	m, err := s.Receive(ctx, rec)
+	if err == nil && rec.Env.Type == envelope.Prekey && len(c.k.PartyKeys.Prekeys) < prekeys {
+		// The message spent one of the keys deposited on this channel.
+		c.ch.SpendDeposit()
+	}
 	if err == nil {
 		err = c.checkAddress(m)
 	}
 	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard {
 		err = c.sv.uccBorder(m)
 	}
-	// A record the pinned card's keys cannot open is the shape of a peer's
-	// key rotation (design §3.2): its new card and everything after it are
-	// readable only by the version that applies a key change (U13). Moving
-	// the cursor past them would consume that material for good, so the
-	// channel waits here instead — serveChannel stops its pull. A seat whose
-	// session is not on this root waits the same way (ucc.go).
-	if errors.Is(err, session.ErrUntrusted) || errors.Is(err, errWait) {
+	// A record built under an identity key the pinned card does not list is
+	// what a peer's key change looks like from here (design §3.2): its new
+	// card comes first, in the new session. Read without trusting, verified
+	// against the pinned root, held for the human; anything else under an
+	// unlisted key is refused.
+	if errors.Is(err, session.ErrUntrusted) {
+		return c.probeKeyChange(ctx, rec, err)
+	}
+	// A seat whose session is not on this root waits, the cursor before the
+	// record — serveChannel stops its pull (ucc.go).
+	if errors.Is(err, errWait) {
 		return err
 	}
 	if err != nil {
@@ -407,23 +541,96 @@ func (c *channelServe) checkAddress(m *session.Message) error {
 	return nil
 }
 
-// receiveCard pins a card the peer sent in-session once it is signed by the
-// pinned root and lists the identity key the session uses; a card naming
-// another key is a key change, reported and not applied (that is U13). A
-// guest still waiting for the host's details card (state accepted) answers
-// with its own details card and is confirmed.
+// probeKeyChange reads a record the pinned card's keys refuse. A PreKey
+// record whose message is the peer's card, signed by the pinned root and
+// naming the identity key the record came under, is held for the human and
+// the channel waits before it: the cursor stays, so the record is there when
+// peer keys accept has pinned the card and serve builds the session from it.
+// Any other such record is refused and the cursor moves past it: a card that
+// does not verify, a message that is not a card, a key the card does not
+// name. The relay is untrusted and can put any PreKey record on a channel, so
+// nothing it can forge may stop the channel — only a root signature holds it.
+func (c *channelServe) probeKeyChange(ctx context.Context, rec relay.Record, cause error) error {
+	refuse := func(why string) error {
+		c.ch.SetCursor(rec.Seq)
+		fmt.Fprintf(c.sv.out, "skip %s #%d: %s; refused\n", c.pe.Name, rec.Seq, why)
+		return c.ch.Commit(ctx)
+	}
+	if rec.Env.Type != envelope.Prekey {
+		return refuse(cause.Error())
+	}
+	// A throwaway snapshot that admits any key reads the record; it is never
+	// committed, so the one-time prekey it spends stays in the record.
+	probe, err := c.sv.p.store.Channel(ctx, c.pe.Channel)
+	if err != nil {
+		return err
+	}
+	probe.AdmitAnyIdentity()
+	pk, err := c.sv.p.keys(ctx)
+	if err != nil {
+		return err
+	}
+	m, err := session.New(probe, pk).Receive(ctx, rec)
+	if err != nil {
+		return refuse(fmt.Sprintf("under an identity key the card does not list, and it does not open: %v", err))
+	}
+	if m.Kind != session.KindCard {
+		return refuse(fmt.Sprintf("a %s under an identity key the card does not list; a key change begins with the new card", m.Kind))
+	}
+	pc, signed, root, err := session.PeerCard(m)
+	if err != nil {
+		return refuse(fmt.Sprintf("a card under a new identity key: %v", err))
+	}
+	if !bytes.Equal(root, c.ch.Root()) {
+		return refuse("a card under a new identity key, signed by another root than the pinned one")
+	}
+	key, err := session.CurrentKey(pc)
+	if err != nil {
+		return refuse(fmt.Sprintf("a card under a new identity key: %v", err))
+	}
+	if got := prekeyIdentityText(rec.Env); got != key.Identity {
+		return refuse("a card under a new identity key that does not name the key the record came under")
+	}
+	c.ch.Hold(signed, rec.Seq)
+	if err := c.ch.Commit(ctx); err != nil {
+		return err
+	}
+	fmt.Fprint(c.sv.out, holdLine(c.pe.Name, pc, rec.Seq))
+	return errParked
+}
+
+// receiveCard reads a card the peer sent in-session. Signed by the pinned
+// root and listing the identity key the session uses, it refreshes the pin
+// when it is not older than the pinned card — agents, relays, details, signed
+// prekey, no human (design §3.3). Naming another identity key, or retiring the
+// one in use, it is a key change: held for the human, the channel waits
+// (§3.2: 先提示人再生效). A guest still waiting for the host's details card
+// (state accepted) answers with its own details card and is confirmed.
 func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec relay.Record, m *session.Message) error {
 	pc, signed, root, err := session.PeerCard(m)
 	switch {
 	case err != nil:
 	case !bytes.Equal(root, c.ch.Root()):
 		err = errors.New("card: signed by another root than the pinned one")
-	case s.CheckIdentity(pc) != nil:
-		err = errors.New("card: names an identity key the session does not use; a key change is not applied by this version")
 	}
 	if err != nil {
 		fmt.Fprintf(c.sv.out, "skip %s #%d: %v\n", c.pe.Name, rec.Seq, err)
 		return c.commit(ctx, rec)
+	}
+	if s.CheckIdentity(pc) != nil {
+		c.ch.Hold(signed, rec.Seq)
+		if err := c.commit(ctx, rec); err != nil {
+			return err
+		}
+		fmt.Fprint(c.sv.out, holdLine(c.pe.Name, pc, rec.Seq))
+		return errParked
+	}
+	if pinned := c.ch.Card(); pinned != nil {
+		var old card.Card
+		if err := json.Unmarshal(pinned.Body, &old); err == nil && pc.Issued.Before(old.Issued) {
+			fmt.Fprintf(c.sv.out, "skip %s #%d: card issued %s is older than the pinned one (%s)\n", c.pe.Name, rec.Seq, pc.Issued.Format(time.RFC3339), old.Issued.Format(time.RFC3339))
+			return c.commit(ctx, rec)
+		}
 	}
 	c.ch.PinCard(signed)
 	if !(c.pe.Side == roster.Guest && c.pe.State == roster.Accepted) {

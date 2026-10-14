@@ -197,6 +197,30 @@ func (s *Session) decrypt(ctx context.Context, e envelope.Envelope) (plain []byt
 	return plain, err
 }
 
+// PrekeyIdentity is the identity key a PreKey record carries in clear — the
+// key the sender built its session under, what a key change looks like from
+// outside the ciphertext. An envelope of another type, or one the library
+// does not read, is an error.
+func PrekeyIdentity(e envelope.Envelope) ([32]byte, error) {
+	var out [32]byte
+	if err := e.Check(); err != nil {
+		return out, err
+	}
+	if e.Type != envelope.Prekey {
+		return out, fmt.Errorf("%w: a %s record names no identity key", ErrNotMessage, e.Type)
+	}
+	ser := keys.Serializer
+	err := envelope.Safe(func() error {
+		m, err := protocol.NewPreKeySignalMessageFromBytes(e.Body, ser.PreKeySignalMessage, ser.SignalMessage)
+		if err != nil {
+			return err
+		}
+		out = m.IdentityKey().PublicKey().PublicKey()
+		return nil
+	})
+	return out, err
+}
+
 // CheckIdentity is the first-contact check of design §3.4: the identity key
 // the session was built with must be one the peer's card lists and has not
 // retired — a key the card voids is no longer the party's (§3.2).  Run it on

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.mau.fi/libsignal/ecc"
 	"go.mau.fi/libsignal/keys/identity"
@@ -195,13 +196,37 @@ func (id *Identity) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// PartyKeys is the party keys record: the current signed prekey and the
-// unused one-time prekeys. It is shared by every fleet host through the store.
+// PartyKeys is the party keys record: the current signed prekey, the one it
+// replaced, and the unused one-time prekeys. It is shared by every fleet host
+// through the store.
 type PartyKeys struct {
 	SignedPrekey *record.SignedPreKey
-	Prekeys      []*record.PreKey
+	// PreviousSignedPrekey is the signed prekey the last rotation replaced,
+	// nil before the first rotation. A peer that built its session from the
+	// card announcing it may not have sent its first message yet, so the key
+	// opens that message until the next rotation retires it.
+	PreviousSignedPrekey *record.SignedPreKey
+	Prekeys              []*record.PreKey
 	// NextPrekeyID is the id the next generated one-time prekey takes.
 	NextPrekeyID uint32
+}
+
+// SignedPrekeyIssued is when the current signed prekey was generated.
+func (pk *PartyKeys) SignedPrekeyIssued() time.Time {
+	return time.Unix(pk.SignedPrekey.Timestamp(), 0)
+}
+
+// RotateSignedPrekey replaces the signed prekey with a fresh one under the
+// next id, signed by the identity key (design §3.2: serve rotates it, no
+// human), and keeps the replaced one as PreviousSignedPrekey. The caller
+// commits the record, then announces the new key with the card.
+func (pk *PartyKeys) RotateSignedPrekey(id *Identity) error {
+	spk, err := keyhelper.GenerateSignedPreKey(id.KeyPair, pk.SignedPrekey.ID()+1, Serializer.SignedPreKeyRecord)
+	if err != nil {
+		return err
+	}
+	pk.PreviousSignedPrekey, pk.SignedPrekey = pk.SignedPrekey, spk
+	return nil
 }
 
 // InitialPrekeys is how many one-time prekeys init generates.
@@ -240,15 +265,36 @@ type signedPrekeyJSON struct {
 }
 
 type partyKeysFile struct {
-	V            int              `json:"v"`
-	SignedPrekey signedPrekeyJSON `json:"signedPrekey"`
-	Prekeys      []prekeyJSON     `json:"prekeys"`
-	NextPrekeyID uint32           `json:"nextPrekeyId"`
+	V                    int               `json:"v"`
+	SignedPrekey         signedPrekeyJSON  `json:"signedPrekey"`
+	PreviousSignedPrekey *signedPrekeyJSON `json:"previousSignedPrekey,omitempty"`
+	Prekeys              []prekeyJSON      `json:"prekeys"`
+	NextPrekeyID         uint32            `json:"nextPrekeyId"`
 }
 
 func rawPair(kp *ecc.ECKeyPair) (pub, priv []byte) {
 	p, s := kp.PublicKey().PublicKey(), kp.PrivateKey().Serialize()
 	return p[:], s[:]
+}
+
+func signedPrekeyOf(s *record.SignedPreKey) signedPrekeyJSON {
+	pub, priv := rawPair(s.KeyPair())
+	sig := s.Signature()
+	return signedPrekeyJSON{prekeyJSON{s.ID(), pub, priv}, sig[:], s.Timestamp()}
+}
+
+// record rebuilds the libsignal signed prekey record.
+func (s signedPrekeyJSON) record() (*record.SignedPreKey, error) {
+	kp, err := s.keyPair()
+	if err != nil {
+		return nil, err
+	}
+	if len(s.Signature) != 64 {
+		return nil, fmt.Errorf("signature %d bytes, want 64", len(s.Signature))
+	}
+	var sig [64]byte
+	copy(sig[:], s.Signature)
+	return record.NewSignedPreKey(s.ID, s.Timestamp, kp, sig, Serializer.SignedPreKeyRecord), nil
 }
 
 // keyPair rebuilds a key pair and checks the public key is the private key's.
@@ -271,14 +317,15 @@ func (p prekeyJSON) keyPair() (*ecc.ECKeyPair, error) {
 
 // MarshalJSON writes the party keys record.
 func (pk *PartyKeys) MarshalJSON() ([]byte, error) {
-	s := pk.SignedPrekey
-	pub, priv := rawPair(s.KeyPair())
-	sig := s.Signature()
 	f := partyKeysFile{
 		V:            FormatVersion,
-		SignedPrekey: signedPrekeyJSON{prekeyJSON{s.ID(), pub, priv}, sig[:], s.Timestamp()},
+		SignedPrekey: signedPrekeyOf(pk.SignedPrekey),
 		Prekeys:      make([]prekeyJSON, 0, len(pk.Prekeys)),
 		NextPrekeyID: pk.NextPrekeyID,
+	}
+	if pk.PreviousSignedPrekey != nil {
+		prev := signedPrekeyOf(pk.PreviousSignedPrekey)
+		f.PreviousSignedPrekey = &prev
 	}
 	for _, p := range pk.Prekeys {
 		pub, priv := rawPair(p.KeyPair())
@@ -296,17 +343,16 @@ func (pk *PartyKeys) UnmarshalJSON(b []byte) error {
 	if f.V != FormatVersion {
 		return fmt.Errorf("party keys: version %d, want %d", f.V, FormatVersion)
 	}
-	s := f.SignedPrekey
-	kp, err := s.keyPair()
+	spk, err := f.SignedPrekey.record()
 	if err != nil {
 		return fmt.Errorf("party keys: signed prekey: %w", err)
 	}
-	if len(s.Signature) != 64 {
-		return fmt.Errorf("party keys: signed prekey signature %d bytes, want 64", len(s.Signature))
+	var prev *record.SignedPreKey
+	if f.PreviousSignedPrekey != nil {
+		if prev, err = f.PreviousSignedPrekey.record(); err != nil {
+			return fmt.Errorf("party keys: previous signed prekey: %w", err)
+		}
 	}
-	var sig [64]byte
-	copy(sig[:], s.Signature)
-	spk := record.NewSignedPreKey(s.ID, s.Timestamp, kp, sig, Serializer.SignedPreKeyRecord)
 	pks := make([]*record.PreKey, 0, len(f.Prekeys))
 	for _, p := range f.Prekeys {
 		kp, err := p.keyPair()
@@ -315,6 +361,6 @@ func (pk *PartyKeys) UnmarshalJSON(b []byte) error {
 		}
 		pks = append(pks, record.NewPreKey(p.ID, kp, Serializer.PreKeyRecord))
 	}
-	pk.SignedPrekey, pk.Prekeys, pk.NextPrekeyID = spk, pks, f.NextPrekeyID
+	pk.SignedPrekey, pk.PreviousSignedPrekey, pk.Prekeys, pk.NextPrekeyID = spk, prev, pks, f.NextPrekeyID
 	return nil
 }

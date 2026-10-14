@@ -60,6 +60,8 @@ type config struct {
 	// Timelines are the peers' collaboration pages serve and send write
 	// each message on (timeline.go), by peer name.
 	Timelines map[string]timelineConfig `json:"timelines,omitempty"`
+	// Keys is the key lifecycle: signedPrekeyEvery, oneTimeMin (keys.go).
+	Keys keysConfig `json:"keys,omitempty"`
 }
 
 // stateConfig names the state backend: Dir for the file backend, or
@@ -121,6 +123,9 @@ func openParty(dir string) (*party, error) {
 		return nil, err
 	}
 	if _, err := p.loadSeats(); err != nil {
+		return nil, err
+	}
+	if _, err := p.cfg.signedPrekeyEvery(); err != nil {
 		return nil, err
 	}
 	b, err := openBackend(dir, p.cfg, p.id)

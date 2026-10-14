@@ -39,6 +39,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdStatus(args[1:], stdout, stderr)
 	case "fetch":
 		return cmdFetch(args[1:], stdout, stderr)
+	case "card":
+		return cmdCard(args[1:], stdout, stderr)
+	case "keys":
+		return cmdKeys(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -64,17 +68,22 @@ commands:
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
             (--kind doc|file: --file is attached, encrypted, as a blob)
   serve     pull every channel, decrypt, deliver into inbox/ or quarantine/;
-            a doc or file's content lands in quarantine/<id>/<name>
+            a doc or file's content lands in quarantine/<id>/<name>;
+            rotate the signed prekey and restock one-time prekeys
             [--dir D] [--deliver DIR] [--once] [--every 30s]
   status    print every peer from the local store, and its roster page row
             [--dir D] [--json]
   fetch     fetch a quarantined doc or file's content again
             [--dir D] [--deliver DIR] <message id | record path>
+  card      publish: sign your card with the root key and send it on every
+            confirmed channel        card publish [--dir D]
+  keys      accept or reject a peer's new identity key that serve holds
+            keys accept [--dir D] <name> | keys reject [--dir D] <name>
   version   print the version
 
 flags come before the name or link. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),
-deliver and roster (page + slug + login: the private roster page serve
-writes each round).
+deliver, roster (page + slug + login: the private roster page serve writes
+each round) and keys (signedPrekeyEvery, oneTimeMin).
 `)
 }

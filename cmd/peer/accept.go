@@ -187,6 +187,10 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if err := k.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit party keys: %w", err)
 	}
+	// The deposit below follows the send that commits the channel, so the
+	// count is recorded ahead of it; serve's first restock corrects it.
+	ch.SetDeposited(len(pks))
+	ch.SetAnnounced(k.PartyKeys.SignedPrekey.ID())
 	if _, err := s.Send(ctx, p.outbox, rc, guest, m); err != nil {
 		var pe *session.PutError
 		if errors.As(err, &pe) {
