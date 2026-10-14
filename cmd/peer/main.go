@@ -23,6 +23,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version":
 		fmt.Fprintf(stdout, "peer %s\n", version)
 		return 0
+	case "init":
+		return cmdInit(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -37,6 +39,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `usage: peer <command> [args]
 
 commands:
+  init      generate the root key, identity and party keys [--dir D]
   version   print the version
 `)
 }
