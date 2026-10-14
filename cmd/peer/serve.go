@@ -193,6 +193,13 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 				}
 				break
 			}
+			if errors.Is(err, session.ErrUntrusted) {
+				// Parked: the cursor stays before this record, so the channel
+				// has it still when a key change can be applied. Nothing
+				// behind it is delivered until then, and every round says so.
+				fmt.Fprintf(sv.out, "%s: waiting at #%d: %v; run peer card accept when you have verified their new card (U13)\n", pe.Name, rec.Seq, err)
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -251,6 +258,14 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	m, err := s.Receive(ctx, rec)
 	if err == nil {
 		err = c.checkAddress(m)
+	}
+	// A record the pinned card's keys cannot open is the shape of a peer's
+	// key rotation (design §3.2): its new card and everything after it are
+	// readable only by the version that applies a key change (U13). Moving
+	// the cursor past them would consume that material for good, so the
+	// channel waits here instead — serveChannel stops its pull.
+	if errors.Is(err, session.ErrUntrusted) {
+		return err
 	}
 	if err != nil {
 		if rec.Seq > c.ch.Cursor() {

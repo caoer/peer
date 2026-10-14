@@ -23,6 +23,7 @@ import (
 	"go.mau.fi/libsignal/keys/prekey"
 	"go.mau.fi/libsignal/protocol"
 	signal "go.mau.fi/libsignal/session"
+	"go.mau.fi/libsignal/signalerror"
 	"go.mau.fi/libsignal/util/keyhelper"
 	"go.mau.fi/libsignal/util/optional"
 
@@ -45,6 +46,12 @@ var (
 	ErrNotMessage = errors.New("session: envelope is not a message")
 	ErrNoCard     = errors.New("session: peer card not pinned")
 	ErrNoKey      = errors.New("session: card has no current key")
+	// ErrUntrusted is a record built under an identity key the pinned card
+	// does not list — what a peer's key rotation looks like from here
+	// (design §3.2): its new card comes in a new session, which the old
+	// pinned card cannot admit. The record is readable by the version that
+	// applies a key change, so a caller parks it rather than consuming it.
+	ErrUntrusted = errors.New("session: the record's identity key is not the pinned card's")
 )
 
 // Session binds a channel's and the party keys' snapshots to libsignal for
@@ -138,6 +145,9 @@ func (s *Session) Receive(ctx context.Context, rec relay.Record) (*Message, erro
 		return nil, fmt.Errorf("%w: seq %d at cursor %d", ErrDuplicate, rec.Seq, s.Channel.Cursor())
 	}
 	plain, err := s.decrypt(ctx, rec.Env)
+	if errors.Is(err, signalerror.ErrUntrustedIdentity) {
+		return nil, fmt.Errorf("%w (%v)", ErrUntrusted, err)
+	}
 	if err != nil {
 		return nil, err
 	}
