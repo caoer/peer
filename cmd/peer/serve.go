@@ -62,25 +62,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1
 	}
-	for {
-		if err := sv.round(ctx); err != nil {
-			if ctx.Err() != nil {
-				return 0
-			}
-			fmt.Fprintf(stderr, "peer serve: %v\n", err)
-			if *once {
-				return 1
-			}
-		}
-		if *once {
-			return 0
-		}
-		select {
-		case <-ctx.Done():
-			return 0
-		case <-time.After(*every):
-		}
-	}
+	return sv.loop(ctx, *every, *once, stderr)
 }
 
 // server is one host's serve: the party, its spool and delivery directory.
@@ -103,6 +85,9 @@ type server struct {
 	// rotationReminded is set once this process has said that the signed
 	// prekey is due and the root to announce a new one is elsewhere.
 	rotationReminded bool
+	// push holds the channels' push sockets under a running serve (push.go);
+	// nil under --once.
+	push *pusher
 }
 
 // errParked is a channel that waits on the human: a card naming a new

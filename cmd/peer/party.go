@@ -62,6 +62,8 @@ type config struct {
 	Timelines map[string]timelineConfig `json:"timelines,omitempty"`
 	// Keys is the key lifecycle: signedPrekeyEvery, oneTimeMin (keys.go).
 	Keys keysConfig `json:"keys,omitempty"`
+	// Push is how a running serve uses the relay's push: pullEvery (push.go).
+	Push pushConfig `json:"push,omitempty"`
 }
 
 // stateConfig names the state backend: Dir for the file backend, or

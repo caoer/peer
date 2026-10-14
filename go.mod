@@ -5,6 +5,7 @@ go 1.26
 toolchain go1.26.5
 
 require (
+	github.com/coder/websocket v1.8.15
 	go.mau.fi/libsignal v0.2.2
 	google.golang.org/protobuf v1.36.11
 )

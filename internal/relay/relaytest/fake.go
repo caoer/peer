@@ -51,6 +51,9 @@ type Server struct {
 	channels map[string]*channel
 	// PageSize caps a pull answer (the contract's 100).
 	PageSize int
+	// noPush and push are the WebSocket push (push.go).
+	noPush bool
+	push   push
 }
 
 // New makes a relay whose owner login is login.
@@ -142,6 +145,9 @@ func fail(w http.ResponseWriter, e *relay.Error) {
 
 // ServeHTTP serves the contract from memory.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.upgrade(w, r) {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := strings.TrimPrefix(r.URL.Path, "/peer")
@@ -227,8 +233,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seq := int64(len(ch.env[own]))
-		ch.env[own] = append(ch.env[own], Row{seq, in.Type, in.Body, time.Now().UnixMilli()})
+		row := Row{seq, in.Type, in.Body, time.Now().UnixMilli()}
+		ch.env[own] = append(ch.env[own], row)
 		ok(relay.Receipt{Dir: own, Seq: seq})
+		s.pushRow(parts[0], own, row)
 	case parts[1] == "envelopes" && r.Method == http.MethodGet:
 		after := int64(-1)
 		if q := r.URL.Query().Get("after"); q != "" {
@@ -239,6 +247,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			after = n
 		}
+		s.countPull(parts[0], other)
 		page := []Row{}
 		for _, e := range ch.env[other] {
 			if e.Seq > after && len(page) < s.PageSize {

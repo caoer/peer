@@ -187,12 +187,7 @@ func (c *Client) Pull(ctx context.Context, id, token string, after int64) ([]Rec
 	if after < -1 {
 		return nil, fmt.Errorf("relay: after %d < -1", after)
 	}
-	var raw []struct {
-		Seq  *int64 `json:"seq"`
-		Type string `json:"type"`
-		Body string `json:"body"`
-		At   *int64 `json:"at"`
-	}
+	var raw []wireRow
 	path := "/c/" + id + "/envelopes?after=" + strconv.FormatInt(after, 10)
 	if err := c.do(ctx, http.MethodGet, path, token, nil, &raw, maxAnswer); err != nil {
 		return nil, err
@@ -207,16 +202,7 @@ func (c *Client) Pull(ctx context.Context, id, token string, after int64) ([]Rec
 			return nil, fmt.Errorf("%w: seq missing, not after %d, or not ascending", ErrAnswer, last)
 		}
 		last = *r.Seq
-		rec := Record{Seq: *r.Seq}
-		if r.At != nil {
-			rec.At = time.UnixMilli(*r.At)
-		}
-		rec.Env, rec.Err = envelope.FromWire(r.Type, r.Body)
-		if rec.Err == nil && r.At == nil {
-			rec.Err = fmt.Errorf("%w: no at", ErrAnswer)
-			rec.Env = envelope.Envelope{}
-		}
-		out = append(out, rec)
+		out = append(out, r.record())
 	}
 	return out, nil
 }

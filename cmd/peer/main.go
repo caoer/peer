@@ -69,7 +69,8 @@ commands:
             (--kind doc|file: --file is attached, encrypted, as a blob)
   serve     pull every channel, decrypt, deliver into inbox/ or quarantine/;
             a doc or file's content lands in quarantine/<id>/<name>;
-            rotate the signed prekey and restock one-time prekeys
+            rotate the signed prekey and restock one-time prekeys;
+            between rounds, hold the relay's push socket per channel
             [--dir D] [--deliver DIR] [--once] [--every 30s]
   status    print every peer from the local store, and its roster page row
             [--dir D] [--json]
@@ -84,7 +85,8 @@ commands:
 flags come before the name or link. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),
 deliver, roster (page + slug + login: the private roster page serve writes
-each round), keys (signedPrekeyEvery, oneTimeMin) and ucc (root, seats,
+each round), keys (signedPrekeyEvery, oneTimeMin), push (pullEvery: pull
+a channel after this many pushed messages, default 10) and ucc (root, seats,
 serviceRetries: delivery by the fleet's seat map — a seat row's message,
 and a human row's, is an inbox record in the session of the seat the row
 names; a service row's is an HTTPS POST of the record as JSON to the row's
