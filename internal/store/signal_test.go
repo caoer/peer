@@ -218,6 +218,56 @@ func TestPinnedCardGatesIdentity(t *testing.T) {
 	}
 }
 
+// A rotation card lists the new identity key and the old key's void time
+// (design §3.2). Once that time is past, whoever holds the old key — the
+// case rotation exists to answer — is refused, while the new key is admitted
+// from the same card.
+func TestRetiredKeyIsNotTrusted(t *testing.T) {
+	ctx := context.Background()
+	alice := newParty(t, "alice", fileBackend(t))
+	bob := newParty(t, "bob", fileBackend(t))
+
+	// The key bundle alice rotated away from, and the one in force; both are
+	// the same party, so one root signs the card that lists both.
+	oldID, err := keys.GenerateIdentity(alice.root.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPK, err := keys.GeneratePartyKeys(oldID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPK, err := keys.GeneratePartyKeys(alice.id, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := card.New(alice.id, newPK, nil, nil, time.Now())
+	void := time.Now().Add(-time.Hour)
+	retired := card.New(oldID, oldPK, nil, nil, time.Now().Add(-2*time.Hour)).Keys[0]
+	retired.Until = &void
+	rotated.Keys = append([]card.Key{retired}, rotated.Keys...)
+	signed, err := card.Sign(rotated, alice.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := card.Verify(signed, alice.root.Public()); err != nil {
+		t.Fatalf("the rotation card does not verify: %v", err)
+	}
+
+	bch, _ := bob.load(t, ctx, "c1")
+	bch.PinRoot(alice.root.Public())
+	bch.PinCard(signed)
+	commit(t, ctx, bch)
+
+	bch, _ = bob.load(t, ctx, "c1")
+	if ok, err := bch.IsTrustedIdentity(ctx, alice.addr, oldID.KeyPair.PublicKey()); err != nil || ok {
+		t.Errorf("the retired identity key: trusted=%v err=%v, want refused", ok, err)
+	}
+	if ok, err := bch.IsTrustedIdentity(ctx, alice.addr, alice.id.KeyPair.PublicKey()); err != nil || !ok {
+		t.Errorf("the card's key in force: trusted=%v err=%v", ok, err)
+	}
+}
+
 func TestChannelRecordBasics(t *testing.T) {
 	ctx := context.Background()
 	p := newParty(t, "p", fileBackend(t))

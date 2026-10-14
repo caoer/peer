@@ -401,6 +401,57 @@ func TestSendOrder(t *testing.T) {
 	}
 }
 
+// The first-contact check reads the card's keys[].until: a session built
+// under a key the card has retired is not the party's, and the key in force
+// on the same card still is.
+func TestCheckIdentitySkipsARetiredKey(t *testing.T) {
+	ctx := context.Background()
+	p := newParty(t)
+	oldID, err := keys.GenerateIdentity(p.root.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPK, err := keys.GeneratePartyKeys(oldID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPK, err := keys.GeneratePartyKeys(p.id, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := card.New(p.id, newPK, nil, nil, time.Now())
+	void := time.Now().Add(-time.Hour)
+	retired := card.New(oldID, oldPK, nil, nil, time.Now().Add(-2*time.Hour)).Keys[0]
+	retired.Until = &void
+	rotated.Keys = append([]card.Key{retired}, rotated.Keys...)
+	signed, err := card.Sign(rotated, p.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := card.Verify(signed, p.root.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := p.open(t, "c1")
+	if err := s.Channel.SaveIdentity(ctx, session.Addr, oldID.KeyPair.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CheckIdentity(c); !errors.Is(err, session.ErrIdentity) {
+		t.Errorf("a session under the retired key: %v, want ErrIdentity", err)
+	}
+	if err := s.Channel.SaveIdentity(ctx, session.Addr, p.id.KeyPair.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CheckIdentity(c); err != nil {
+		t.Errorf("a session under the key in force: %v", err)
+	}
+	cur, err := session.CurrentKey(c)
+	if err != nil || cur.Identity != keys.CurveText(p.id.PublicKey()) {
+		t.Fatalf("CurrentKey took %+v, want the bundle in force (%v)", cur, err)
+	}
+}
+
 func TestMessageFormat(t *testing.T) {
 	m, err := session.NewMessage("ed25519:a/advisor", "ed25519:b/legal", session.KindTask, []byte("do it"))
 	if err != nil {

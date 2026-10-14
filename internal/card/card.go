@@ -192,6 +192,13 @@ func (k *Key) check() error {
 	return nil
 }
 
+// Retired reports whether the key's void time has passed — the revocation a
+// rotation card carries (design §3.2): the new identity key, and the old
+// key's until. A retired key signs nothing and opens nothing from then on.
+func (k *Key) Retired(at time.Time) bool {
+	return k.Until != nil && !k.Until.After(at)
+}
+
 // IdentityKey is the key's libsignal identity public key.
 func (k *Key) IdentityKey() (*identity.Key, error) {
 	raw, err := keys.ParseCurve(k.Identity)

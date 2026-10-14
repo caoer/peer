@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.mau.fi/libsignal/keys/identity"
 	"go.mau.fi/libsignal/protocol"
@@ -258,11 +259,12 @@ func (c *Channel) RemoteIdentity(addr *protocol.SignalAddress) ([32]byte, bool) 
 }
 
 // IsTrustedIdentity accepts any identity key until a card is pinned, and
-// after that only the identity keys the pinned card lists: a rotated card
-// makes the old session's next Encrypt or Decrypt fail with
-// signalerror.ErrUntrustedIdentity, the teardown design §3.2 wants. Before
-// the pin the host checks the first contact itself, after decrypting the
-// peer's card (§3.4: session identity == card keys[].identity).
+// after that only the identity keys the pinned card lists and has not
+// retired: a rotated card makes the old session's next Encrypt or Decrypt
+// fail with signalerror.ErrUntrustedIdentity, the teardown design §3.2 wants,
+// and whoever holds the voided key is refused with it. Before the pin the
+// host checks the first contact itself, after decrypting the peer's card
+// (§3.4: session identity == card keys[].identity).
 func (c *Channel) IsTrustedIdentity(ctx context.Context, addr *protocol.SignalAddress, key *identity.Key) (bool, error) {
 	if c.rec.Card == nil {
 		return true, nil
@@ -272,8 +274,12 @@ func (c *Channel) IsTrustedIdentity(ctx context.Context, addr *protocol.SignalAd
 		return false, fmt.Errorf("%w: pinned card: %v", ErrCorrupt, err)
 	}
 	want := key.PublicKey().PublicKey()
-	for _, k := range pinned.Keys {
-		raw, err := keys.ParseCurve(k.Identity)
+	now := time.Now()
+	for i := range pinned.Keys {
+		if pinned.Keys[i].Retired(now) {
+			continue
+		}
+		raw, err := keys.ParseCurve(pinned.Keys[i].Identity)
 		if err != nil {
 			return false, fmt.Errorf("pinned card: %w", err)
 		}

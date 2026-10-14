@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mau.fi/libsignal/ecc"
 	"go.mau.fi/libsignal/keys/prekey"
@@ -197,15 +198,20 @@ func (s *Session) decrypt(ctx context.Context, e envelope.Envelope) (plain []byt
 }
 
 // CheckIdentity is the first-contact check of design §3.4: the identity key
-// the session was built with must be one the peer's card lists. Run it on
+// the session was built with must be one the peer's card lists and has not
+// retired — a key the card voids is no longer the party's (§3.2).  Run it on
 // the card that arrived in-session, before pinning it.
 func (s *Session) CheckIdentity(c *card.Card) error {
 	got, ok := s.Channel.RemoteIdentity(Addr)
 	if !ok {
 		return fmt.Errorf("%w: no session identity", ErrIdentity)
 	}
-	for _, k := range c.Keys {
-		raw, err := keys.ParseCurve(k.Identity)
+	now := time.Now()
+	for i := range c.Keys {
+		if c.Keys[i].Retired(now) {
+			continue
+		}
+		raw, err := keys.ParseCurve(c.Keys[i].Identity)
 		if err != nil {
 			return err
 		}
