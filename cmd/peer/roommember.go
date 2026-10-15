@@ -377,8 +377,9 @@ func runRoomHandover(ctx context.Context, dir, name, peerName string, out io.Wri
 }
 
 // runRoomClose ends the room for everyone: one removal record naming every
-// other live idx with bump, their revokes, a feed's link revoked, the
-// admin's own leave record and its own revoke; the local state is dropped.
+// other live idx with bump, their revokes, a feed's link revoked, every
+// other seat the relay serves outside the roster revoked, the admin's own
+// leave record and its own revoke; the local state is dropped.
 func runRoomClose(ctx context.Context, dir, name string, out io.Writer) error {
 	c, err := openJoined(ctx, dir, name, out)
 	if err != nil {
@@ -416,6 +417,9 @@ func runRoomClose(ctx context.Context, dir, name string, out io.Writer) error {
 	if err := c.closeLink(ctx); err != nil {
 		return fmt.Errorf("room %s: %v; run peer room close %s again", c.ref.Name, err, c.ref.Name)
 	}
+	if err := c.closeSeats(ctx); err != nil {
+		return fmt.Errorf("room %s: %v; run peer room close %s again", c.ref.Name, err, c.ref.Name)
+	}
 	if c.st.Member(c.st.Idx()) != nil {
 		seq, _, err := c.postMembership(ctx, room.KindLeave, []byte("{}"))
 		if errors.Is(err, errQueued) {
@@ -441,6 +445,48 @@ func runRoomRotate(ctx context.Context, dir, name string, out io.Writer) error {
 		return err
 	}
 	return c.rotate(ctx, roomClock(), true)
+}
+
+// closeSeats is close's end of every seat the relay serves outside the fold
+// — a feed's link this state does not hold, a stray mint: it lists the
+// relay's members and queues each live one the fold does not hold on the
+// removals' revoke queue, then drains it; a revoke the relay did not answer
+// stays queued for serve and the next close, and refuses the close.
+func (c *roomConn) closeSeats(ctx context.Context) error {
+	ms, err := c.rc.ListMembers(ctx, c.ref.ID, c.ref.Token)
+	if err != nil {
+		return fmt.Errorf("the relay's members are not listed: %w", err)
+	}
+	c.st.ObserveMembership(ms.Membership)
+	var unheld []uint16
+	for _, m := range ms.Members {
+		idx := uint16(m.Idx)
+		if !m.Revoked && idx != c.st.Idx() && c.st.Member(idx) == nil {
+			unheld = append(unheld, idx)
+		}
+	}
+	if len(unheld) > 0 {
+		err := updateRooms(ctx, c.p.backend, func(l *roomList) error {
+			r := l.byID(c.ref.ID)
+			if r == nil {
+				return fmt.Errorf("room %s left the rooms record under this command", c.ref.Name)
+			}
+			for _, idx := range unheld {
+				if !slices.Contains(r.Removals, idx) {
+					r.Removals = append(r.Removals, idx)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("the revoke of the seats outside the roster (idx %v) is not queued: %w", unheld, err)
+		}
+		fmt.Fprintf(c.out, "room %s: the relay serves idx %v outside the roster; revoking\n", c.ref.Name, unheld)
+	}
+	if left := c.finishRemovals(ctx); len(left) > 0 {
+		return fmt.Errorf("the revoke of idx %v did not land", left)
+	}
+	return nil
 }
 
 // finishRemovals revokes the idxs whose removal record landed and whose

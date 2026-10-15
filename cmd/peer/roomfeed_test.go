@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/relay/relaytest"
+	"github.com/caoer/peer/internal/room"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/sealed"
 )
@@ -289,6 +291,99 @@ func TestRoomFeedCloseRevokesLink(t *testing.T) {
 	}
 	if out := mustOK(t, "status", "--dir", holder); !strings.Contains(out, "cut — its owner made a new link or closed the feed") {
 		t.Fatalf("the holder's status:\n%s", out)
+	}
+}
+
+// close ends a feed for its link holder even when the closing admin's state
+// does not hold the link (a co-admin's would not: the link lives on the
+// state that made it): close lists the relay's members and revokes the
+// link's read seat as a seat outside the roster. The old link's pull then
+// answers revoked, and the holder's next round goes cut.
+func TestRoomCloseRevokesUnheldLink(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	a := newDir(t, config{})
+	id := createRoom(t, a, base, "f1", "--feed")
+	roomSendOK(t, a, "--text", "before", "f1")
+	link := linkOf(t, a, "f1")
+	holder := filepath.Join(t.TempDir(), "peer")
+	if n, out := follow(t, holder, link); n != "1" {
+		t.Fatalf("follow delivered %s, want 1:\n%s", n, out)
+	}
+	stripLink(t, a, id)
+	if _, _, ast := roomOf(t, a, "f1"); ast.Link() != nil {
+		t.Fatal("the closing admin's state still holds the link")
+	}
+
+	out := mustOK(t, "room", "close", "--dir", a, "f1")
+	for _, want := range []string{"the relay serves idx [1] outside the roster", "idx 1 revoked", "closed room f1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("close did not say %q:\n%s", want, out)
+		}
+	}
+	f, _ := invite.ParseFeed(link)
+	if _, err := relay.New(f.Relay, nil).PullRoom(ctx, id, f.Token, -1); !errors.Is(err, relay.ErrRevoked) {
+		t.Fatalf("the link pulls after the close: %v, want revoked", err)
+	}
+	if out := mustOK(t, "serve", "--dir", holder, "--once"); !strings.Contains(out, "closed the feed, and this one is revoked") {
+		t.Fatalf("the holder's serve after the close:\n%s", out)
+	}
+	if ref := refOf(t, holder, f.Room[:8]); ref.Stage != stageCut || ref.Token != "" {
+		t.Fatalf("the holder's rooms entry after its round: stage %q, token %q; want cut, no token", ref.Stage, ref.Token)
+	}
+}
+
+// close revokes a stray seat — one the relay minted and no party holds —
+// through the removals' revoke queue: when the relay does not answer the
+// revoke, the close refuses with the idx queued and the seat still reading;
+// the close run again lands it.
+func TestRoomCloseRevokesStraySeat(t *testing.T) {
+	ctx := context.Background()
+	_, base, front := startPathFront(t, http.MethodDelete, "/members/1")
+	a := newDir(t, config{})
+	id := createRoom(t, a, base, "r1")
+	rc := relay.New(base, nil)
+	stray, err := rc.AddMember(ctx, id, refOf(t, a, "r1").Token, relay.RoleRead)
+	if err != nil || stray.Idx != 1 {
+		t.Fatalf("the stray mint: idx %d, %v; want idx 1", stray.Idx, err)
+	}
+
+	front.arm(fail503)
+	mustRefuse(t, "the revoke of idx [1] did not land", "room", "close", "--dir", a, "r1")
+	if ref := refOf(t, a, "r1"); !slices.Equal(ref.Removals, []uint16{1}) {
+		t.Fatalf("the failed revoke is not queued: %v", ref.Removals)
+	}
+	if _, err := rc.PullRoom(ctx, id, stray.Token, -1); err != nil {
+		t.Fatalf("the stray seat before its revoke landed: %v", err)
+	}
+	if out := mustOK(t, "room", "close", "--dir", a, "r1"); !strings.Contains(out, "idx 1 revoked") || !strings.Contains(out, "closed room r1") {
+		t.Fatalf("the close run again:\n%s", out)
+	}
+	if _, err := rc.PullRoom(ctx, id, stray.Token, -1); !errors.Is(err, relay.ErrRevoked) {
+		t.Fatalf("the stray seat pulls after the close: %v, want revoked", err)
+	}
+}
+
+// stripLink drops the link from the party's state for room id, as a state
+// that never made the link holds it.
+func stripLink(t *testing.T, dir, id string) {
+	t.Helper()
+	ctx := context.Background()
+	b := mustParty(t, dir).backend
+	data, v, err := b.Load(ctx, room.Key(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	delete(rec, "link")
+	if data, err = json.Marshal(rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store(ctx, room.Key(id), data, v); err != nil {
+		t.Fatal(err)
 	}
 }
 
