@@ -509,7 +509,7 @@ func (p *party) onRoomJoin(ctx context.Context, sv *server, pe roster.Peer, ch *
 		if err != nil {
 			return nil, "", err
 		}
-		seq, _, err := c.postMembership(ctx, room.KindRoster, body)
+		seq, res, err := c.postMembership(ctx, room.KindRoster, body)
 		if errors.Is(err, errQueued) {
 			// Committed, folded and journaled: serve puts it, and the token
 			// follows its landing (finishAdds), rule 2's order.
@@ -518,8 +518,13 @@ func (p *party) onRoomJoin(ctx context.Context, sv *server, pe roster.Peer, ch *
 		// errMoot: the entry folded already — the join replayed after its
 		// record landed; the token goes out as after the put.
 		folded := errors.Is(err, errMoot)
-		if err != nil && !folded {
-			return nil, fmt.Sprintf("the roster record adding %s did not land (%v); peer room add %s %s starts the add again", pe.Name, err, ref.Name, pe.Name), nil
+		switch {
+		case err == nil, folded:
+		case passingPost(err, res):
+			// The join stays in the spool: the next round runs it again.
+			return nil, "", fmt.Errorf("room %s: the roster record adding %s waits for the next round: %w", ref.Name, pe.Name, err)
+		default:
+			return nil, fmt.Sprintf("the roster record adding %s did not land (%v); peer room add %s %s sends the seat again", pe.Name, err, ref.Name, pe.Name), nil
 		}
 		err = updateRooms(ctx, p.backend, func(l *roomList) error {
 			if cur := l.byID(ref.ID); cur != nil {
@@ -540,6 +545,18 @@ func (p *party) onRoomJoin(ctx context.Context, sv *server, pe roster.Peer, ch *
 	}
 	reply, err := p.channelMessage(ch, kindRoomToken, roomTokenMessage(ref.ID, pa))
 	return reply, "", err
+}
+
+// passingPost reports whether a membership post failed on trouble a later
+// round outlives — the relay's timeout, 5xx or rate limit, a store conflict
+// — rather than on a verdict: the fold's refusal or the cap, a refusal from
+// the relay no retry changes, or a room this party is out of.
+func passingPost(err error, res room.Result) bool {
+	switch {
+	case !res.Folded(), len(res.Refused) > 0, errors.Is(err, room.ErrCap), errors.Is(err, errGone), permanentRoomPut(err):
+		return false
+	}
+	return true
 }
 
 // onCardUpdate (an admin) takes a member's new room card over the channel —

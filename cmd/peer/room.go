@@ -229,7 +229,10 @@ func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.A
 // confirmed channel to the peer it sends room-invite, and the rest — mint on
 // room-accept, room-seat, the roster record on room-join, room-token — runs
 // in serve as the peer's answers arrive. An add whose roster record landed
-// but whose token never left is finished here by sending the token again.
+// but whose token never left is finished here by sending the token again;
+// one whose idx is minted and whose roster record has not landed sends the
+// seat again, and the newcomer's room-join brings the rest. A minted idx is
+// never dropped: nothing is minted twice for one add.
 func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out io.Writer) error {
 	dir, err := peerDir(dir)
 	if err != nil {
@@ -286,7 +289,8 @@ func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out i
 		return err
 	}
 	party := keys.PartyID(ch.Root())
-	if pa := ref.add(pe.Channel); pa != nil && pa.Stage == addRostered {
+	switch pa := ref.add(pe.Channel); {
+	case pa != nil && pa.Stage == addRostered:
 		// The roster record landed and the token did not leave: send it now.
 		if err := p.sendOnChannel(ctx, *pe, kindRoomToken, roomTokenMessage(ref.ID, pa), out); err != nil {
 			return err
@@ -295,6 +299,16 @@ func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out i
 			return err
 		}
 		fmt.Fprintf(out, "room %s: sent %s the token for idx %d again\n", ref.Name, peerName, pa.Idx)
+		return nil
+	case pa != nil && pa.Stage == addSeated:
+		// The idx is minted and the roster record has not landed: the seat
+		// goes again, and the newcomer, seated at that idx, answers with its
+		// room-join. A fresh invite here would drop the minted idx, which the
+		// seated newcomer refuses anyway.
+		if err := p.sendOnChannel(ctx, *pe, kindRoomSeat, roomSeat{Room: ref.ID, Idx: pa.Idx}, out); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "room %s: %s holds idx %d; sent its seat again — its room-join brings the roster record, then the token\n", ref.Name, peerName, pa.Idx)
 		return nil
 	}
 	for _, m := range st.Members() {

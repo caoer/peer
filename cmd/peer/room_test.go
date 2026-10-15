@@ -238,6 +238,43 @@ func TestRoomRecordInMintRosterWindow(t *testing.T) {
 	}
 }
 
+// A transient relay error while the adder handles room-join leaves the join
+// in the spool: a later round posts its roster record and the token goes
+// out. A re-add while the add is seated sends the seat again and keeps the
+// minted idx; nothing is minted twice.
+func TestRoomJoinTransientErrorReplays(t *testing.T) {
+	ctx := context.Background()
+	_, base, front := startPathFront(t, http.MethodGet, "/records")
+	a, b := newDir(t, config{}), newDir(t, config{})
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	id := createRoom(t, a, base, "r1")
+	mustOK(t, "room", "add", "--dir", a, "r1", "bob")
+	mustOK(t, "serve", "--dir", b, "--once") // invite → accept
+	mustOK(t, "serve", "--dir", a, "--once") // accept → mint, seat
+	mustOK(t, "serve", "--dir", b, "--once") // seat → join
+	front.arm(fail503)                       // the adder's pull before the roster record
+	cmd(t, "serve", "--dir", a, "--once")
+	if ref := refOf(t, a, "r1"); len(ref.Adds) != 1 || ref.Adds[0].Stage != addSeated || ref.Adds[0].Idx != 1 {
+		t.Fatalf("after the 503 the add is %+v, want seated at idx 1", ref.Adds)
+	}
+	if out := mustOK(t, "room", "add", "--dir", a, "r1", "bob"); !strings.Contains(out, "seat again") {
+		t.Errorf("a re-add while seated:\n%s", out)
+	}
+	for _, dir := range []string{b, a, b, a, b} {
+		mustOK(t, "serve", "--dir", dir, "--once")
+	}
+	if bref := refOf(t, b, id[:8]); bref.Stage != stageJoined || bref.Idx != 1 {
+		t.Fatalf("the newcomer is %s at idx %d, want joined at idx 1", bref.Stage, bref.Idx)
+	}
+	ms, err := relay.New(base, nil).ListMembers(ctx, id, refOf(t, a, "r1").Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms.Members) != 2 {
+		t.Fatalf("the relay holds %d seats, want 2 — one mint for bob: %+v", len(ms.Members), ms.Members)
+	}
+}
+
 // Under --add members a member adds a party it holds a confirmed channel
 // with, and every member folds that roster; under admins the member's add
 // is refused before anything is sent.
