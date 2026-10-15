@@ -140,6 +140,38 @@ func TestIdentityRotate(t *testing.T) {
 	_ = rc
 }
 
+// A channel that is not confirmed gets no card and loses its session, so
+// nothing on it opens again: the cost names each such channel with its state
+// and how it is set up again — the host side invites again, the guest side
+// accepts the same link again — and the rotation's last line repeats it.
+func TestIdentityRotateNamesUnconfirmedChannels(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	hostDir, guestDir := newDir(t, hostCfg()), newDir(t, config{})
+	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, "ancan")
+	link, _, _ := strings.Cut(out, "\n")
+	mustOK(t, "accept", "--dir", guestDir, "--name", "zt", link)
+
+	// The guest between its accept and the host's confirm, the host with its
+	// invite out.
+	guestStep := "zt (accepted): peer accept <the same link> before it expires"
+	hostStep := "ancan (invited): peer invite ancan"
+	for dir, want := range map[string]string{guestDir: guestStep, hostDir: hostStep} {
+		code, out, errb := cmd(t, "identity", "rotate", "--dir", dir)
+		if code != 1 || !strings.Contains(errb, "--yes") {
+			t.Fatalf("exit %d, stderr %q", code, errb)
+		}
+		if !strings.Contains(out, "1 channel(s) not confirmed get no card") || !strings.Contains(out, want) {
+			t.Errorf("the cost does not name the channel that is not confirmed (%q):\n%s", want, out)
+		}
+	}
+
+	out = mustOK(t, "identity", "rotate", "--dir", guestDir, "--yes")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "fleet: ") || !strings.Contains(last, guestStep) {
+		t.Fatalf("the last line does not repeat the step for zt:\n%s", out)
+	}
+}
+
 // putBumpRelay fronts the fake relay and runs the armed bump once, on the
 // next envelope put — another host of the party committing the keys record
 // while the rotation is on the network.

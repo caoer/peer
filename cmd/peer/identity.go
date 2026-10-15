@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/caoer/peer/internal/card"
@@ -183,8 +184,31 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 		return err
 	}
 	fmt.Fprintf(out, "wrote %s; the old one is %s\n", filepath.Join(dir, identityFile), filepath.Base(retired))
-	fmt.Fprintf(out, "fleet: put the new %s where sops holds it and deploy; a host still holding the old one cannot open the state until then. Each peer runs peer keys accept <you> after checking the new key with you over a channel you trust.\n", identityFile)
+	fleet := fmt.Sprintf("fleet: put the new %s where sops holds it and deploy; a host still holding the old one cannot open the state until then. Each peer runs peer keys accept <you> after checking the new key with you over a channel you trust.", identityFile)
+	if steps := unconfirmedSteps(r); len(steps) > 0 {
+		fleet += " Not confirmed, so set up again: " + strings.Join(steps, "; ") + "."
+	}
+	fmt.Fprintln(out, fleet)
 	return nil
+}
+
+// unconfirmedSteps lists each channel that is not confirmed with how it is
+// set up again after a rotation, which sends it no card and drops its
+// session: the host side invites again, since its invite's card names the
+// retired key; the guest side accepts the same link again, which builds a
+// session to the invite's card under the new key.
+func unconfirmedSteps(r *roster.Roster) []string {
+	var steps []string
+	for _, pe := range r.Peers {
+		switch {
+		case pe.State == roster.Confirmed:
+		case pe.Side == roster.Host:
+			steps = append(steps, fmt.Sprintf("%s (%s): peer invite %s, and send them the new link", pe.Name, pe.State, pe.Name))
+		default:
+			steps = append(steps, fmt.Sprintf("%s (%s): peer accept <the same link> before it expires (once it has, ask %s for a new invite)", pe.Name, pe.State, pe.Name))
+		}
+	}
+	return steps
 }
 
 // printRotateCost is what --yes acknowledges.
@@ -197,6 +221,12 @@ func printRotateCost(out io.Writer, r *roster.Roster, sealed bool, identity stri
 	}
 	fmt.Fprintf(out, "peer identity rotate replaces identity key %s. The cost:\n", identity)
 	fmt.Fprintf(out, "- every session on the %d channel(s) is dropped: nothing a peer sent under the old key opens after this, and each of the %d confirmed peer(s) must run peer keys accept <you> before a message flows again\n", len(r.Peers), confirmed)
+	if steps := unconfirmedSteps(r); len(steps) > 0 {
+		fmt.Fprintf(out, "- %d channel(s) not confirmed get no card and lose their session, so nothing on them opens again and the other side is not told: an invite you sent carries a card naming the old key, so its guest is never confirmed; on a link you accepted the host's confirm still succeeds and it sends into a channel you cannot open. Set each up again:\n", len(steps))
+		for _, s := range steps {
+			fmt.Fprintf(out, "  - %s\n", s)
+		}
+	}
 	if sealed {
 		fmt.Fprintln(out, "- the shared state is re-sealed under the new identity key: every fleet host that holds the old identity.json cannot open it from this moment until the new identity.json is in sops and deployed — peer serve there fails every round until then")
 	} else {
