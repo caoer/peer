@@ -349,8 +349,10 @@ func runRoomHandover(ctx context.Context, dir, name, peerName string, out io.Wri
 		}
 		return fmt.Errorf("room %s: %s (idx %d) is a %s member; admin goes to a write member alone", c.ref.Name, peerName, m.Idx, rm.Role)
 	}
-	if h := c.ref.handover(pe.Channel); h != nil {
-		// A re-run: the stored token goes out again, no second grant.
+	if h := c.ref.handover(pe.Channel); h != nil && h.Idx == m.Idx {
+		// A re-run: the stored token goes out again, no second grant. An
+		// entry at another idx is an earlier handover to a member that left
+		// and was added again; the relay revoked its token with that idx.
 		err = updateRooms(ctx, c.p.backend, func(l *roomList) error {
 			if cur := l.byID(c.ref.ID); cur != nil {
 				if ph := cur.handover(pe.Channel); ph != nil {
@@ -385,8 +387,11 @@ func runRoomHandover(ctx context.Context, dir, name, peerName string, out io.Wri
 			if cur == nil {
 				return fmt.Errorf("room %s left the rooms record under this command", c.ref.Name)
 			}
-			if cur.handover(pe.Channel) == nil {
-				cur.Handovers = append(cur.Handovers, pendingHandover{Peer: peerName, Channel: pe.Channel, Idx: m.Idx, Recorded: recorded})
+			fresh := pendingHandover{Peer: peerName, Channel: pe.Channel, Idx: m.Idx, Recorded: recorded}
+			if ph := cur.handover(pe.Channel); ph != nil {
+				*ph = fresh
+			} else {
+				cur.Handovers = append(cur.Handovers, fresh)
 			}
 			return nil
 		})
