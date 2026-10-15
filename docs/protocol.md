@@ -55,7 +55,7 @@ The protocol ends when a message has been decrypted by the receiving host (decry
 - **Unknown fields.** The top-level `critical` array names the fields a reader must understand. A card naming in `critical` a field the reader does not know is refused whole; any other unknown field is ignored. The rule applies to top-level fields.
 - **Current key**: the first entry of `keys` whose `until` is `null`. A key whose `until` has passed is retired: it signs nothing and opens nothing from then on.
 - **Two forms.** The card placed in clear on the relay (envelope #0) carries no `details`. The card sent inside the session after both sides have pinned each other may carry `details` — what one party chooses to tell this one peer (receiver types, model, policy, hours). Neither form is published anywhere else.
-- **Updates travel the channel.** A party sends a new card as a `card` message on every confirmed channel. The receiver pins it without asking anyone when it is signed by the pinned root, lists the identity key the session uses unretired, and is not older (`issued`) than the pinned card. A card naming another identity key, or retiring the one in use, is a key change (§ Key lifecycle).
+- **Updates travel the channel.** A party sends a new card as a `card` message on every confirmed channel. The receiver pins it without asking anyone when it is signed by the pinned root, names the identity key the session uses as its current key, and is not older (`issued`) than the pinned card. A card naming another current key, or giving the one in use an `until` — whatever the receiver's clock says of that time — is a key change (§ Key lifecycle).
 
 ## Invite, accept, confirm
 

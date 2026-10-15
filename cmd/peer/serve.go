@@ -629,12 +629,39 @@ func (c *channelServe) probeKeyChange(ctx context.Context, rec relay.Record, cau
 	return errParked
 }
 
+// keyChange reports whether a card the peer sent in-session changes the
+// identity key the session runs under: its current key is another, or it
+// gives the session's key an until, past or future by this host's clock, so a
+// rotation from a sender whose clock runs ahead reaches the human too (design
+// §3.2: 先提示人再生效). Retirement by the clock is IsTrustedIdentity's.
+func keyChange(ch *store.Channel, c *card.Card) bool {
+	got, ok := ch.RemoteIdentity(session.Addr)
+	if !ok {
+		return true
+	}
+	inUse := func(k *card.Key) bool {
+		raw, err := keys.ParseCurve(k.Identity)
+		return err == nil && raw == got
+	}
+	cur, err := session.CurrentKey(c)
+	if err != nil || !inUse(cur) {
+		return true
+	}
+	for i := range c.Keys {
+		if c.Keys[i].Until != nil && inUse(&c.Keys[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // receiveCard reads a card the peer sent in-session. Signed by the pinned
-// root and listing the identity key the session uses, it refreshes the pin
-// when it is not older than the pinned card — agents, relays, details, signed
-// prekey, no human (design §3.3). Naming another identity key, or retiring the
-// one in use, it is a key change: skipped when it does not supersede the
-// pinned card, else held for the human and the channel waits
+// root and naming the session's identity key as its current key, it
+// refreshes the pin when it is not older than the pinned card — agents,
+// relays, details, signed prekey, no human (design §3.3). Naming another
+// current key, or giving the one in use an until (keyChange), it is a key
+// change: skipped when it does not supersede the pinned card, else held for
+// the human and the channel waits
 // (§3.2: 先提示人再生效). A guest still waiting for the host's details card
 // (state accepted) answers with its own details card and is confirmed.
 func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec relay.Record, m *session.Message) error {
@@ -648,7 +675,7 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 		fmt.Fprintf(c.sv.out, "skip %s #%d: %v\n", c.pe.Name, rec.Seq, err)
 		return c.commit(ctx, rec)
 	}
-	if s.CheckIdentity(pc) != nil {
+	if keyChange(c.ch, pc) {
 		if err := supersedes(c.ch.Card(), pc); err != nil {
 			fmt.Fprintf(c.sv.out, "skip %s #%d: a card naming a new identity key that does not supersede the pinned one: %v\n", c.pe.Name, rec.Seq, err)
 			return c.commit(ctx, rec)

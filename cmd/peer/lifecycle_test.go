@@ -549,6 +549,56 @@ func TestRetiredKeyCannotRollBackThePinnedCard(t *testing.T) {
 	}
 }
 
+// A rotation card from a peer whose clock runs ahead of this host's gives the
+// old key an until still in this host's future. It names another current key
+// and gives the session's key an until, so it is a key change whatever the
+// until says against this host's clock: serve holds it for the human, the
+// pinned card stays as it was, and peer keys accept has it to apply.
+func TestRotationUnderClockSkewIsHeld(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	gp, _, gpe := channelOf(t, p.guestDir, "zt")
+	gk, _ := gp.store.Keys(ctx)
+	_, hch, _ := channelOf(t, p.hostDir, "ancan")
+	pinned := hch.Card().Body
+
+	// What peer identity rotate builds and sends on a guest whose clock is an
+	// hour ahead.
+	skewNow := time.Now().Add(time.Hour)
+	newID, err := keys.GenerateIdentity(gp.id.Party)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPK := &keys.PartyKeys{SignedPrekey: gk.PartyKeys.SignedPrekey, Prekeys: gk.PartyKeys.Prekeys, NextPrekeyID: gk.PartyKeys.NextPrekeyID}
+	if err := newPK.RotateSignedPrekey(newID); err != nil {
+		t.Fatal(err)
+	}
+	old := card.New(gp.id, gk.PartyKeys, nil, nil, skewNow).Keys[0]
+	old.Until = &skewNow
+	_, details, err := gp.buildOwnCard(newID, newPK, skewNow, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sink bytes.Buffer
+	if err := gp.publish(ctx, *gpe, details, newPK.SignedPrekey.ID(), &sink); err != nil {
+		t.Fatal(err)
+	}
+
+	newKey := keys.CurveText(newID.PublicKey())
+	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	if !strings.Contains(out, "ancan: waiting at #") || !strings.Contains(out, "names a new identity key "+newKey) || strings.Contains(out, "card from ancan pinned") {
+		t.Fatalf("host serve on the skewed rotation card:\n%s", out)
+	}
+	_, hch, _ = channelOf(t, p.hostDir, "ancan")
+	if held, _ := hch.Held(); held == nil || !bytes.Equal(held.Body, details.Body) || !bytes.Equal(hch.Card().Body, pinned) {
+		t.Fatalf("held %v, pin unchanged %v", held != nil, bytes.Equal(hch.Card().Body, pinned))
+	}
+	if out := mustOK(t, "keys", "accept", "--dir", p.hostDir, "ancan"); !strings.Contains(out, "accepted ancan's new identity key "+newKey) {
+		t.Fatalf("keys accept:\n%s", out)
+	}
+}
+
 // ageSignedPrekey makes the party's current signed prekey look age old.
 func ageSignedPrekey(t *testing.T, ctx context.Context, dir string, age time.Duration) {
 	t.Helper()
