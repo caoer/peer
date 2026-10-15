@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caoer/peer/internal/deliver"
 	"github.com/caoer/peer/internal/relay/relaytest"
+	"github.com/caoer/peer/internal/room"
 	"github.com/caoer/peer/internal/sealed"
+	"github.com/caoer/peer/internal/store/pages/pagestest"
 )
 
 // putForged seals a text record as dir's party — its sign key, its idx in the
@@ -114,5 +118,59 @@ func TestRoomReceiverGuards(t *testing.T) {
 			id := putForged(t, tc.dir, tc.room, tr.b, tr.bcRoom, tc.shape)
 			refusedAtC(t, tr, id, tc.why)
 		})
+	}
+}
+
+// A member's identity key is retired at its rotation. A roomcard record the
+// relay stores after that, signed by the retired key under a header at from
+// before it, is refused: the fold reads the retirement at the relay's at of
+// the pulled record, never at the writer's own word — the member's keys stay
+// as they were.
+func TestRoomRetiredIdentityKeyReadAtRelayAt(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	ps := pagestest.New("state-0123456789abcdef", "zt:state-secret")
+	t.Cleanup(ps.Close)
+	a, b := newDir(t, config{}), newDir(t, config{State: stateConfig{Page: ps.URL, Slug: ps.Slug, Login: ps.Bearer}})
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	id := createRoom(t, a, base, "r1")
+	addToRoom(t, a, b, "r1", "bob")
+	mustOK(t, "serve", "--dir", a, "--once")
+	retired := mustParty(t, b).id
+	backdated := time.Now().UTC().Truncate(time.Millisecond)
+
+	// bob rotates his identity key; alice accepts it and folds his re-signed card.
+	mustOK(t, "identity", "rotate", "--dir", b, "--yes")
+	mustOK(t, "serve", "--dir", a, "--once")
+	mustOK(t, "keys", "accept", "--dir", a, "bob")
+	mustOK(t, "serve", "--dir", a, "--once")
+	mustOK(t, "serve", "--dir", b, "--once")
+	if out := mustOK(t, "serve", "--dir", a, "--once"); !strings.Contains(out, "bob's new room card is announced") {
+		t.Fatalf("A's serve on bob's re-signed card:\n%s", out)
+	}
+	mustOK(t, "serve", "--dir", b, "--once")
+	_, _, ast := roomOf(t, a, "r1")
+	seal, dropped := ast.Member(1).Seal(), ast.Dropped()
+
+	_, _, bst := roomOf(t, b, id[:8])
+	evil, err := room.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := room.NewCard(id, 1, evil.PublicKey(), bst.SignKey().Public().(ed25519.PublicKey), time.Now()).Signed(retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(room.RoomCardBody{RoomCard: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	putForged(t, b, id[:8], b, id[:8], func(h *sealed.Header, m *roomMessage) {
+		h.At, m.At = backdated, backdated
+		m.Kind, m.Body = room.KindRoomCard, body
+	})
+	out := mustOK(t, "serve", "--dir", a, "--once")
+	_, _, ast = roomOf(t, a, "r1")
+	if !ast.Member(1).Seal().Equal(seal) || ast.Dropped() != dropped+1 {
+		t.Fatalf("A folded a room card signed by bob's retired key (dropped %d → %d):\n%s", dropped, ast.Dropped(), out)
 	}
 }
