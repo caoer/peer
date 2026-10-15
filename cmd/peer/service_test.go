@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -294,6 +295,53 @@ func TestServeServiceUnfetchedAttachmentFetches(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(deliverDirOf(p.hostDir), string(deliver.Quarantine), id, "notes.txt"))
 	if err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("peer fetch kept %d bytes: %v", len(got), err)
+	}
+}
+
+// A URL whose queued POST fails is not tried again in the round: one that
+// never answers holds the round, and the leader's message behind it, for
+// one timeout, not one per queued message; the rest of its queue keeps its
+// failure counts for the next round.
+func TestServeServiceQueueSkipsAFailedURL(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	dead := newHook(t, func(_ int, r *http.Request) int { <-r.Context().Done(); return 0 })
+	trustHooks(t, dead)
+	root := uccRoot(t)
+	serviceMap(t, root, map[string]string{"dead": dead.URL})
+	p := handshake(t, newDir(t, uccCfg(root)), newDir(t, config{}), base)
+	const n = 8
+	for i := range n {
+		sendOK(t, p.guestDir, "--text", fmt.Sprint("m", i), "zt/dead")
+	}
+	mustOK(t, "serve", "--dir", p.hostDir, "--once") // each of the n POSTs fails: queued
+	if q := serviceQueue(t, p.hostDir); len(q) != n {
+		t.Fatalf("service queue %d, want %d", len(q), n)
+	}
+	id, _ := sendOK(t, p.guestDir, "--text", "urgent", "zt/leader")
+	start := time.Now()
+	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	took := time.Since(start)
+	if !strings.Contains(out, id) {
+		t.Fatalf("the leader's message was not delivered:\n%s", out)
+	}
+	if posts := dead.count() - n; posts != 1 || took >= n/2*serviceTimeout {
+		t.Errorf("the round made %d POSTs to the dead URL in %v, want one, about one %v timeout", posts, took, serviceTimeout)
+	}
+	var failures []int
+	for _, q := range serviceQueue(t, p.hostDir) {
+		var e serviceEntry
+		b, err := os.ReadFile(q)
+		if err == nil {
+			err = json.Unmarshal(b, &e)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		failures = append(failures, e.Failures)
+	}
+	slices.Sort(failures)
+	if want := append(slices.Repeat([]int{1}, n-1), 2); !slices.Equal(failures, want) {
+		t.Errorf("failure counts %v, want %v", failures, want)
 	}
 }
 

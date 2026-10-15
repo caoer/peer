@@ -98,7 +98,10 @@ func (sv *server) posted(u string, m *session.Message) error {
 	return sv.quarantineLocal(m, fmt.Sprintf("content not fetched; the record was posted to %s", u))
 }
 
-// retryServices tries every queued message once, in id order.
+// retryServices tries every queued message once, in id order. A URL whose
+// POST fails is not tried again in the round: the rest of its queue waits
+// for the next round, failure counts unchanged, so a URL that never answers
+// holds the round for one timeout, not one per message.
 func (sv *server) retryServices() {
 	dir := filepath.Join(sv.p.dir, serviceDir)
 	names, err := filepath.Glob(filepath.Join(dir, "*.json"))
@@ -107,6 +110,7 @@ func (sv *server) retryServices() {
 		return
 	}
 	sort.Strings(names)
+	failed := map[string]bool{}
 	for _, n := range names {
 		var e serviceEntry
 		b, err := os.ReadFile(n)
@@ -121,7 +125,11 @@ func (sv *server) retryServices() {
 			fmt.Fprintf(sv.out, "service queue %s: %v\n", filepath.Base(n), err)
 			continue
 		}
+		if failed[e.URL] {
+			continue
+		}
 		if err := postService(e.URL, m); err != nil {
+			failed[e.URL] = true
 			if err := sv.serviceFailed(&e, m, err); err != nil {
 				fmt.Fprintf(sv.out, "service queue %s: %v\n", m.ID, err)
 			}
