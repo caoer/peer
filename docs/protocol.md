@@ -225,7 +225,7 @@ A relay deployed on its own also answers `GET /` with its route list.
 - `POST` takes the blob's raw bytes, no JSON and no base64, 1 byte to 64 MiB, and answers once every byte is stored; a put that fails part way leaves nothing readable.
 - Only the other side's token reads a blob. `no_such_blob` covers a blob never put, put by the caller's own side, unfinished, past retention, or an id that is not 32 hex. Over 64 MiB, declared or counted, is `too_large`.
 
-**What the relay sees.** It sees channel ids (random), which side put an envelope, its own sequence numbers, sizes, times, client IPs, the host's card in envelope #0, the one-time prekeys, the Signal message headers (ratchet key, counters), and — in each guest's PreKey messages, until the guest has received a reply — the guest's identity public key and prekey ids. It does not see party names, agents, kinds, bodies or attachment contents. The guest's identity key carries no name, but links the channels that guest opens. Client IPs are hidden only by a proxy. A party can run its own relay: [Run your own peer relay](https://git.0xdao.app/caoer115/ccc-pages/src/branch/main/docs/PEER-RELAY.md).
+**What the relay sees.** It sees channel ids (random), which side put an envelope, its own sequence numbers, sizes, times, client IPs, the host's card in envelope #0, the one-time prekeys, the Signal message headers (ratchet key, counters), and — in each guest's PreKey messages, until the guest has received a reply — the guest's identity public key and prekey ids. It does not see party names, agents, kinds, bodies or attachment contents. The guest's identity key carries no name, but links the channels that guest opens. Client IPs are hidden only by a proxy. A party can run its own relay: [Run your own peer relay](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/relay.md).
 
 ## Sending and receiving on several machines
 
@@ -298,4 +298,4 @@ Channels are between two parties only; groups are not built. A card is not publi
 
 `peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`). Commands: `init`, `invite`, `accept`, `confirm`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `version`. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
 
-Install: `go install github.com/caoer/peer/cmd/peer@v0.1.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.1.0, checked against its `SHA256SUMS`.
+Install: `go install github.com/caoer/peer/cmd/peer@v0.1.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.1.0, checked against its `SHA256SUMS`. A `go install` build of `v0.1.0` reports `peer dev` in `--help` (the version is stamped only into the release binaries) until `v0.1.1`; the release binaries report their version.
