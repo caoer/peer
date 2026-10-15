@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -516,4 +517,48 @@ func TestRoomSeatMapRouting(t *testing.T) {
 	}
 	q := records(t, deliverDirOf(a), deliver.Quarantine)
 	roomRecord(t, q[none], B, A, chat, "nobody takes it")
+}
+
+// The roster moves between A's pull and its put: bob, an admin since the
+// handover, removes carol. The relay answers A's put 409; A folds the
+// removal and seals the same plaintext again to the roster as it now stands
+// — a stanza for bob, none for carol, who left.
+func TestRoomPut409ResealsToCurrentRoster(t *testing.T) {
+	srv, base, front := startFront(t)
+	tr := newTrio(t, base, srv, config{})
+	mustOK(t, "room", "handover", "--dir", tr.a, "r1", "bob")
+	mustOK(t, "serve", "--dir", tr.b, "--once")
+	mustOK(t, "serve", "--dir", tr.c, "--once")
+	m0 := srv.RoomMembership(tr.id)
+	front.arm(func(http.ResponseWriter, *http.Request) bool {
+		// A's own records never come back on its pull: the removal is bob's.
+		if code, _, errb := cmd(t, "room", "remove", "--dir", tr.b, tr.bcRoom, "2"); code != 0 {
+			t.Errorf("bob's remove of carol: exit %d: %s", code, errb)
+		}
+		return false
+	})
+	code, out, errb := cmd(t, "send", "--dir", tr.a, "--text", "after the removal", "r1")
+	if code != 0 || roomSentRE.FindStringSubmatch(out) == nil {
+		t.Fatalf("A's send: exit %d\n%s%s", code, out, errb)
+	}
+	if !strings.Contains(errb, "idx 2 left") {
+		t.Fatalf("A's send did not fold the removal after the 409:\n%s", errb)
+	}
+	if srv.RoomMembership(tr.id) != m0+2 {
+		t.Fatalf("membership %d, want %d: the removal record's bump and the revoke", srv.RoomMembership(tr.id), m0+2)
+	}
+	rows := srv.RoomRecords(tr.id)
+	var last []byte
+	for _, r := range rows {
+		if r.Idx == 0 {
+			last = mustB64(t, r.Body)
+		}
+	}
+	rec, err := sealed.Parse(last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if to := rec.Recipients(); !slices.Contains(to, 1) || slices.Contains(to, 2) {
+		t.Fatalf("A's record is sealed to %v: want bob (1), not carol (2)", to)
+	}
 }
