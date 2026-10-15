@@ -791,6 +791,12 @@ func (c *roomConn) post(ctx context.Context, mp membershipPost) (int64, room.Res
 			}
 			return 0, res, fmt.Errorf("room %s: %s", c.ref.Name, why)
 		}
+		if kind == room.KindRoster && len(res.Joined)+len(res.Updated)+len(res.Left) == 0 {
+			// The fold at head already holds what this record says — a join
+			// replayed after its record landed, a removal another admin
+			// posted first: no ctr to spend, no notice for every member.
+			return 0, res, errMoot
+		}
 		ctr := c.st.NextCounter()
 		if err := c.st.Commit(ctx); err != nil {
 			if errors.Is(err, store.ErrConflict) && try < sendTries {

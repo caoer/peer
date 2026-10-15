@@ -213,14 +213,17 @@ func runRoomRemove(ctx context.Context, dir, name, who string, out io.Writer) er
 		return err
 	}
 	seq, _, err := c.post(ctx, membershipPost{kind: room.KindRoster, body: body, bump: true})
-	if errors.Is(err, errQueued) {
+	switch {
+	case errors.Is(err, errQueued):
 		fmt.Fprintf(out, "room %s: the removal of idx %d (%s) is committed and did not land (%v); peer serve puts it, then revokes the idx\n", c.ref.Name, m.Idx, m.Party, err)
 		return nil
-	}
-	if err != nil {
+	case errors.Is(err, errMoot):
+		fmt.Fprintf(out, "room %s: idx %d (%s) is out of the roster already; nothing posted\n", c.ref.Name, m.Idx, m.Party)
+	case err != nil:
 		return err
+	default:
+		fmt.Fprintf(out, "room %s: idx %d (%s) removed (record #%d, membership bumped)\n", c.ref.Name, m.Idx, m.Party, seq)
 	}
-	fmt.Fprintf(out, "room %s: idx %d (%s) removed (record #%d, membership bumped)\n", c.ref.Name, m.Idx, m.Party, seq)
 	c.finishRemovals(ctx)
 	return nil
 }
@@ -430,13 +433,15 @@ func runRoomClose(ctx context.Context, dir, name string, out io.Writer) error {
 			return err
 		}
 		seq, _, err := c.post(ctx, membershipPost{kind: room.KindRoster, body: body, bump: true})
-		if errors.Is(err, errQueued) {
+		switch {
+		case errors.Is(err, errQueued):
 			return fmt.Errorf("the removal of %d members is committed and did not land (%v): run peer serve, then peer room close %s again", len(others), err, c.ref.Name)
-		}
-		if err != nil {
+		case errors.Is(err, errMoot): // every other member is out of the roster already
+		case err != nil:
 			return err
+		default:
+			fmt.Fprintf(out, "room %s: %d members removed (record #%d, membership bumped)\n", c.ref.Name, len(others), seq)
 		}
-		fmt.Fprintf(out, "room %s: %d members removed (record #%d, membership bumped)\n", c.ref.Name, len(others), seq)
 	}
 	if left := c.finishRemovals(ctx); len(left) > 0 {
 		return fmt.Errorf("room %s: the revoke of idx %v did not land; run peer room close %s again", c.ref.Name, left, c.ref.Name)
@@ -660,6 +665,9 @@ func (c *roomConn) checkRevoked(ctx context.Context) {
 		return
 	}
 	seq, _, err := c.post(ctx, membershipPost{kind: room.KindRoster, body: body, bump: true})
+	if errors.Is(err, errMoot) {
+		return // another admin's removal folded first
+	}
 	if err != nil {
 		fmt.Fprintf(c.out, "room %s: idx %v left (token revoked) and the roster record did not land: %v\n", c.ref.Name, gone, err)
 		return
@@ -870,6 +878,9 @@ func (c *roomConn) recard(ctx context.Context, now time.Time) error {
 	if errors.Is(err, errQueued) {
 		fmt.Fprintf(c.out, "room %s: the roster entry with your new identity key is committed and waits in the room outbox (%v)\n", c.ref.Name, err)
 		return nil
+	}
+	if errors.Is(err, errMoot) {
+		return nil // the entry carries this key already
 	}
 	if err != nil {
 		return err

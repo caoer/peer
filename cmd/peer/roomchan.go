@@ -511,7 +511,10 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 			// follows its landing (finishAdds), rule 2's order.
 			return nil, fmt.Sprintf("the roster record adding %s is committed and did not land (%v); serve puts it, then sends the token", pe.Name, err), nil
 		}
-		if err != nil {
+		// errMoot: the entry folded already — the join replayed after its
+		// record landed; the token goes out as after the put.
+		folded := errors.Is(err, errMoot)
+		if err != nil && !folded {
 			return nil, fmt.Sprintf("the roster record adding %s did not land (%v); peer room add %s %s starts the add again", pe.Name, err, ref.Name, pe.Name), nil
 		}
 		err = updateRooms(ctx, p.backend, func(l *roomList) error {
@@ -525,7 +528,11 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 		if err != nil {
 			return nil, "", err
 		}
-		fmt.Fprintf(out, "room %s: %s is idx %d (roster #%d); its token goes out\n", ref.Name, pe.Name, pa.Idx, seq)
+		if folded {
+			fmt.Fprintf(out, "room %s: %s is idx %d (its roster entry folded already); its token goes out\n", ref.Name, pe.Name, pa.Idx)
+		} else {
+			fmt.Fprintf(out, "room %s: %s is idx %d (roster #%d); its token goes out\n", ref.Name, pe.Name, pa.Idx, seq)
+		}
 	}
 	reply, err := p.channelMessage(ch, kindRoomToken, roomTokenMessage(ref.ID, pa))
 	return reply, "", err
@@ -570,6 +577,8 @@ func (p *party) onCardUpdate(ctx context.Context, pe roster.Peer, ch *store.Chan
 	switch {
 	case errors.Is(err, errQueued):
 		return nil, fmt.Sprintf("the roster entry with %s's new room card is committed and did not land (%v); serve puts it", pe.Name, err), nil
+	case errors.Is(err, errMoot), err == nil && len(res.Updated) == 0:
+		return nil, fmt.Sprintf("room %s: %s's room card is no newer than the one folded; nothing posted", ref.Name, pe.Name), nil
 	case err != nil:
 		return nil, fmt.Sprintf("the roster entry with %s's new room card did not land: %v", pe.Name, err), nil
 	case len(res.Updated) == 0:
