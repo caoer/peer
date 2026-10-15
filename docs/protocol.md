@@ -296,3 +296,5 @@ Channels are between two parties only; groups are not built. A card is not publi
 ## The CLI
 
 `peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`). Commands: `init`, `invite`, `accept`, `confirm`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `version`. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
+
+Install: `go install github.com/caoer/peer/cmd/peer@v0.1.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.1.0, checked against its `SHA256SUMS`.

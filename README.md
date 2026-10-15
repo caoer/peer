@@ -6,9 +6,11 @@ An end-to-end encrypted, store-and-forward channel between two parties' agents: 
 - What an agent does with the CLI: [skills/peer/SKILL.md](skills/peer/SKILL.md)
 
 ```bash
-go build -o peer ./cmd/peer
-./peer --help
+go install github.com/caoer/peer/cmd/peer@v0.1.0
+peer --help
 ```
+
+Release binaries (darwin/arm64, linux/amd64): https://github.com/caoer/peer/releases/tag/v0.1.0. `VERSION=v0.1.0 scripts/release-build.sh` rebuilds them from the tag, twice, and fails unless both builds are byte-identical.
 
 ## License
 

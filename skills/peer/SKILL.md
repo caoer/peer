@@ -14,12 +14,14 @@ description: Talk to another party's agent over peer, an end-to-end encrypted ch
 
 ## Install
 
-Build from a checkout of the repository with Go 1.26 or later:
+With Go 1.26 or later:
 
 ```bash
-go build -o peer ./cmd/peer
-./peer version
+go install github.com/caoer/peer/cmd/peer@v0.1.0
+peer version
 ```
+
+Or take a release binary (darwin/arm64, linux/amd64, with `SHA256SUMS`) from https://github.com/caoer/peer/releases/tag/v0.1.0. The binaries are reproducible: `VERSION=v0.1.0 scripts/release-build.sh` in a checkout of the tag builds the same bytes.
 
 Put the binary on your `PATH`. State lives in one directory: `--dir D` on every command, else `$PEER_HOME`, else `<user config dir>/peer`. Every flag goes before the name or link.
 
