@@ -200,6 +200,9 @@ func (sv *server) round(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("%s: %w", pe.Name, err))
 		}
 	}
+	if err := sv.serveRooms(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	sv.writeRoster(ctx)
 	return errors.Join(errs...)
 }
@@ -575,7 +578,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	if err == nil {
 		err = c.checkAddress(m)
 	}
-	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard {
+	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard && !session.RoomKind(m.Kind) {
 		err = c.sv.uccBorder(m)
 	}
 	// A record built under an identity key the pinned card does not list is
@@ -607,6 +610,9 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 		}
 		c.sv.p.writeTimeline(ctx, c.pe.Name, c.ch.Name(), timeline.In, rec.Seq, m)
 		return nil
+	}
+	if session.RoomKind(m.Kind) {
+		return c.receiveRoom(ctx, s, rec, m)
 	}
 	plain, err := m.Marshal()
 	if err != nil {

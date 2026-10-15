@@ -45,6 +45,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdKeys(args[1:], stdout, stderr)
 	case "identity":
 		return cmdIdentity(args[1:], stdout, stderr)
+	case "room":
+		return cmdRoom(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -87,6 +89,16 @@ commands:
             old one, every session is dropped, the state is re-sealed and a
             new identity.json written; prints the cost and refuses without --yes
                                      identity rotate [--dir D] [--yes]
+  room      a sealed room on your relay: create it (you are idx 0, its
+            admin; --add fixes who may add: admins or members), add a peer
+            over its confirmed channel (serve runs the rest: their accept,
+            the mint, their room card, the roster record, the token), list
+            the members, each marked you, matches your channel or vouched
+            by the admin
+            room create [--dir D] [--relay URL] [--login USER:TOKEN]
+                        [--add admins|members] <name>
+            room add [--dir D] [--read] <room> <peer>
+            room members [--dir D] <room>
   version   print the version
 
 the card any command sends is the one on the state (record "card"), signed by

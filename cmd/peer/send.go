@@ -102,6 +102,9 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 	if kind == session.KindCard {
 		return nil, errors.New("a card goes out with peer card publish, not peer send")
 	}
+	if session.RoomKind(kind) {
+		return nil, fmt.Errorf("a %s goes out with peer room add and serve, not peer send", kind)
+	}
 	if !session.ValidKind(kind) {
 		return nil, fmt.Errorf("%w %q: a vendor kind is vnd.<party id>.<name>", session.ErrKind, kind)
 	}

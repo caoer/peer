@@ -44,9 +44,29 @@ const (
 	KindAck      = "ack"
 )
 
+// The v2 channel kinds of a room's join (wire contract v2 § Kinds): the
+// session's own business, like card, never delivered to an agent.
+const (
+	KindRoomInvite = "room-invite"
+	KindRoomAccept = "room-accept"
+	KindRoomSeat   = "room-seat"
+	KindRoomJoin   = "room-join"
+	KindRoomToken  = "room-token"
+)
+
 var kinds = map[string]bool{
 	KindText: true, KindTask: true, KindQuestion: true, KindAnswer: true,
 	KindDoc: true, KindFile: true, KindCard: true, KindAck: true,
+	KindRoomInvite: true, KindRoomAccept: true, KindRoomSeat: true, KindRoomJoin: true, KindRoomToken: true,
+}
+
+// RoomKind reports whether kind is one of a room join's channel kinds.
+func RoomKind(kind string) bool {
+	switch kind {
+	case KindRoomInvite, KindRoomAccept, KindRoomSeat, KindRoomJoin, KindRoomToken:
+		return true
+	}
+	return false
 }
 
 // ErrKind is a message kind outside the v1 set and not a vendor kind.
