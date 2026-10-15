@@ -103,9 +103,14 @@ commands:
             admin hands over or closes), hand the room to a member (the
             handover record, its admin token over the channel), close it
             (everyone removed and revoked, the state dropped), or rotate
-            your seal key now (serve rotates it daily)
+            your seal key now (serve rotates it daily). A --feed room has
+            one writer, you: members read, and its link lets anyone read
+            it — link prints it, link --rotate makes a new one and cuts
+            every old holder off; follow reads a feed from its link alone
+            (on an empty directory it makes the party), and serve delivers
+            its records as room records
             room create [--dir D] [--relay URL] [--login USER:TOKEN]
-                        [--add admins|members] <name>
+                        [--add admins|members] [--feed] <name>
             room add [--dir D] [--read] <room> <peer>
             room members [--dir D] <room>
             room remove [--dir D] <room> <peer | party id | idx>
@@ -113,6 +118,8 @@ commands:
             room handover [--dir D] <room> <peer>
             room close [--dir D] <room>
             room rotate [--dir D] <room>
+            room link [--dir D] [--rotate] <room>
+            room follow [--dir D] [--name N] <feed link>
   version   print the version
 
 the card any command sends is the one on the state (record "card"), signed by

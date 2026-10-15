@@ -154,54 +154,74 @@ func (sv *server) roomBorder(ref roomRef, m *roomMessage) error {
 // deliverRecord is the pull's step for an opened record of a v1 kind: the
 // border, then the spool entry the Commit settles.
 func (c *roomConn) deliverRecord(seq int64, m *roomMessage) error {
-	if err := c.sv.roomBorder(c.ref, m); err != nil {
+	e, err := c.sv.spoolRoom(c.ref, seq, m, c.skip)
+	if e != nil {
+		c.pending = append(c.pending, e)
+	}
+	return err
+}
+
+// spoolRoom is any room reader's delivery step: the border, then the spool
+// entry. A record the border consumes is said through skip and yields no
+// entry; errWait stops the pull before the record.
+func (sv *server) spoolRoom(ref roomRef, seq int64, m *roomMessage, skip func(int64, string, ...any)) (*store.Entry, error) {
+	if err := sv.roomBorder(ref, m); err != nil {
 		if errors.Is(err, errWait) {
-			return err
+			return nil, err
 		}
-		c.skip(seq, "%s %s: %v", m.Kind, m.ID, err)
-		return nil
+		skip(seq, "%s %s: %v", m.Kind, m.ID, err)
+		return nil, nil
 	}
 	plain, err := json.Marshal(m)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	e := &store.Entry{ID: m.ID, Channel: c.ref.ID, Seq: seq, Type: "room", Body: plain}
-	if err := c.sv.roomSpool.Add(e); err != nil {
-		return err
+	e := &store.Entry{ID: m.ID, Channel: ref.ID, Seq: seq, Type: "room", Body: plain}
+	if err := sv.roomSpool.Add(e); err != nil {
+		return nil, err
 	}
-	c.pending = append(c.pending, e)
-	return nil
+	return e, nil
 }
 
 // dropPending forgets the spool entries a Commit did not carry: another
 // host's state is the truth and the records come again from its cursor.
 func (c *roomConn) dropPending() {
-	for _, e := range c.pending {
-		c.sv.roomSpool.Remove(e)
-	}
+	c.sv.dropSpool(c.pending)
 	c.pending = nil
+}
+
+func (sv *server) dropSpool(pending []*store.Entry) {
+	for _, e := range pending {
+		sv.roomSpool.Remove(e)
+	}
 }
 
 // settle births the spool entries the Commit just carried.
 func (c *roomConn) settle() error {
 	pending := c.pending
 	c.pending = nil
+	return c.sv.settleSpool(pending, c.ref.Name)
+}
+
+// settleSpool births committed spool entries of room name, each removed
+// from the spool once born.
+func (sv *server) settleSpool(pending []*store.Entry, name string) error {
 	for _, e := range pending {
-		if err := c.sv.roomSpool.MarkCommitted(e); err != nil {
+		if err := sv.roomSpool.MarkCommitted(e); err != nil {
 			return err
 		}
-		if c.sv.beforeBirth != nil {
-			if err := c.sv.beforeBirth(e); err != nil {
+		if sv.beforeBirth != nil {
+			if err := sv.beforeBirth(e); err != nil {
 				return err
 			}
 		}
-		if err := c.sv.birthRoom(e, c.ref.Name); err != nil {
+		if err := sv.birthRoom(e, name); err != nil {
 			if !errors.Is(err, deliver.ErrRecord) && !errors.Is(err, errSpool) {
 				return err
 			}
-			fmt.Fprintf(c.sv.out, "dropped %s from the room spool: %v\n", e.ID, err)
+			fmt.Fprintf(sv.out, "dropped %s from the room spool: %v\n", e.ID, err)
 		}
-		if err := c.sv.roomSpool.Remove(e); err != nil {
+		if err := sv.roomSpool.Remove(e); err != nil {
 			return err
 		}
 	}
@@ -263,7 +283,15 @@ func (sv *server) replayRoomSpool(ctx context.Context) error {
 		return err
 	}
 	for _, e := range es {
-		if !e.Committed {
+		if r := l.byID(e.Channel); !e.Committed && r != nil && r.Stage == stageFollowing && r.Feed != nil {
+			// A followed feed's Commit is its cursor in the rooms record.
+			if e.Seq > r.Feed.Cursor {
+				if err := sv.roomSpool.Remove(e); err != nil {
+					return err
+				}
+				continue
+			}
+		} else if !e.Committed {
 			st, err := room.Load(ctx, sv.p.backend, e.Channel)
 			if err != nil && !errors.Is(err, room.ErrNoRoom) {
 				return err

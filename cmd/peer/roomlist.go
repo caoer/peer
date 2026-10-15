@@ -38,6 +38,18 @@ const (
 	stageClosed  roomStage = "closed"
 )
 
+// stageFollowing: the party reads a feed by its link alone — no seat, no
+// roster, no room state; the entry holds the link and the cursor (Feed).
+// stageCut: the feed's owner made a new link and the relay revoked the one
+// this party held; a follow of the new link reads on from the cursor.
+const (
+	stageFollowing roomStage = "following"
+	stageCut       roomStage = "cut"
+)
+
+// followed reports whether the party reads the room by a feed link.
+func (s roomStage) followed() bool { return s == stageFollowing || s == stageCut }
+
 // gone reports whether the stage is one the party is out of the room at.
 func (s roomStage) gone() bool { return s == stageLeft || s == stageRemoved || s == stageClosed }
 
@@ -107,6 +119,17 @@ type roomRef struct {
 	// an admin (a read member's rotation, an identity change); it goes again
 	// after room.RotateEvery when the admin's roster entry has not folded.
 	CardSent time.Time `json:"cardSent,omitempty"`
+	// Feed is a followed feed's link and cursor (stageFollowing, stageCut).
+	Feed *followedFeed `json:"feed,omitempty"`
+}
+
+// followedFeed is what a link holder keeps of a feed beside the read token
+// (Token): the link key, the owner's room signing key every record verifies
+// under, and the cursor.
+type followedFeed struct {
+	Key    []byte `json:"key"`
+	Owner  []byte `json:"owner"`
+	Cursor int64  `json:"cursor"`
 }
 
 // handover is the pending handover over channel, nil when none.

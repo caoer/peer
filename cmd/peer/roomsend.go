@@ -320,6 +320,16 @@ func (c *roomConn) recipients(m *roomMessage) []sealed.Recipient {
 			out = append(out, sealed.Recipient{Idx: mem.Idx, Key: mem.Seal()})
 		}
 	}
+	// A feed's whole-room record of a v1 kind carries the link stanza at idx
+	// 65535 beside the members': a subset's stanzas say what its to says, and
+	// a membership record is the members' alone (a link holder keeps no roster).
+	if l := c.st.Link(); l != nil && len(out) > 0 && len(m.To) == 0 && !room.MembershipKind(m.Kind) {
+		if k, err := room.LinkSealKey(l.Key, c.ref.ID); err == nil {
+			out = append(out, sealed.Recipient{Idx: relay.FeedIdx, Key: k.PublicKey()})
+		} else {
+			fmt.Fprintf(c.out, "room %s: the link stanza is left off: %v\n", c.ref.Name, err)
+		}
+	}
 	return out
 }
 
@@ -430,6 +440,8 @@ func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []str
 	switch {
 	case ref == nil:
 		return nil, fmt.Errorf("no room named %s", name)
+	case ref.Stage.followed():
+		return nil, fmt.Errorf("room %s: you follow its feed by a link and hold no seat in it; its owner alone writes", ref.Name)
 	case ref.Stage.gone():
 		return nil, fmt.Errorf("room %s: you %s it already", ref.Name, pastTense(ref.Stage))
 	case ref.Stage != stageJoined:

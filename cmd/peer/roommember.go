@@ -110,6 +110,8 @@ func openJoined(ctx context.Context, dir, name string, out io.Writer) (*roomConn
 	switch {
 	case ref == nil:
 		return nil, fmt.Errorf("no room named %s", name)
+	case ref.Stage.followed():
+		return nil, fmt.Errorf("room %s: you follow its feed by a link and hold no seat in it; its owner alone writes", ref.Name)
 	case ref.Stage.gone():
 		return nil, fmt.Errorf("room %s: you %s it already", ref.Name, pastTense(ref.Stage))
 	case ref.Stage != stageJoined:

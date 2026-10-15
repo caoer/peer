@@ -26,10 +26,10 @@ import (
 )
 
 // cmdRoom runs the room commands: create, add, members, remove, leave,
-// handover, close, rotate.
+// handover, close, rotate, link, follow.
 func cmdRoom(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: peer room create|add|members|remove|leave|handover|close|rotate [flags] ...")
+		fmt.Fprintln(stderr, "usage: peer room create|add|members|remove|leave|handover|close|rotate|link|follow [flags] ...")
 		return 2
 	}
 	switch args[0] {
@@ -41,8 +41,12 @@ func cmdRoom(args []string, stdout, stderr io.Writer) int {
 		return cmdRoomMembers(args[1:], stdout, stderr)
 	case "remove", "leave", "handover", "close", "rotate":
 		return cmdRoomMember(args[0], args[1:], stdout, stderr)
+	case "link":
+		return cmdRoomLink(args[1:], stdout, stderr)
+	case "follow":
+		return cmdRoomFollow(args[1:], stdout, stderr)
 	}
-	fmt.Fprintf(stderr, "peer room: unknown command %q (create, add, members, remove, leave, handover, close, rotate)\n", args[0])
+	fmt.Fprintf(stderr, "peer room: unknown command %q (create, add, members, remove, leave, handover, close, rotate, link, follow)\n", args[0])
 	return 2
 }
 
@@ -53,14 +57,15 @@ func cmdRoomCreate(args []string, stdout, stderr io.Writer) int {
 	relayFlag := fl.String("relay", "", "relay base, e.g. https://example.com/peer (default config.json relay)")
 	loginFlag := fl.String("login", "", "ccc-pages owner login <user>:<token> (default config.json login)")
 	addFlag := fl.String("add", string(room.AddAdmins), "who may add a member, fixed for the room's life: admins or members")
+	feedFlag := fl.Bool("feed", false, "a feed: you alone write, members read, and a link lets anyone with it read")
 	if err := fl.Parse(args); err != nil {
 		return 2
 	}
 	if fl.NArg() != 1 || fl.Arg(0) == "" {
-		fmt.Fprintln(stderr, "usage: peer room create [--dir D] [--relay URL] [--login USER:TOKEN] [--add admins|members] <name>")
+		fmt.Fprintln(stderr, "usage: peer room create [--dir D] [--relay URL] [--login USER:TOKEN] [--add admins|members] [--feed] <name>")
 		return 2
 	}
-	if err := runRoomCreate(context.Background(), *dirFlag, *relayFlag, *loginFlag, room.Add(*addFlag), fl.Arg(0), stdout); err != nil {
+	if err := runRoomCreate(context.Background(), *dirFlag, *relayFlag, *loginFlag, room.Add(*addFlag), *feedFlag, fl.Arg(0), stdout); err != nil {
 		fmt.Fprintf(stderr, "peer room create: %v\n", err)
 		return 1
 	}
@@ -110,10 +115,14 @@ func cmdRoomMembers(args []string, stdout, stderr io.Writer) int {
 
 // runRoomCreate opens a room on the relay, births its state with this party
 // at idx 0 and the add setting, and puts record #0: a roster record carrying
-// add and the creator's entry, folded and committed before the put.
-func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.Add, name string, out io.Writer) error {
+// add and the creator's entry, folded and committed before the put. A feed
+// mints its link's read token first and keeps the link in the state.
+func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.Add, feed bool, name string, out io.Writer) error {
 	if add != room.AddAdmins && add != room.AddMembers {
 		return fmt.Errorf("--add %q: admins or members", add)
+	}
+	if feed && add != room.AddAdmins {
+		return errors.New("a feed has one writer: --feed takes --add admins")
 	}
 	dir, err := peerDir(dir)
 	if err != nil {
@@ -175,6 +184,15 @@ func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.A
 	if !res.Folded() || len(res.Joined) != 1 {
 		return fmt.Errorf("record #0 does not fold: %s%s", res.Dropped, strings.Join(res.Refused, "; "))
 	}
+	if feed {
+		link, err := mintLink(ctx, rc, created.ID, created.AdminToken, st)
+		if err == nil {
+			err = st.SetLink(link)
+		}
+		if err != nil {
+			return fmt.Errorf("room %s (%s) is created and its feed link is not: %w", name, created.ID, err)
+		}
+	}
 	ctr := st.NextCounter()
 	if err := st.Commit(ctx); err != nil {
 		return fmt.Errorf("room state: %w", err)
@@ -194,9 +212,16 @@ func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.A
 	seq, err := c.send(ctx, m, ctr)
 	if err != nil {
 		fmt.Fprintf(out, "created room %s (%s), add: %s; record #0 did not reach the relay (%v): peer serve puts it\n", name, created.ID, add, err)
-		return nil
+	} else {
+		fmt.Fprintf(out, "created room %s (%s), add: %s; you are idx 0, its admin (record #%d)\n", name, created.ID, add, seq)
 	}
-	fmt.Fprintf(out, "created room %s (%s), add: %s; you are idx 0, its admin (record #%d)\n", name, created.ID, add, seq)
+	if feed {
+		f, err := feedLink(ref, st)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "feed link (anyone with it reads; peer room link --rotate cuts them off):\n%s\n", f)
+	}
 	return nil
 }
 
@@ -246,6 +271,9 @@ func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out i
 	st := c.st
 	if !st.IsAdmin(st.Idx()) && st.Add() != room.AddMembers {
 		return fmt.Errorf("room %s: its add setting is admins and you are not in its admin set", ref.Name)
+	}
+	if st.Feed() && role != relay.RoleRead {
+		return fmt.Errorf("room %s is a feed: you alone write in it, and a member reads (peer room add --read)", ref.Name)
 	}
 	ch, err := p.store.Channel(ctx, pe.Channel)
 	if err != nil {

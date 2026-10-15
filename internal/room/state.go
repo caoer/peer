@@ -123,6 +123,8 @@ type stateRecord struct {
 	Ctr        uint64            `json:"ctr"`
 	Dropped    int64             `json:"dropped,omitempty"`
 	Reported   int64             `json:"reported,omitempty"`
+	// Link is a feed's link, on its owner's state alone.
+	Link *Link `json:"link,omitempty"`
 }
 
 type ownKeyRecord struct {
@@ -176,6 +178,7 @@ type State struct {
 	ctr        uint64
 	dropped    int64
 	reported   int64
+	link       *Link
 }
 
 // New is a fresh state at version 0 for the member at idx of room id with its
@@ -228,6 +231,11 @@ func Load(ctx context.Context, b store.Backend, id string) (*State, error) {
 		counters: rec.Counters, ctr: rec.Ctr,
 		dropped: rec.Dropped, reported: rec.Reported,
 	}
+	if rec.Link != nil {
+		if err := s.SetLink(*rec.Link); err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", store.ErrCorrupt, key, err)
+		}
+	}
 	if s.counters == nil {
 		s.counters = map[uint16]uint64{}
 	}
@@ -267,7 +275,7 @@ func (s *State) marshal() ([]byte, error) {
 		Admins:  s.admins, Removed: s.removed,
 		Keys: ownKeyRecord{Sign: s.sign.Seed(), Seal: s.seal.Bytes()},
 		Seen: s.seen, Counters: s.counters, Ctr: s.ctr,
-		Dropped: s.dropped, Reported: s.reported,
+		Dropped: s.dropped, Reported: s.reported, Link: s.link,
 	}
 	for _, m := range s.members {
 		rec.Members = append(rec.Members, m.Entry)

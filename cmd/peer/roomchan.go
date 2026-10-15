@@ -605,7 +605,8 @@ func (p *party) onRoomAdmin(ctx context.Context, pe roster.Peer, m *session.Mess
 // revoke of every removal and the token of every handover a round cut
 // short; an admin's look for revoked readers; the daily rotation, an
 // identity change's re-signed card, and the retired keys whose time is up
-// (roommember.go). A delivery that waits on a seat's session stops that
+// (roommember.go); a feed admin's revokes of old links, and each followed
+// feed's pull (roomfeed.go). A delivery that waits on a seat's session stops that
 // room's pull for the round, as a channel's does; a room the party is out
 // of is said once and dropped.
 func (sv *server) serveRooms(ctx context.Context) error {
@@ -616,6 +617,12 @@ func (sv *server) serveRooms(ctx context.Context) error {
 	sv.p.dropLeftRooms(l, sv.out)
 	var errs []error
 	for _, ref := range l.Rooms {
+		if ref.Stage == stageFollowing {
+			if err := sv.serveFeed(ctx, ref); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if ref.Stage != stageJoined {
 			continue
 		}
@@ -653,6 +660,7 @@ func (sv *server) serveRooms(ctx context.Context) error {
 		c.finishHandovers(ctx)
 		if c.st.IsAdmin(c.st.Idx()) {
 			c.checkRevoked(ctx)
+			c.finishLinkRevokes(ctx)
 		}
 		now := roomClock()
 		if err := c.rotate(ctx, now, false); err != nil {
