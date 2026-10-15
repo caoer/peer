@@ -250,6 +250,12 @@ func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out i
 	if ref.Stage != stageJoined {
 		return fmt.Errorf("room %s: you are not in it yet (%s)", ref.Name, ref.Stage)
 	}
+	if ref.Read {
+		// The relay mints for an admin token or, under add: members, a write
+		// token; an invite from a read member would carry the roster to the
+		// peer and then fail at the mint every time.
+		return fmt.Errorf("room %s: you read in it and cannot add; its admin adds, or a write member when its add setting is members", ref.Name)
+	}
 	r, err := roster.Load(ctx, p.backend)
 	if err != nil {
 		return err
