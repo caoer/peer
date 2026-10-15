@@ -182,6 +182,21 @@ func (sv *server) fetchAttachment(ctx context.Context, channel, id string, body 
 	return path, nil
 }
 
+// idLast marks the last argument as the positional one when it begins with
+// '-' but is no flag fl defines: a message id is base64url, so one in 64
+// begins with '-', and flags go before it.
+func idLast(fl *flag.FlagSet, args []string) []string {
+	n := len(args)
+	if n == 0 || !strings.HasPrefix(args[n-1], "-") || args[n-1] == "--" || (n > 1 && args[n-2] == "--") {
+		return args
+	}
+	name, _, _ := strings.Cut(strings.TrimLeft(args[n-1], "-"), "=")
+	if name == "h" || name == "help" || fl.Lookup(name) != nil {
+		return args
+	}
+	return append(append(append([]string(nil), args[:n-1]...), "--"), args[n-1])
+}
+
 // cmdFetch fetches a quarantined doc or file message's content again — for
 // a record whose serve could not (the blob not yet there, the relay away).
 // The channel is the one whose pinned party sent it; the content lands
@@ -191,7 +206,7 @@ func cmdFetch(args []string, stdout, stderr io.Writer) int {
 	fl.SetOutput(stderr)
 	dirFlag := fl.String("dir", "", "peer directory (default $PEER_HOME, else <config dir>/peer)")
 	deliverFlag := fl.String("deliver", "", "the delivery directory serve uses (default config.json deliver, else <dir>/deliver)")
-	if err := fl.Parse(args); err != nil {
+	if err := fl.Parse(idLast(fl, args)); err != nil {
 		return 2
 	}
 	if fl.NArg() != 1 || fl.Arg(0) == "" {
