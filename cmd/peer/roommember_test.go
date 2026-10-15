@@ -675,3 +675,57 @@ func identityOf(t *testing.T, body []byte) string {
 	t.Fatal("the party card names no current key")
 	return ""
 }
+
+// close's removal record travels with bump: between it and the first revoke
+// the membership is one past the members', so a member's put at the
+// membership it holds is 409 — no stale record lands sealed to the closed
+// room's leavers.
+func TestRoomCloseBumpsBeforeRevoke(t *testing.T) {
+	ctx := context.Background()
+	srv, base, front := startPathFront(t, http.MethodDelete, "/members/1")
+	tr := newTrio(t, base, srv, config{})
+	_, cref, cst := roomOf(t, tr.c, tr.bcRoom)
+	m0 := srv.RoomMembership(tr.id)
+	var stale error
+	var atRevoke int64
+	front.arm(func(http.ResponseWriter, *http.Request) bool {
+		// The removal record is on the relay, no revoke yet.
+		atRevoke = srv.RoomMembership(tr.id)
+		_, stale = relay.New(base, nil).PutRecord(ctx, tr.id, cref.Token, []byte("x"), cst.Membership(), false)
+		return false
+	})
+	out := mustOK(t, "room", "close", "--dir", tr.a, "r1")
+	if !strings.Contains(out, "2 members removed (record #") || !strings.Contains(out, "closed room r1") {
+		t.Fatalf("close:\n%s", out)
+	}
+	if !errors.Is(stale, relay.ErrStaleMembership) || atRevoke != m0+1 {
+		t.Fatalf("before the first revoke: membership %d, want %d; a put at the old one: %v, want 409", atRevoke, m0+1, stale)
+	}
+}
+
+// The admin's sweep finds a seat revoked that the roster still holds — a
+// leave by DELETE self alone, as a read member leaves — and posts its
+// removal with bump: a writer that folded the revoke and not the removal
+// puts at a stale membership and is refused, never sealing to the leaver.
+func TestRoomRevokedSweepBumps(t *testing.T) {
+	ctx := context.Background()
+	srv, _, base := relaytest.Start(t, login)
+	tr := newTrio(t, base, srv, config{})
+	_, cref, _ := roomOf(t, tr.c, tr.bcRoom)
+	rc := relay.New(base, nil)
+	if _, err := rc.LeaveRoom(ctx, tr.id, cref.Token); err != nil {
+		t.Fatal(err)
+	}
+	m := srv.RoomMembership(tr.id)
+	out := mustOK(t, "serve", "--dir", tr.a, "--once")
+	if !strings.Contains(out, "idx [2] left (token revoked); roster record #") {
+		t.Fatalf("A's serve after carol's seat was revoked:\n%s", out)
+	}
+	if srv.RoomMembership(tr.id) != m+1 {
+		t.Fatalf("membership %d, want %d: the removal record's bump", srv.RoomMembership(tr.id), m+1)
+	}
+	_, bref, _ := roomOf(t, tr.b, tr.bcRoom)
+	if _, err := rc.PutRecord(ctx, tr.id, bref.Token, []byte("x"), m, false); !errors.Is(err, relay.ErrStaleMembership) {
+		t.Fatalf("a put at the membership after the revoke and before the removal: %v, want 409", err)
+	}
+}
