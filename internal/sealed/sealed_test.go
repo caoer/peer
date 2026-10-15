@@ -431,6 +431,8 @@ func malformed(t testing.TB) map[string][]byte {
 		"header v 2":                   hdrWith(strings.Replace(ok, `"v":1`, `"v":2`, 1)),
 		"header no v":                  hdrWith(strings.Replace(ok, `"v":1,`, ``, 1)),
 		"header unknown key":           hdrWith(strings.Replace(ok, `"v":1`, `"v":1,"x":1`, 1)),
+		"header duplicate key":         hdrWith(strings.Replace(ok, `"idx":0,"ctr":1`, `"idx":0,"idx":5,"ctr":1,"ctr":9`, 1)),
+		"header key in caps":           hdrWith(strings.Replace(ok, `"idx":0`, `"IDX":0`, 1)),
 		"header no kh":                 hdrWith(strings.Replace(ok, `"kh":"`+kh+`",`, ``, 1)),
 		"header no idx":                hdrWith(strings.Replace(ok, `"idx":0,`, ``, 1)),
 		"header idx null":              hdrWith(js(testRoom, "null", "1", kh, "2026-10-15T11:46:00.000Z")),

@@ -2,6 +2,7 @@ package room_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -123,6 +124,19 @@ func (m *member) roomCard(t *testing.T, issued time.Time) []byte {
 		t.Fatal(err)
 	}
 	return rc
+}
+
+// smallOrderCard is the member's room card with seal u=1, a small-order
+// point Signed refuses, signed by hand.
+func (m *member) smallOrderCard(t *testing.T, issued time.Time) []byte {
+	t.Helper()
+	c := m.keys.Card(roomID, m.idx, issued)
+	c.Seal = base64.StdEncoding.EncodeToString(append([]byte{1}, make([]byte, 31)...))
+	body, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signRaw(m, body)
 }
 
 // entry is the member's roster entry with a room card issued at a time.

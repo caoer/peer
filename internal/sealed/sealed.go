@@ -327,7 +327,13 @@ func encodeHeader(h Header) ([]byte, error) {
 	})
 }
 
+// headerKeys are the header's JSON keys: exactly these, each once.
+var headerKeys = []string{"v", "room", "idx", "ctr", "kh", "at"}
+
 func parseHeader(b []byte) (Header, error) {
+	if err := exactKeys(b, headerKeys); err != nil {
+		return Header{}, fmt.Errorf("%w: header: %v", ErrMalformed, err)
+	}
 	var w wireHeader
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -360,6 +366,42 @@ func parseHeader(b []byte) (Header, error) {
 	h := Header{Room: w.Room, Idx: *w.Idx, Ctr: *w.Ctr, At: at}
 	copy(h.KH[:], kh)
 	return h, nil
+}
+
+// exactKeys walks the top level of a JSON object once and refuses a key
+// outside want (matched case-sensitively, unlike encoding/json's field
+// match), a repeated key, or a missing one. Bytes that are not an object are
+// left to the decoder to name.
+func exactKeys(b []byte, want []string) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	seen := make(map[string]bool, len(want))
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		k, _ := t.(string)
+		switch {
+		case !slices.Contains(want, k):
+			return fmt.Errorf("unknown key %q", k)
+		case seen[k]:
+			return fmt.Errorf("repeated key %q", k)
+		}
+		seen[k] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil
+		}
+	}
+	for _, k := range want {
+		if !seen[k] {
+			return fmt.Errorf("missing key %q", k)
+		}
+	}
+	return nil
 }
 
 func parseStanzas(b []byte) ([]stanza, error) {

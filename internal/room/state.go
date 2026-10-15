@@ -377,7 +377,7 @@ func (s *State) Admins() []uint16 { return slices.Clone(s.admins) }
 // IsAdmin reports whether idx is in the admin set.
 func (s *State) IsAdmin(idx uint16) bool { return slices.Contains(s.admins, idx) }
 
-// Removed reports whether idx was removed or left; the relay never reuses an idx.
+// Removed reports whether idx was removed or left and no admin has re-added it.
 func (s *State) Removed(idx uint16) bool { return slices.Contains(s.removed, idx) }
 
 func (s *State) admit(idx uint16) bool {

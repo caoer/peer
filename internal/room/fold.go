@@ -115,7 +115,7 @@ func (s *State) Fold(rec Verified, ch Channels) Result {
 func (s *State) Seed(entries []Entry, admins []uint16, ch Channels, at time.Time) Result {
 	var res Result
 	for _, e := range entries {
-		s.applyEntry(e, ch, at, &res)
+		s.applyEntry(e, ch, at, true, &res)
 	}
 	for _, a := range admins {
 		if s.admit(a) {
@@ -155,8 +155,9 @@ func (s *State) foldRoster(rec Verified, ch Channels) Result {
 		s.add = body.Add
 	}
 	var res Result
+	admin := s.IsAdmin(rec.Idx)
 	for _, e := range body.Members {
-		s.applyEntry(e, ch, rec.At, &res)
+		s.applyEntry(e, ch, rec.At, admin, &res)
 	}
 	for _, idx := range body.Removed {
 		if s.remove(idx) {
@@ -230,10 +231,13 @@ func (s *State) foldHandover(rec Verified) Result {
 
 // applyEntry folds one roster entry: both cards verify, the idx is free or
 // the party's own, the cross-check holds (rule 4), the record stays under
-// the cap. An entry no newer than the folded card at its idx is ignored.
-func (s *State) applyEntry(e Entry, ch Channels, at time.Time, res *Result) {
+// the cap. An entry no newer than the folded card at its idx is ignored. An
+// admin's entry (and the invite's, which Seed folds) may take a removed or
+// left idx — a newcomer's state holds no removed set, so the fold agrees
+// everywhere; a non-admin's entry there is refused (sub-rule 1).
+func (s *State) applyEntry(e Entry, ch Channels, at time.Time, admin bool, res *Result) {
 	where := fmt.Sprintf("entry idx %d (%s)", e.Idx, e.Party)
-	if s.Removed(e.Idx) {
+	if !admin && s.Removed(e.Idx) {
 		res.refuse("%s: the idx was removed", where)
 		return
 	}
@@ -295,6 +299,8 @@ func (s *State) applyEntry(e Entry, ch Channels, at time.Time, res *Result) {
 		res.refuse("%s: the room record would pass %d bytes sealed; the member is not folded", where, MaxSealed)
 		return
 	}
+	// An admin's re-add makes the idx a member again, as a newcomer folds it.
+	s.removed = slices.DeleteFunc(s.removed, func(r uint16) bool { return r == e.Idx })
 	res.Joined = append(res.Joined, e.Idx)
 }
 

@@ -1,8 +1,11 @@
 package room_test
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +87,20 @@ func TestCardMalformedRefused(t *testing.T) {
 		"sign len":  func(c *room.Card) { c.Sign = "AAEC" },
 		"no issued": func(c *room.Card) { c.Issued = time.Time{} },
 	}
+	// The seven small-order X25519 points (contract § Room card), and each
+	// with bit 255 set, which X25519 ignores.
+	for i, h := range smallOrderPoints {
+		raw, _ := hex.DecodeString(h)
+		for _, hi := range []bool{false, true} {
+			p := append([]byte(nil), raw...)
+			name := fmt.Sprintf("seal small-order %d", i)
+			if hi {
+				p[31] |= 0x80
+				name += " bit 255"
+			}
+			cases[name] = func(c *room.Card) { c.Seal = base64.StdEncoding.EncodeToString(p) }
+		}
+	}
 	for name, mutate := range cases {
 		c := *good
 		mutate(&c)
@@ -94,6 +111,24 @@ func TestCardMalformedRefused(t *testing.T) {
 		body, _ := json.Marshal(&c)
 		signed := signRaw(m, body)
 		if _, err := room.Verify(signed, pc, at); !errors.Is(err, room.ErrMalformed) {
+			t.Errorf("%s: Verify err = %v, want ErrMalformed", name, err)
+		}
+	}
+	// Exactly the six keys, each once: an unknown, repeated or missing key,
+	// or a key in another case, refuses under a good signature.
+	body, _ := json.Marshal(good)
+	js := string(body)
+	for name, raw := range map[string]string{
+		"unknown key":      strings.Replace(js, `"v":1`, `"v":1,"x":"extra"`, 1),
+		"duplicate key":    strings.Replace(js, `"idx":3`, `"idx":3,"idx":4`, 1),
+		"missing idx":      strings.Replace(js, `"idx":3,`, ``, 1),
+		"key in caps":      strings.Replace(js, `"idx":3`, `"IDX":3`, 1),
+		"bytes after json": js + "{}",
+	} {
+		if raw == js {
+			t.Fatalf("%s: the fixture did not change", name)
+		}
+		if _, err := room.Verify(signRaw(m, []byte(raw)), pc, at); !errors.Is(err, room.ErrMalformed) {
 			t.Errorf("%s: Verify err = %v, want ErrMalformed", name, err)
 		}
 	}
@@ -108,4 +143,15 @@ func TestCardMalformedRefused(t *testing.T) {
 func signRaw(m *member, body []byte) []byte {
 	sig := ecc.CalculateSignature(m.id.KeyPair.PrivateKey(), body)
 	return append(append([]byte(nil), body...), sig[:]...)
+}
+
+// smallOrderPoints is libsodium's list of small-order X25519 u-coordinates.
+var smallOrderPoints = []string{
+	"0000000000000000000000000000000000000000000000000000000000000000",
+	"0100000000000000000000000000000000000000000000000000000000000000",
+	"e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+	"5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
 }

@@ -15,10 +15,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"slices"
 	"time"
 
 	"go.mau.fi/libsignal/ecc"
@@ -71,14 +74,42 @@ func NewCard(room string, idx uint16, seal *ecdh.PublicKey, sign ed25519.PublicK
 	}
 }
 
-// SealKey is the card's X25519 seal public key.
+// smallOrder is libsodium's list of the X25519 u-coordinates of small order
+// (0, 1, the two points of order 8, p-1, p, p+1), bit 255 clear. A seal key
+// among them makes every sender's ECDH to it fail, so the room card refuses
+// it at parse (contract § Room card).
+var smallOrder = func() [][]byte {
+	out := make([][]byte, 0, 7)
+	for _, h := range []string{
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+		"5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			panic(err)
+		}
+		out = append(out, b)
+	}
+	return out
+}()
+
+// SealKey is the card's X25519 seal public key; a small-order point refuses.
 func (c *Card) SealKey() (*ecdh.PublicKey, error) {
 	raw, err := key32(c.Seal, "seal")
 	if err != nil {
 		return nil, err
 	}
-	if bytes.Equal(raw, make([]byte, 32)) {
-		return nil, fmt.Errorf("%w: seal: all-zero point", ErrMalformed)
+	u := bytes.Clone(raw)
+	u[31] &= 0x7f // X25519 ignores bit 255
+	for _, p := range smallOrder {
+		if bytes.Equal(u, p) {
+			return nil, fmt.Errorf("%w: seal: small-order point", ErrMalformed)
+		}
 	}
 	return ecdh.X25519().NewPublicKey(raw)
 }
@@ -147,11 +178,22 @@ func Verify(signed []byte, pc *card.Card, at time.Time) (*Card, error) {
 	return parse(body)
 }
 
+// cardKeys are the room card's JSON keys: exactly these, each once.
+var cardKeys = []string{"v", "room", "idx", "seal", "sign", "issued"}
+
 // parse decodes card bytes under the version rule and checks both keys.
 func parse(body []byte) (*Card, error) {
-	var c Card
-	if err := json.Unmarshal(body, &c); err != nil {
+	if err := exactKeys(body, cardKeys); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	var c Card
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("%w: bytes after the JSON", ErrMalformed)
 	}
 	if err := c.check(); err != nil {
 		return nil, err
@@ -174,6 +216,42 @@ func (c *Card) check() error {
 	}
 	if c.Issued.IsZero() {
 		return fmt.Errorf("%w: no issued time", ErrMalformed)
+	}
+	return nil
+}
+
+// exactKeys walks the top level of a JSON object once and refuses a key
+// outside want (matched case-sensitively, unlike encoding/json's field
+// match), a repeated key, or a missing one. Bytes that are not an object are
+// left to the decoder to name.
+func exactKeys(b []byte, want []string) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	seen := make(map[string]bool, len(want))
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		k, _ := t.(string)
+		switch {
+		case !slices.Contains(want, k):
+			return fmt.Errorf("unknown key %q", k)
+		case seen[k]:
+			return fmt.Errorf("repeated key %q", k)
+		}
+		seen[k] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil
+		}
+	}
+	for _, k := range want {
+		if !seen[k] {
+			return fmt.Errorf("missing key %q", k)
+		}
 	}
 	return nil
 }

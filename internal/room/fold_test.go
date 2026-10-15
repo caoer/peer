@@ -55,10 +55,16 @@ func TestRule7RosterRemoveFromAdmin(t *testing.T) {
 	if res = s.Fold(roster(3, 0, room.RosterBody{Removed: []uint16{2}}), nil); !res.Folded() || len(res.Left) != 0 {
 		t.Fatalf("second remove: %+v", res)
 	}
-	// The relay never reuses an idx: an entry at a removed idx is refused.
-	res = s.Fold(roster(4, 0, room.RosterBody{Members: []room.Entry{m2.entry(t, t0.Add(time.Hour))}}), nil)
+	// A non-admin's entry at the removed idx is refused on its own (sub-rule 1).
+	res = s.Fold(roster(4, 1, room.RosterBody{Members: []room.Entry{m2.entry(t, t0.Add(time.Hour))}}), nil)
 	if !res.Folded() || len(res.Joined) != 0 || len(res.Refused) != 1 || !strings.Contains(res.Refused[0], "removed") || s.Member(2) != nil {
-		t.Fatalf("re-add at a removed idx: %+v", res)
+		t.Fatalf("non-admin re-add at a removed idx: %+v", res)
+	}
+	// An admin's entry at a free idx folds, a removed one included: a
+	// newcomer's state holds no removed set, so every member agrees.
+	res = s.Fold(roster(5, 0, room.RosterBody{Members: []room.Entry{m2.entry(t, t0.Add(time.Hour))}}), nil)
+	if !res.Folded() || !slices.Equal(res.Joined, []uint16{2}) || len(res.Refused) != 0 || s.Member(2) == nil || s.Removed(2) {
+		t.Fatalf("admin re-add at a removed idx: %+v", res)
 	}
 }
 
@@ -195,9 +201,18 @@ func TestRule7OtherSignersDropped(t *testing.T) {
 		{"malformed roster body", room.Verified{Seq: 2, Idx: 0, Kind: room.KindRoster, Body: []byte("{"), At: at}, "malformed"},
 		{"malformed handover body", room.Verified{Seq: 2, Idx: 0, Kind: room.KindHandover, Body: []byte(`{"idx":"one"}`), At: at}, "malformed"},
 		{"malformed roomcard body", room.Verified{Seq: 2, Idx: 1, Kind: room.KindRoomCard, Body: []byte(`{"roomcard":1}`), At: at}, "malformed"},
+		{"roomcard with a small-order seal key", rec(2, 1, room.KindRoomCard, room.RoomCardBody{RoomCard: m1.smallOrderCard(t, t0.Add(time.Hour))}), "small-order point"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { wantDropped(t, s, c.rec, nil, c.want) })
+	}
+	// A roster entry whose room card carries a small-order seal key is
+	// refused and named; the rest of the admin's record folds.
+	bad := m2.entry(t, t0)
+	bad.RoomCard = m2.smallOrderCard(t, t0)
+	res := s.Fold(roster(2, 0, room.RosterBody{Members: []room.Entry{bad}}), nil)
+	if !res.Folded() || len(res.Joined) != 0 || len(res.Refused) != 1 || !strings.Contains(res.Refused[0], "small-order point") || s.Member(2) != nil {
+		t.Fatalf("entry with a small-order seal key: %+v", res)
 	}
 	if room.MembershipKind("text") || !room.MembershipKind(room.KindLeave) {
 		t.Fatal("MembershipKind")
