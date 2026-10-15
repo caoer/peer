@@ -175,22 +175,120 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 			fail(w, relay.ErrMethodNotAllowed)
 			return nil
 		}
-		if s.rooms.byID[p[3:]] == nil {
+		// The real relay answers the landing text for any id of the room form,
+		// room or no room: the route is for a human's browser, not a member.
+		if !relay.ValidRoomID(p[3:]) {
 			fail(w, relay.ErrNoSuchRoom)
 			return nil
 		}
-		w.Write([]byte("this is a peer feed; install peer and run peer room follow <link>"))
+		if r.Method == http.MethodGet {
+			w.Write([]byte("this is a peer feed; install peer and run peer room follow <link>"))
+		}
 		return nil
 	}
 
+	// The real Worker checks the route and the method, then that a bearer is
+	// there, then the request's body and query, and reaches the room Object
+	// last: a bad request answers 400, 405 or 413 before any 401 or 404, and
+	// an unknown room with no bearer answers bad_token.
 	id, rest, _ := strings.Cut(strings.TrimPrefix(p, "/r/"), "/")
+	if !relay.ValidRoomID(id) {
+		fail(w, relay.ErrNoSuchRoom)
+		return nil
+	}
+	var route string
+	switch {
+	case rest == "members" && r.Method == http.MethodPost:
+		route = "mint"
+	case rest == "members" && r.Method == http.MethodGet:
+		route = "list"
+	case strings.HasPrefix(rest, "members/") && r.Method == http.MethodDelete:
+		route = "revoke"
+	case rest == "admin" && r.Method == http.MethodPost:
+		route = "grant"
+	case rest == "records" && r.Method == http.MethodPost:
+		route = "put"
+	case rest == "records" && r.Method == http.MethodGet:
+		route = "pull"
+	case rest == "members" || strings.HasPrefix(rest, "members/") || rest == "admin" || rest == "records":
+		fail(w, relay.ErrMethodNotAllowed)
+		return nil
+	default:
+		fail(w, relay.ErrNoSuchRoute)
+		return nil
+	}
+	if bearer == "" {
+		fail(w, relay.ErrBadToken)
+		return nil
+	}
+	var (
+		mintRole  string
+		revokeIdx = -1 // self
+		grantIdx  int
+		put       struct {
+			Type       string
+			Body       string
+			Membership *int64
+			Bump       bool
+		}
+		after = int64(-1)
+	)
+	switch route {
+	case "mint":
+		var in struct{ Role string }
+		if json.NewDecoder(r.Body).Decode(&in) != nil || (in.Role != relay.RoleWrite && in.Role != relay.RoleRead) {
+			fail(w, relay.ErrBadRequest)
+			return nil
+		}
+		mintRole = in.Role
+	case "revoke":
+		if k := strings.TrimPrefix(rest, "members/"); k != "self" {
+			n, err := strconv.Atoi(k)
+			if err != nil || !relay.ValidIdx(n) {
+				fail(w, relay.ErrNoSuchMember)
+				return nil
+			}
+			revokeIdx = n
+		}
+	case "grant":
+		var in struct{ Idx *int }
+		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Idx == nil || !relay.ValidIdx(*in.Idx) {
+			fail(w, relay.ErrBadRequest)
+			return nil
+		}
+		grantIdx = *in.Idx
+	case "put":
+		if json.NewDecoder(r.Body).Decode(&put) != nil || put.Type != "sealed" || put.Membership == nil || *put.Membership < 0 {
+			fail(w, relay.ErrBadRequest)
+			return nil
+		}
+		raw, err := base64.StdEncoding.DecodeString(put.Body)
+		switch {
+		case err != nil || len(raw) == 0:
+			fail(w, relay.ErrBadRequest)
+			return nil
+		case len(raw) > relay.MaxSealed:
+			fail(w, relay.ErrTooLarge)
+			return nil
+		}
+	case "pull":
+		if q, set := r.URL.Query()["after"]; set {
+			n, err := strconv.ParseInt(q[0], 10, 64)
+			if err != nil || n < -1 {
+				fail(w, relay.ErrBadRequest)
+				return nil
+			}
+			after = n
+		}
+	}
+
 	rm := s.rooms.byID[id]
 	if rm == nil {
 		fail(w, relay.ErrNoSuchRoom)
 		return nil
 	}
 	tok, found := rm.tokens[bearer]
-	if bearer == "" || !found {
+	if !found {
 		fail(w, relay.ErrBadToken)
 		return nil
 	}
@@ -200,13 +298,8 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		return nil
 	}
 
-	switch {
-	case rest == "members" && r.Method == http.MethodPost:
-		var in struct{ Role string }
-		if json.NewDecoder(r.Body).Decode(&in) != nil || (in.Role != relay.RoleWrite && in.Role != relay.RoleRead) {
-			fail(w, relay.ErrBadRequest)
-			return nil
-		}
+	switch route {
+	case "mint":
 		if !tok.admin && !(rm.add == relay.AddMembers && me.role == relay.RoleWrite) {
 			fail(w, relay.ErrNotAdmin)
 			return nil
@@ -218,11 +311,11 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		}
 		t := token()
 		from := int64(len(rm.rows))
-		rm.members = append(rm.members, &roomMember{role: in.Role, from: from})
+		rm.members = append(rm.members, &roomMember{role: mintRole, from: from})
 		rm.tokens[t] = roomToken{idx: idx}
 		rm.membership++
 		ok(map[string]any{"idx": idx, "token": t, "from": from, "membership": rm.membership})
-	case rest == "members" && r.Method == http.MethodGet:
+	case "list":
 		if !tok.admin {
 			fail(w, relay.ErrNotAdmin)
 			return nil
@@ -237,19 +330,18 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 			}
 		}
 		ok(map[string]any{"membership": rm.membership, "members": ms})
-	case strings.HasPrefix(rest, "members/") && r.Method == http.MethodDelete:
+	case "revoke":
 		idx := tok.idx
-		if k := strings.TrimPrefix(rest, "members/"); k != "self" {
+		if revokeIdx >= 0 {
 			if !tok.admin {
 				fail(w, relay.ErrNotAdmin)
 				return nil
 			}
-			n, err := strconv.Atoi(k)
-			if err != nil || n < 0 || n >= len(rm.members) {
+			if revokeIdx >= len(rm.members) {
 				fail(w, relay.ErrNoSuchMember)
 				return nil
 			}
-			idx = n
+			idx = revokeIdx
 		}
 		var closing []*roomSock
 		if m := rm.members[idx]; !m.revoked {
@@ -264,19 +356,14 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		}
 		ok(map[string]any{"membership": rm.membership})
 		return closing
-	case rest == "admin" && r.Method == http.MethodPost:
+	case "grant":
 		if !tok.admin {
 			fail(w, relay.ErrNotAdmin)
 			return nil
 		}
-		var in struct{ Idx *int }
-		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Idx == nil {
-			fail(w, relay.ErrBadRequest)
-			return nil
-		}
-		k := *in.Idx
+		k := grantIdx
 		switch {
-		case k < 0 || k >= len(rm.members) || rm.members[k].revoked:
+		case k >= len(rm.members) || rm.members[k].revoked:
 			fail(w, relay.ErrNoSuchMember)
 			return nil
 		case rm.members[k].role != relay.RoleWrite:
@@ -287,42 +374,24 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		rm.tokens[t] = roomToken{idx: k, admin: true}
 		rm.membership++
 		ok(map[string]any{"token": t, "membership": rm.membership})
-	case rest == "records" && r.Method == http.MethodPost:
-		if me.role != relay.RoleWrite {
-			fail(w, relay.ErrReadOnly)
-			return nil
-		}
-		var in struct {
-			Type       string
-			Body       string
-			Membership *int64
-			Bump       bool
-		}
-		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Type != "sealed" || in.Membership == nil {
-			fail(w, relay.ErrBadRequest)
-			return nil
-		}
-		raw, err := base64.StdEncoding.DecodeString(in.Body)
+	case "put":
 		switch {
-		case err != nil || len(raw) == 0:
-			fail(w, relay.ErrBadRequest)
-			return nil
-		case len(raw) > relay.MaxSealed:
-			fail(w, relay.ErrTooLarge)
-			return nil
-		case in.Bump && !tok.admin:
+		case me.role != relay.RoleWrite:
 			fail(w, relay.ErrReadOnly)
 			return nil
-		case *in.Membership < rm.membership:
+		case put.Bump && !tok.admin:
+			fail(w, relay.ErrReadOnly)
+			return nil
+		case *put.Membership < rm.membership:
 			fail(w, relay.ErrStaleMembership)
 			return nil
-		case *in.Membership > rm.membership:
+		case *put.Membership > rm.membership:
 			fail(w, relay.ErrBadRequest)
 			return nil
 		}
-		row := RoomRow{Seq: int64(len(rm.rows)), Idx: tok.idx, Type: "sealed", Body: in.Body, At: time.Now().UnixMilli()}
+		row := RoomRow{Seq: int64(len(rm.rows)), Idx: tok.idx, Type: "sealed", Body: put.Body, At: time.Now().UnixMilli()}
 		rm.rows = append(rm.rows, row)
-		if in.Bump {
+		if put.Bump {
 			rm.membership++
 		}
 		ok(map[string]any{"seq": row.Seq, "membership": rm.membership})
@@ -338,16 +407,7 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 				}
 			}
 		}
-	case rest == "records" && r.Method == http.MethodGet:
-		after := int64(-1)
-		if q := r.URL.Query().Get("after"); q != "" {
-			n, err := strconv.ParseInt(q, 10, 64)
-			if err != nil || n < -1 {
-				fail(w, relay.ErrBadRequest)
-				return nil
-			}
-			after = n
-		}
+	case "pull":
 		page, size := []RoomRow{}, 0
 		for _, row := range rm.rows {
 			if row.Idx == tok.idx || row.Seq < me.from || row.Seq <= after {
@@ -361,8 +421,6 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		}
 		s.countPull(id, roomPullKey(tok.idx))
 		ok(map[string]any{"membership": rm.membership, "records": page})
-	default:
-		fail(w, relay.ErrNoSuchRoute)
 	}
 	return nil
 }
