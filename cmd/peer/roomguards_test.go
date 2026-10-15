@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"strings"
@@ -79,4 +81,38 @@ func TestRoomReceiverRefusesForgedFrom(t *testing.T) {
 		m.From = tr.ab.hostParty
 	})
 	refusedAtC(t, tr, id, "and the roster holds "+tr.ab.guestParty+" at idx 1")
+}
+
+// The receiver's room, idx and group guards, each on a record that passes
+// every later check: the relay's idx is not the header's (A's record put
+// with B's token); the header names another room, the message this one; the
+// header names this room, the message another. Each is skipped, reported
+// once, born nowhere.
+func TestRoomReceiverGuards(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	tr := newTrio(t, base, srv, config{})
+	other := func() string {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(b[:])
+	}
+	// In this order: a record skipped before the counter check (idx, room)
+	// leaves its ctr unread, so B's room case comes after its group case, or
+	// C would report a gap besides.
+	cases := []struct {
+		name, dir, room, why string
+		shape                func(*sealed.Header, *roomMessage)
+	}{
+		{"idx", tr.a, tr.aRoom, "the relay names writer idx 1 and the record idx 0", func(*sealed.Header, *roomMessage) {}},
+		{"group", tr.b, tr.bcRoom, "the message names group ", func(_ *sealed.Header, m *roomMessage) { m.Group = other() }},
+		{"room", tr.b, tr.bcRoom, "sealed for room ", func(h *sealed.Header, _ *roomMessage) { h.Room = other() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := putForged(t, tc.dir, tc.room, tr.b, tr.bcRoom, tc.shape)
+			refusedAtC(t, tr, id, tc.why)
+		})
+	}
 }
