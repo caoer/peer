@@ -64,9 +64,6 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if err != nil {
 		return nil, err
 	}
-	if p.root == nil {
-		return nil, fmt.Errorf("%s is not in %s: the card is signed by the root key", rootFile, dir)
-	}
 	party := keys.PartyID(l.Root)
 	if name == "" {
 		name = party
@@ -169,7 +166,7 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	if err := s.Establish(ctx, key, opk); err != nil {
 		return nil, fmt.Errorf("establish session: %w; refusing", err)
 	}
-	own, err := p.signedCard(k.PartyKeys, relaysOf(p.cfg), false, now)
+	own, _, announced, err := p.ownCard(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +176,7 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	}
 	// The proof rides on the first card message alone: the host checks it
 	// before any prompt, so a joiner without the secret never reaches a human.
-	m.Proof = session.EncodeProof(session.Proof(l.Secret, l.Channel, l.Root, p.root.Public(), hostIdentity, p.id.PublicKey()))
+	m.Proof = session.EncodeProof(session.Proof(l.Secret, l.Channel, l.Root, p.id.Party, hostIdentity, p.id.PublicKey()))
 	pks, err := session.NewPrekeys(ctx, k, prekeysPerChannel)
 	if err != nil {
 		return nil, err
@@ -190,7 +187,7 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 	// The deposit below follows the send that commits the channel, so the
 	// count is recorded ahead of it; serve's first restock corrects it.
 	ch.SetDeposited(len(pks))
-	ch.SetAnnounced(k.PartyKeys.SignedPrekey.ID())
+	ch.SetAnnounced(announced)
 	if _, err := s.Send(ctx, p.outbox, rc, guest, m); err != nil {
 		var pe *session.PutError
 		if errors.As(err, &pe) {
@@ -212,9 +209,9 @@ func acceptedResult(name, party string, l invite.Link, p *party) *acceptResult {
 	return &acceptResult{
 		name:    name,
 		party:   party,
-		self:    keys.PartyID(p.root.Public()),
+		self:    p.partyID(),
 		channel: l.Channel,
-		code:    session.Code(l.Channel, l.Root, p.root.Public(), l.Secret),
+		code:    session.Code(l.Channel, l.Root, p.id.Party, l.Secret),
 	}
 }
 

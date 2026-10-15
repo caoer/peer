@@ -1,0 +1,188 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/caoer/peer/internal/card"
+	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/relay/relaytest"
+	"github.com/caoer/peer/internal/roster"
+	"github.com/caoer/peer/internal/session"
+	"github.com/caoer/peer/internal/store"
+	"github.com/caoer/peer/internal/store/pages/pagestest"
+)
+
+// Without --yes the command prints the cost and refuses: nothing changes.
+func TestIdentityRotateRefusesWithoutYes(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	before, _ := os.ReadFile(filepath.Join(p.hostDir, identityFile))
+	puts := len(srv.Envelopes(p.channel, "h2g"))
+	code, out, errb := cmd(t, "identity", "rotate", "--dir", p.hostDir)
+	if code != 1 || !strings.Contains(errb, "--yes") {
+		t.Fatalf("exit %d, stderr %q", code, errb)
+	}
+	for _, want := range []string{"The cost:", "1 channel(s) is dropped", "1 confirmed peer(s) must run peer keys accept", "identity.json.retired-"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the cost does not say %q:\n%s", want, out)
+		}
+	}
+	after, _ := os.ReadFile(filepath.Join(p.hostDir, identityFile))
+	if !bytes.Equal(before, after) || len(srv.Envelopes(p.channel, "h2g")) != puts {
+		t.Fatal("a refused rotate changed the identity file or put an envelope")
+	}
+	// A fleet host holds no root.json: it cannot rotate.
+	if err := os.Remove(filepath.Join(p.guestDir, rootFile)); err != nil {
+		t.Fatal(err)
+	}
+	mustRefuse(t, "root.json is not in", "identity", "rotate", "--dir", p.guestDir, "--yes")
+}
+
+// The host rotates its identity key: the card retiring the old key goes out
+// under the session in force and the guest holds it for its human; the
+// host's sessions are gone, so a text the guest sends meanwhile is refused;
+// after peer keys accept the guest builds a session from the host's prekey
+// under the new key and a text flows each way. The old identity file stays
+// beside the new one, retired; the keys record carries a signed prekey under
+// the new key and the one-time prekeys as they were.
+func TestIdentityRotate(t *testing.T) {
+	ctx := context.Background()
+	_, rc, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	oldIdentity, _ := os.ReadFile(filepath.Join(p.hostDir, identityFile))
+	hp, _, _ := channelOf(t, p.hostDir, "ancan")
+	hk, _ := hp.store.Keys(ctx)
+	prekeys, oldSpk := len(hk.PartyKeys.Prekeys), hk.PartyKeys.SignedPrekey.ID()
+
+	out := mustOK(t, "identity", "rotate", "--dir", p.hostDir, "--yes")
+	for _, want := range []string{"card published to ancan (#", "sessions dropped on 1 channel(s)", "signed prekey " + itoa(int64(oldSpk)+1) + " under the new key", "fleet: put the new identity.json"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rotate did not say %q:\n%s", want, out)
+		}
+	}
+	newIdentity, _ := os.ReadFile(filepath.Join(p.hostDir, identityFile))
+	if bytes.Equal(oldIdentity, newIdentity) {
+		t.Fatal("identity.json unchanged")
+	}
+	retired, _ := filepath.Glob(filepath.Join(p.hostDir, identityFile+".retired-*"))
+	if len(retired) != 1 {
+		t.Fatalf("retired identity files: %v", retired)
+	}
+	if b, _ := os.ReadFile(retired[0]); !bytes.Equal(b, oldIdentity) {
+		t.Fatal("the retired file is not the old identity")
+	}
+	hp, hch, _ := channelOf(t, p.hostDir, "ancan")
+	hk, _ = hp.store.Keys(ctx)
+	if hk.PartyKeys.PreviousSignedPrekey != nil || hk.PartyKeys.SignedPrekey.ID() != oldSpk+1 || len(hk.PartyKeys.Prekeys) != prekeys {
+		t.Fatalf("keys record: previous %v, signed prekey %d, %d prekeys (want %d)", hk.PartyKeys.PreviousSignedPrekey != nil, hk.PartyKeys.SignedPrekey.ID(), len(hk.PartyKeys.Prekeys), prekeys)
+	}
+	if has, _ := hch.ContainsSession(ctx, session.Addr); has {
+		t.Fatal("the host still holds the old session")
+	}
+	oc, err := hp.store.OwnCard(ctx)
+	if err != nil || oc.Identity != keys.CurveText(hp.id.PublicKey()) {
+		t.Fatalf("card record: %v, identity %s", err, oc.Identity)
+	}
+	c, err := card.Verify(oc.Details, p.hostRoot.Public())
+	if err != nil || len(c.Keys) != 2 || c.Keys[0].Until == nil || c.Keys[1].Until != nil || c.Keys[1].Identity != oc.Identity {
+		t.Fatalf("the new card: %v %+v", err, c)
+	}
+
+	// The guest holds the card and waits; a text it sends under the old
+	// session no longer opens on the host.
+	out = mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	if !strings.Contains(out, "zt: waiting at #") || !strings.Contains(out, "peer keys accept zt") {
+		t.Fatalf("guest serve on the rotation card:\n%s", out)
+	}
+	out = mustOK(t, "send", "--dir", p.guestDir, "--text", "under the old key", "zt/advisor")
+	stale := sentRE.FindStringSubmatch(out)
+	if stale == nil {
+		t.Fatalf("guest send:\n%s", out)
+	}
+	out = mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	if !strings.Contains(out, "skip ancan #"+stale[4]) || strings.Contains(out, "delivered") {
+		t.Fatalf("host serve on a text under the old key:\n%s", out)
+	}
+
+	// The guest accepts: a session from the host's prekey under the new key,
+	// its card in it; the host pins it and a text flows each way.
+	out = mustOK(t, "keys", "accept", "--dir", p.guestDir, "zt")
+	if !strings.Contains(out, "a new one is built from their prekey") || !strings.Contains(out, "your card went out (#") {
+		t.Fatalf("keys accept:\n%s", out)
+	}
+	out = mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	if !strings.Contains(out, "card from ancan pinned") {
+		t.Fatalf("host serve on the guest's new session:\n%s", out)
+	}
+	out = mustOK(t, "send", "--dir", p.guestDir, "--text", "on the new key", "zt/advisor")
+	m := sentRE.FindStringSubmatch(out)
+	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); m == nil || !strings.Contains(out, "delivered text "+m[1]) {
+		t.Fatalf("host serve on the new session:\n%s", out)
+	}
+	out = mustOK(t, "send", "--dir", p.hostDir, "--text", "back to you", "ancan")
+	m = sentRE.FindStringSubmatch(out)
+	if out := mustOK(t, "serve", "--dir", p.guestDir, "--once"); m == nil || !strings.Contains(out, "delivered text "+m[1]) {
+		t.Fatalf("guest serve on the host's reply:\n%s", out)
+	}
+	_ = rc
+}
+
+// On a pages state the rotation re-seals every record under the new
+// identity's key: a host still holding the old identity file cannot open
+// the roster, the new one reads it whole.
+func TestIdentityRotateReseals(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	ps := pagestest.New("state-0123456789abcdef", "zt:state-secret")
+	cfg := hostCfg()
+	cfg.State = stateConfig{Page: ps.URL, Slug: ps.Slug, Login: ps.Bearer}
+	p := handshake(t, newDir(t, cfg), newDir(t, config{}), base)
+	oldIdentity, _ := os.ReadFile(filepath.Join(p.hostDir, identityFile))
+
+	out := mustOK(t, "identity", "rotate", "--dir", p.hostDir, "--yes")
+	if !strings.Contains(out, "state re-sealed under the new identity key: ") {
+		t.Fatalf("rotate on a pages state:\n%s", out)
+	}
+	// The old identity, as a fleet host that was not redeployed holds it.
+	stale := filepath.Join(t.TempDir(), "stale")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, b := range map[string][]byte{identityFile: oldIdentity} {
+		if err := os.WriteFile(filepath.Join(stale, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cb, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(stale, configFile), cb, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := openParty(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := roster.Load(ctx, sp.backend); !errors.Is(err, store.ErrCorrupt) {
+		t.Fatalf("the old identity opened the re-sealed roster: %v", err)
+	}
+	np, err := openParty(p.hostDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := roster.Load(ctx, np.backend)
+	if err != nil || len(r.Peers) != 1 || r.Peers[0].Name != "ancan" {
+		t.Fatalf("the new identity's roster: %v %+v", err, r)
+	}
+	if ch, err := np.store.Channel(ctx, p.channel); err != nil || ch.Card() == nil || ch.Cursor() < 1 {
+		t.Fatalf("the re-sealed channel record: %v", err)
+	}
+	if out := mustOK(t, "serve", "--dir", p.guestDir, "--once"); !strings.Contains(out, "peer keys accept zt") {
+		t.Fatalf("guest serve:\n%s", out)
+	}
+}

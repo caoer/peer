@@ -352,36 +352,66 @@ func TestSendServeRefusals(t *testing.T) {
 	}
 }
 
-// A guest whose root key is not on this host pins the host's details card
-// and is confirmed without answering; nothing is put, nothing blocks.
+// Neither party holds its root key on the host that runs the handshake: the
+// card every command sends is the one on the state (signed at init and card
+// publish), the code and the proof take the party from identity.json, so
+// invite, accept, confirm and the guest's answer card all run without
+// root.json. The hosts' roots are removed after their card publish, and the
+// details cards pinned on both sides are the ones the states hold.
 func TestServeWithoutRootConfirms(t *testing.T) {
+	ctx := context.Background()
 	srv, _, base := relaytest.Start(t, login)
 	hostDir, guestDir := newDir(t, hostCfg()), newDir(t, config{})
+	hostRoot := rootOf(t, hostDir)
+	for _, dir := range []string{hostDir, guestDir} {
+		if err := os.Remove(filepath.Join(dir, rootFile)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, "ancan")
 	link, _, _ := strings.Cut(out, "\n")
 	l, _ := invite.Parse(link, time.Now())
 	out = mustOK(t, "accept", "--dir", guestDir, "--name", "zt", link)
 	mustOK(t, "confirm", "--dir", hostDir, "--code", codeRE.FindStringSubmatch(out)[1], "ancan")
-	if err := os.Remove(filepath.Join(guestDir, rootFile)); err != nil {
-		t.Fatal(err)
-	}
 	out = mustOK(t, "serve", "--dir", guestDir, "--once")
-	if !strings.Contains(out, "confirmed zt: their card with details is pinned, yours was not sent (root.json is not in") {
+	if !strings.Contains(out, "confirmed zt: their card with details is pinned, yours went out") {
 		t.Fatalf("guest serve without the root:\n%s", out)
 	}
-	_, gch, gpe := channelOf(t, guestDir, "zt")
+	gp, gch, gpe := channelOf(t, guestDir, "zt")
 	if gpe.State != roster.Confirmed || gch.Cursor() != 1 {
 		t.Fatalf("guest state %s cursor %d", gpe.State, gch.Cursor())
 	}
-	if c, err := card.Verify(gch.Card(), rootOf(t, hostDir).Public()); err != nil || len(c.Details) == 0 {
+	if c, err := card.Verify(gch.Card(), hostRoot.Public()); err != nil || len(c.Details) == 0 {
 		t.Fatalf("the host's details card is not pinned: %v", err)
 	}
-	if rows := srv.Envelopes(l.Channel, "g2h"); len(rows) != 1 {
-		t.Fatalf("the guest put %d envelopes, want its card alone", len(rows))
+	// What the guest answered with is its state's details card, not a fresh signature.
+	own, _, announced, err := gp.ownCard(ctx, true)
+	if err != nil || gch.Announced() != announced {
+		t.Fatalf("guest card on the state: %v; announced %d, want %d", err, gch.Announced(), announced)
+	}
+	if rows := srv.Envelopes(l.Channel, "g2h"); len(rows) != 2 {
+		t.Fatalf("the guest put %d envelopes, want its card and its answer", len(rows))
+	}
+	out = mustOK(t, "serve", "--dir", hostDir, "--once")
+	if !strings.Contains(out, "card from ancan pinned") {
+		t.Fatalf("host serve without the root:\n%s", out)
+	}
+	_, hch, _ := channelOf(t, hostDir, "ancan")
+	if !bytes.Equal(hch.Card().Body, own.Body) {
+		t.Fatal("the host pinned another card than the guest's state holds")
 	}
 	if out := mustOK(t, "serve", "--dir", guestDir, "--once"); out != "" {
 		t.Fatalf("a second serve printed:\n%s", out)
 	}
+	// Without a card on the state, invite refuses with the publish rule.
+	bare := filepath.Join(t.TempDir(), "bare")
+	if _, err := initDir(bare); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(bare, stateDir)); err != nil {
+		t.Fatal(err)
+	}
+	mustRefuse(t, "no card on the state: run peer card publish where root.json is", "invite", "--dir", bare, "--relay", base, "--login", login, "x")
 }
 
 // flakyRelay fronts the fake relay and, when told, refuses every envelope put.

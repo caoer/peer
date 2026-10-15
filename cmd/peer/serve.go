@@ -85,6 +85,11 @@ type server struct {
 	// rotationReminded is set once this process has said that the signed
 	// prekey is due and the root to announce a new one is elsewhere.
 	rotationReminded bool
+	// card is the state's card as this round read it (ownCard), nil before
+	// the round's first read; cardReminded is set once this process has
+	// printed that the card is absent, another identity's or stale.
+	card         *roundCard
+	cardReminded bool
 	// push holds the channels' push sockets under a running serve (push.go);
 	// nil under --once.
 	push *pusher
@@ -152,6 +157,7 @@ func (sv *server) start(ctx context.Context) error {
 // that runs, and a message whose put failed after its commit goes out on the
 // next round, as peer send promises.
 func (sv *server) round(ctx context.Context) error {
+	sv.card = nil
 	if err := sv.loadSeats(); err != nil {
 		return err
 	}
@@ -316,17 +322,48 @@ func (c *channelServe) parked() bool {
 }
 
 // announce sends this party's card on a confirmed channel whose last card
-// carried another signed prekey than the current one — after a rotation, or
-// never sent — when the root key is here to sign it. The send commits the
-// channel, so the snapshots are reloaded after it.
+// carried another signed prekey than the one on the state — after a
+// rotation, or never sent. The send commits the channel, so the snapshots
+// are reloaded after it.
 func (c *channelServe) announce(ctx context.Context) error {
-	if c.sv.p.root == nil || c.pe.State != roster.Confirmed || c.ch.Announced() == c.k.PartyKeys.SignedPrekey.ID() {
+	if c.pe.State != roster.Confirmed {
 		return nil
 	}
-	if err := c.sv.p.publish(ctx, c.k, c.pe, c.sv.out); err != nil {
+	own, announced, ok := c.sv.ownCard(ctx)
+	if !ok || c.ch.Announced() == announced {
+		return nil
+	}
+	if err := c.sv.p.publish(ctx, c.pe, own, announced, c.sv.out); err != nil {
 		return err
 	}
 	return c.load(ctx)
+}
+
+// roundCard is the state's details card as one round read it.
+type roundCard struct {
+	own       *card.Signed
+	announced uint32
+	err       error
+}
+
+// ownCard is the state's details card, read once per round. Absent, or for
+// another identity key than this party's, the rule is printed once per
+// process and nothing is announced or answered until peer card publish
+// runs; a stale signed prekey is a one-line reminder, the card still served.
+func (sv *server) ownCard(ctx context.Context) (*card.Signed, uint32, bool) {
+	if sv.card == nil {
+		own, stale, announced, err := sv.p.ownCard(ctx, true)
+		sv.card = &roundCard{own: own, announced: announced, err: err}
+		if (err != nil || stale != "") && !sv.cardReminded {
+			sv.cardReminded = true
+			if err != nil {
+				fmt.Fprintf(sv.out, "card: %v\n", err)
+			} else {
+				fmt.Fprintln(sv.out, stale)
+			}
+		}
+	}
+	return sv.card.own, sv.card.announced, sv.card.err == nil
 }
 
 // restock deposits one-time prekeys on the channel when the count the relay
@@ -634,16 +671,17 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 	// off the fleet) pins and confirms without answering; its details card
 	// goes out with peer card publish.
 	answer := ""
-	if own, err := c.sv.p.signedCard(c.k.PartyKeys, relaysOf(c.sv.p.cfg), true, time.Now()); err != nil {
+	if own, announced, ok := c.sv.ownCard(ctx); !ok {
 		if err := c.commit(ctx, rec); err != nil {
 			return err
 		}
-		answer = fmt.Sprintf("yours was not sent (%v): peer card publish sends it", err)
+		answer = "yours was not sent (no card on the state): peer card publish puts it there and serve sends it"
 	} else {
 		dm, err := session.CardMessage(c.sv.p.partyID(), keys.PartyID(root), own)
 		if err != nil {
 			return err
 		}
+		c.ch.SetAnnounced(announced)
 		_, err = s.Send(ctx, c.sv.p.outbox, c.rc, c.pe.Token, dm)
 		var putErr *session.PutError
 		if errors.As(err, &putErr) {

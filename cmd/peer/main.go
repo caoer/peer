@@ -43,6 +43,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdCard(args[1:], stdout, stderr)
 	case "keys":
 		return cmdKeys(args[1:], stdout, stderr)
+	case "identity":
+		return cmdIdentity(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -76,11 +78,20 @@ commands:
             [--dir D] [--json]
   fetch     fetch a quarantined doc or file's content again
             [--dir D] [--deliver DIR] <message id | record path>
-  card      publish: sign your card with the root key and send it on every
-            confirmed channel        card publish [--dir D]
+  card      publish: sign your card with the root key, put it on the state
+            for every host and send it on every confirmed channel
+                                     card publish [--dir D]
   keys      accept or reject a peer's new identity key that serve holds
             keys accept [--dir D] <name> | keys reject [--dir D] <name>
+  identity  rotate: a new identity key — the root signs a card retiring the
+            old one, every session is dropped, the state is re-sealed and a
+            new identity.json written; prints the cost and refuses without --yes
+                                     identity rotate [--dir D] [--yes]
   version   print the version
+
+the card any command sends is the one on the state (record "card"), signed by
+the root key where root.json is: peer init writes the first, card publish
+and identity rotate the rest; a fleet host holds no root.json.
 
 flags come before the name or link. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),

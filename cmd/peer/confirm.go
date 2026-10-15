@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
@@ -86,9 +85,6 @@ func runConfirm(ctx context.Context, dir, name string, ask func(party string) (s
 	if err != nil {
 		return nil, err
 	}
-	if p.root == nil {
-		return nil, fmt.Errorf("%s is not in %s: the code is derived from the root key", rootFile, dir)
-	}
 	r, err := roster.Load(ctx, p.backend)
 	if err != nil {
 		return nil, err
@@ -154,7 +150,7 @@ func runConfirm(ctx context.Context, dir, name string, ask func(party string) (s
 	if !ok {
 		return nil, fmt.Errorf("%w: no session identity; refusing, re-invite", session.ErrIdentity)
 	}
-	want := session.Proof(ch.Secret(), pe.Channel, p.root.Public(), root, p.id.PublicKey(), remote)
+	want := session.Proof(ch.Secret(), pe.Channel, p.id.Party, root, p.id.PublicKey(), remote)
 	if err := session.CheckProof(m, want); err != nil {
 		return nil, fmt.Errorf("%w: whoever joined does not hold the link's secret; refusing, re-invite", err)
 	}
@@ -163,20 +159,19 @@ func runConfirm(ctx context.Context, dir, name string, ask func(party string) (s
 	if err != nil {
 		return nil, err
 	}
-	if !session.CodeMatches(code, session.Code(pe.Channel, p.root.Public(), root, ch.Secret())) {
+	if !session.CodeMatches(code, session.Code(pe.Channel, p.id.Party, root, ch.Secret())) {
 		return nil, fmt.Errorf("the code does not match for %s: refusing, re-invite", party)
 	}
-	ch.PinRoot(root)
-	ch.PinCard(signed)
-	ch.SetAnnounced(k.PartyKeys.SignedPrekey.ID())
-
 	// Send commits the channel (session, identity, cursor, pin) before the
 	// put; the party keys (the used one-time prekey gone) commit after it,
 	// so a crash between leaves a spare key, never a session without its key.
-	own, err := p.signedCard(k.PartyKeys, []string{pe.Relay}, true, time.Now())
+	own, _, announced, err := p.ownCard(ctx, true)
 	if err != nil {
 		return nil, err
 	}
+	ch.PinRoot(root)
+	ch.PinCard(signed)
+	ch.SetAnnounced(announced)
 	dm, err := session.CardMessage(p.partyID(), party, own)
 	if err != nil {
 		return nil, err
@@ -222,7 +217,7 @@ func confirmLanded(ctx context.Context, p *party, ch *store.Channel, channel str
 	if err != nil {
 		return false, err
 	}
-	if !session.CodeMatches(code, session.Code(channel, p.root.Public(), ch.Root(), ch.Secret())) {
+	if !session.CodeMatches(code, session.Code(channel, p.id.Party, ch.Root(), ch.Secret())) {
 		return false, fmt.Errorf("the code does not match for %s: refusing, re-invite", party)
 	}
 	return true, nil

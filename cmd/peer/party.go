@@ -162,17 +162,88 @@ func (p *party) keys(ctx context.Context) (*store.Keys, error) {
 	return k, nil
 }
 
-// signedCard is the party's card, signed by the root key: relays as given,
-// agents from config, and config's details when details is set.
-func (p *party) signedCard(pk *keys.PartyKeys, relays []string, details bool, now time.Time) (*card.Signed, error) {
-	if p.root == nil {
-		return nil, fmt.Errorf("%s is not in %s: the card is signed by the root key", rootFile, p.dir)
+// ownCard is this party's card as the state holds it (store.OwnCard), the
+// details form for an in-session send and the public one for envelope #0.
+// It is the only card any command sends: the root key signs it where it
+// lives — peer init, peer card publish, peer identity rotate — and every
+// host reads the record, so nothing on the fleet signs one. A record for
+// another identity key than this party's refuses with the publish rule; one
+// carrying another signed prekey than the current one is served with a
+// reminder line (the previous key opens a bundle one more interval), the
+// second return — empty when the card is fresh. The third return is the
+// record's signed prekey id, for the channel's announced mark.
+func (p *party) ownCard(ctx context.Context, details bool) (*card.Signed, string, uint32, error) {
+	oc, err := p.store.OwnCard(ctx)
+	if err != nil {
+		return nil, "", 0, err
 	}
-	c := card.New(p.id, pk, p.cfg.Agents, relays, now)
+	if !oc.Present() {
+		return nil, "", 0, fmt.Errorf("no card on the state: run peer card publish where %s is; it signs this party's card and puts it on the state for every host", rootFile)
+	}
+	if want := keys.CurveText(p.id.PublicKey()); oc.Identity != want {
+		return nil, "", 0, fmt.Errorf("the card on the state is for identity key %s and this party's is %s: run peer card publish where %s is", oc.Identity, want, rootFile)
+	}
+	stale := ""
+	if k, err := p.store.Keys(ctx); err == nil && k.PartyKeys != nil && oc.SignedPrekey != k.PartyKeys.SignedPrekey.ID() {
+		stale = fmt.Sprintf("the card on the state carries signed prekey %d and the current one is %d (the previous key opens a bundle one more interval): run peer card publish where %s is", oc.SignedPrekey, k.PartyKeys.SignedPrekey.ID(), rootFile)
+	}
 	if details {
-		c.Details = p.cfg.Details
+		return oc.Details, stale, oc.SignedPrekey, nil
 	}
-	return card.Sign(c, p.root)
+	return oc.Public, stale, oc.SignedPrekey, nil
+}
+
+// buildOwnCard signs this party's card in both forms with the root key: id
+// and pk's signed prekey as the current key after any retired keys (an
+// identity rotation lists the old key with its until), agents from config
+// (the seat map's under ucc), config's relays, and config's details in the
+// details form only.
+func (p *party) buildOwnCard(id *keys.Identity, pk *keys.PartyKeys, now time.Time, retired ...card.Key) (public, details *card.Signed, err error) {
+	if p.root == nil {
+		return nil, nil, errNoRoot(p.dir)
+	}
+	c := card.New(id, pk, p.cfg.Agents, relaysOf(p.cfg), now)
+	c.Keys = append(append([]card.Key{}, retired...), c.Keys...)
+	if public, err = card.Sign(c, p.root); err != nil {
+		return nil, nil, err
+	}
+	c.Details = p.cfg.Details
+	if details, err = card.Sign(c, p.root); err != nil {
+		return nil, nil, err
+	}
+	return public, details, nil
+}
+
+// putOwnCard writes the card record on st under CAS; a conflict reloads and
+// writes again, since the record carries no state of another host's.
+func putOwnCard(ctx context.Context, st *store.Store, id *keys.Identity, pk *keys.PartyKeys, now time.Time, public, details *card.Signed) error {
+	for try := 1; ; try++ {
+		oc, err := st.OwnCard(ctx)
+		if err != nil {
+			return err
+		}
+		oc.Set(now, keys.CurveText(id.PublicKey()), pk.SignedPrekey.ID(), public, details)
+		err = oc.Commit(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, store.ErrConflict) || try >= sendTries {
+			return fmt.Errorf("card record: %w", err)
+		}
+	}
+}
+
+// signOwnCard builds this party's card from its own identity and pk and puts
+// it on the state: what peer card publish does, and a due rotation.
+func (p *party) signOwnCard(ctx context.Context, pk *keys.PartyKeys, now time.Time) (*card.Signed, error) {
+	public, details, err := p.buildOwnCard(p.id, pk, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := putOwnCard(ctx, p.store, p.id, pk, now, public, details); err != nil {
+		return nil, err
+	}
+	return details, nil
 }
 
 // accepts is the kinds the addressed agent takes, from config's agent list.

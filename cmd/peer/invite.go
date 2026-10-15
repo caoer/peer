@@ -73,7 +73,7 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 		return "", err
 	}
 	now := time.Now()
-	signed, err := p.signedCard(k.PartyKeys, []string{relayBase}, false, now)
+	signed, _, _, err := p.ownCard(ctx, false)
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +131,7 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 	if err != nil {
 		return "", err
 	}
-	link, err := invite.New(relayBase, ch.ID, ch.InviteToken, p.root.Public(), secret, now)
+	link, err := invite.New(relayBase, ch.ID, ch.InviteToken, p.id.Party, secret, now)
 	if err != nil {
 		return "", err
 	}

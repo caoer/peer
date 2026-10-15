@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,8 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/store"
 )
 
 // The files init writes under the peer directory.
@@ -92,6 +95,22 @@ func initDir(dir string) (string, error) {
 		if err := writeNew(filepath.Join(dir, names[i]), append(b, '\n')); err != nil {
 			return "", err
 		}
+	}
+	// The first card record, so a fresh party invites at once: on the state
+	// config.json names when it is already in dir, else the file state under
+	// dir. It carries config's relays and details and no agents under ucc;
+	// peer card publish refreshes it from the whole config and the seat map.
+	var cfg config
+	if err := readJSON(filepath.Join(dir, configFile), &cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	b, err := openBackend(dir, cfg, id)
+	if err != nil {
+		return "", err
+	}
+	p := &party{dir: dir, cfg: cfg, id: id, root: root, backend: b, store: store.New(b, id)}
+	if _, err := p.signOwnCard(context.Background(), pk, time.Now()); err != nil {
+		return "", fmt.Errorf("the three files are written; the card record is not (%v): run peer card publish", err)
 	}
 	return keys.PartyID(root.Public()), nil
 }

@@ -83,7 +83,7 @@ func TestCardPublishRefreshesThePin(t *testing.T) {
 	// An older card than the pinned one: refused, consumed, the pin unchanged.
 	hp, hch, hpe := channelOf(t, p.hostDir, "ancan")
 	hk, _ := hp.store.Keys(ctx)
-	old, err := hp.signedCard(hk.PartyKeys, nil, true, time.Now().Add(-time.Hour))
+	_, old, err := hp.buildOwnCard(hp.id, hk.PartyKeys, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

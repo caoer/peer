@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,6 +39,12 @@ func newDir(t *testing.T, cfg config) string {
 	b, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(dir, configFile), b, 0o600); err != nil {
 		t.Fatal(err)
+	}
+	// The card on the state carries the config: what the root's place does
+	// after writing config.json. A config whose seat map is not there yet
+	// cannot open the party; its test writes the map and publishes itself.
+	if err := runCardPublish(context.Background(), dir, io.Discard); err != nil {
+		t.Logf("card publish after init: %v", err)
 	}
 	return dir
 }
@@ -107,7 +114,11 @@ func channelOf(t *testing.T, dir, name string) (*party, *store.Channel, *roster.
 func TestInviteAcceptConfirm(t *testing.T) {
 	ctx := context.Background()
 	srv, rc, base := relaytest.Start(t, login)
+	// The card's relays are config's relay: the card on the state is signed
+	// where the root is, from config, and a relay given to invite as a flag
+	// alone never reaches it.
 	hostDir := newDir(t, config{
+		Relay:   base,
 		Agents:  []card.Agent{{ID: "advisor", Accepts: []string{"text", "task"}}},
 		Details: json.RawMessage(`{"model":"fable"}`),
 	})

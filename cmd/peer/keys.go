@@ -74,6 +74,11 @@ func rotateIfDue(ctx context.Context, p *party, k *store.Keys, now time.Time, ou
 		err := k.Commit(ctx)
 		if err == nil {
 			fmt.Fprintf(out, "signed prekey rotated: %d → %d\n", old, k.PartyKeys.SignedPrekey.ID())
+			// The card on the state names the new key from here; the
+			// channels' announced marks fall behind it and serve resends.
+			if _, err := p.signOwnCard(ctx, k.PartyKeys, now); err != nil {
+				return true, err
+			}
 			return true, nil
 		}
 		if !errors.Is(err, store.ErrConflict) || try >= sendTries {
@@ -212,22 +217,22 @@ func runKeysAccept(ctx context.Context, dir, name string, out io.Writer) error {
 	if opk == nil {
 		built = "a new one is built from their signed prekey (they hold no one-time prekey on the channel)"
 	}
-	if p.root == nil {
+	own, stale, announced, err := p.ownCard(ctx, true)
+	if err != nil {
 		if err := ch.Commit(ctx); err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
-		fmt.Fprintf(out, "accepted %s's new identity key %s: the old session is dropped, %s; your next peer send carries it, and peer card publish sends your card where %s is\n", name, key.Identity, built, rootFile)
+		fmt.Fprintf(out, "accepted %s's new identity key %s: the old session is dropped, %s; your next peer send carries it, and serve sends your card once it is on the state (%v)\n", name, key.Identity, built, err)
 		return nil
 	}
-	own, err := p.signedCard(k.PartyKeys, relaysOf(p.cfg), true, time.Now())
-	if err != nil {
-		return err
+	if stale != "" {
+		fmt.Fprintln(out, stale)
 	}
 	dm, err := session.CardMessage(p.partyID(), keys.PartyID(ch.Root()), own)
 	if err != nil {
 		return err
 	}
-	ch.SetAnnounced(k.PartyKeys.SignedPrekey.ID())
+	ch.SetAnnounced(announced)
 	rcpt, err := s.Send(ctx, p.outbox, rc, pe.Token, dm)
 	var putErr *session.PutError
 	switch {
