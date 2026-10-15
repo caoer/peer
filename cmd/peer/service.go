@@ -150,10 +150,11 @@ func (sv *server) serviceRetries() int {
 	return defaultServiceRetries
 }
 
-// quarantineLocal births m in the local delivery directory's quarantine,
-// the reason above its body.
+// quarantineLocal births m in the local delivery directory's quarantine:
+// its body first — a doc or file's descriptor where peer fetch reads it —
+// then a blank line and the reason.
 func (sv *server) quarantineLocal(m *session.Message, reason string) error {
-	body := fmt.Appendf(nil, "%s\n\n%s", reason, m.Body)
+	body := fmt.Appendf(nil, "%s\n\n%s\n", bytes.TrimSuffix(m.Body, []byte("\n")), reason)
 	path, _, err := deliver.Write(sv.dir, deliver.Quarantine, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: body})
 	if err != nil {
 		return err

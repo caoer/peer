@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -85,11 +86,17 @@ func trustHooks(t *testing.T, h *hookServer) {
 // per label → URL, each taking text.
 func serviceMap(t *testing.T, root string, hooks map[string]string) {
 	t.Helper()
+	serviceMapAccepts(t, root, "text", hooks)
+}
+
+// serviceMapAccepts is serviceMap with every service row taking accepts.
+func serviceMapAccepts(t *testing.T, root, accepts string, hooks map[string]string) {
+	t.Helper()
 	var b strings.Builder
 	b.WriteString("# Seats\n\n| label | to | accepts |\n|---|---|---|\n")
 	b.WriteString("| leader | [[" + uccSession + "/rosters/leader-peer-v1]] | text |\n")
 	for label, u := range hooks {
-		fmt.Fprintf(&b, "| %s | service %s | text |\n", label, u)
+		fmt.Fprintf(&b, "| %s | service %s | %s |\n", label, u, accepts)
 	}
 	if err := os.WriteFile(filepath.Join(root, "peers", "seats.md"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
@@ -191,7 +198,7 @@ func TestServeUCCService(t *testing.T) {
 		t.Fatalf("no local quarantine record for dead:\n%s", out)
 	}
 	fm, _, body := parseRecord(t, rec)
-	if fm["to"] != p.hostParty+"/dead" || !strings.HasPrefix(body, "not delivered to "+dead.URL+": ") || !strings.HasSuffix(body, "body of dead") {
+	if fm["to"] != p.hostParty+"/dead" || !strings.HasPrefix(body, "body of dead\n\nnot delivered to "+dead.URL+": ") {
 		t.Errorf("quarantine record %v:\n%s", fm, body)
 	}
 	if q := serviceQueue(t, p.hostDir); len(q) != 0 {
@@ -206,6 +213,43 @@ func TestServeUCCService(t *testing.T) {
 	// Round 4: nothing left to do.
 	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); strings.Contains(out, "delivered") || dead.count() != 3 {
 		t.Errorf("round 4 did something (dead %d POSTs):\n%s", dead.count(), out)
+	}
+}
+
+// A doc or file whose service retries are spent is a local quarantine record
+// with its descriptor first and the reason last, so peer fetch <id> — the
+// retry its status line names — fetches the content once the blob is whole.
+func TestServeServiceQuarantineFetches(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	hook := newHook(t, func(int, *http.Request) int { return http.StatusInternalServerError })
+	trustHooks(t, hook)
+	root := uccRoot(t)
+	serviceMapAccepts(t, root, "text file", map[string]string{"hook": hook.URL})
+	cfg := uccCfg(root)
+	cfg.UCC.ServiceRetries = 1
+	p := handshake(t, newDir(t, cfg), newDir(t, config{}), base)
+	path, data := writeFile(t, "notes.txt", 4096)
+	id, _ := sendOK(t, p.guestDir, "--kind", "file", "--file", path, "zt/hook")
+	blobID := srv.Blobs(p.channel)[0]
+	orig := srv.Blob(p.channel, blobID)
+	bad := append([]byte(nil), orig...)
+	bad[10] ^= 0x80 // stands in for any fetch failure: relay 5xx, deploy, timeout
+	srv.SetBlob(p.channel, blobID, bad)
+
+	mustOK(t, "serve", "--dir", p.hostDir, "--once") // the POST fails: queued
+	mustOK(t, "serve", "--dir", p.hostDir, "--once") // its one retry fails: quarantined
+	rec, ok := records(t, deliverDirOf(p.hostDir), deliver.Quarantine)[id]
+	if !ok {
+		t.Fatal("no local quarantine record")
+	}
+	if _, body := descriptorOf(t, rec); !strings.HasSuffix(body, "; peer fetch "+id+" tries again\n\nnot delivered to "+hook.URL+": answered 500 Internal Server Error\n") {
+		t.Errorf("record body:\n%s", body)
+	}
+	srv.SetBlob(p.channel, blobID, orig) // the relay is healthy again
+	mustOK(t, "fetch", "--dir", p.hostDir, id)
+	got, err := os.ReadFile(filepath.Join(deliverDirOf(p.hostDir), string(deliver.Quarantine), id, "notes.txt"))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("peer fetch kept %d bytes: %v", len(got), err)
 	}
 }
 
