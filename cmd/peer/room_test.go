@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,36 @@ func TestRoomJoinTransientErrorReplays(t *testing.T) {
 	}
 	if len(ms.Members) != 2 {
 		t.Fatalf("the relay holds %d seats, want 2 — one mint for bob: %+v", len(ms.Members), ms.Members)
+	}
+}
+
+// A change folded between the invite and the mint — a handover here — is
+// below the newcomer's from and in no invite: after the mint the adder
+// brings its fold to from, and a room that changed gets a fresh invite
+// before the seat. The newcomer's admin set is everyone else's, and a
+// removal by the new admin folds there too.
+func TestRoomInviteRefreshedAfterMint(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	a, b, c := newDir(t, config{}), newDir(t, config{}), newDir(t, config{})
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	handshakeNamed(t, a, c, base, "carol", "alice")
+	id := createRoom(t, a, base, "r1")
+	addToRoom(t, a, b, "r1", "bob")
+	mustOK(t, "room", "add", "--dir", a, "r1", "carol") // the invite: admins [0]
+	mustOK(t, "room", "handover", "--dir", a, "r1", "bob")
+	mustOK(t, "serve", "--dir", b, "--once")
+	for _, dir := range []string{c, a, c, a, c, a, c} {
+		mustOK(t, "serve", "--dir", dir, "--once")
+	}
+	_, _, ast := roomOf(t, a, "r1")
+	_, cref, cst := roomOf(t, c, id[:8])
+	if cref.Stage != stageJoined || !slices.Equal(cst.Admins(), ast.Admins()) {
+		t.Fatalf("C is %s with admins %v; A holds %v", cref.Stage, cst.Admins(), ast.Admins())
+	}
+	mustOK(t, "room", "remove", "--dir", b, id[:8], "0")
+	mustOK(t, "serve", "--dir", c, "--once")
+	if _, _, cst := roomOf(t, c, id[:8]); cst.Member(0) != nil {
+		t.Fatalf("C still holds idx 0 after bob, an admin, removed it")
 	}
 }
 

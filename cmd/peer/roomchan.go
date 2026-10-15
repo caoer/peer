@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +41,21 @@ type roomInvite struct {
 	Add    room.Add     `json:"add"`
 	Admins []uint16     `json:"admins"`
 	Roster []room.Entry `json:"roster"`
+}
+
+// invite is the room-invite the fold holds now and the sha256 of its JSON,
+// which the add keeps (pendingAdd.Invite) for the check after the mint.
+func (c *roomConn) invite() (roomInvite, string, error) {
+	inv := roomInvite{Room: c.ref.ID, Relay: c.ref.Relay, Add: c.st.Add(), Admins: c.st.Admins()}
+	for _, m := range c.st.Members() {
+		inv.Roster = append(inv.Roster, m.Entry)
+	}
+	b, err := json.Marshal(inv)
+	if err != nil {
+		return roomInvite{}, "", err
+	}
+	sum := sha256.Sum256(b)
+	return inv, hex.EncodeToString(sum[:]), nil
 }
 
 type roomAccept struct {
@@ -219,15 +236,38 @@ func (sv *server) runRoomStep(ctx context.Context, pe roster.Peer, m *session.Me
 	if err := sv.p.sendMessage(ctx, pe, reply, sv.out); err != nil {
 		return err
 	}
-	if reply.Kind == kindRoomToken {
+	switch reply.Kind {
+	case kindRoomToken:
 		var tok roomToken
 		if json.Unmarshal(reply.Body, &tok) == nil {
 			if err := dropPendingAdd(ctx, sv.p.backend, tok.Room, pe.Channel); err != nil {
 				fmt.Fprintf(sv.out, "%s: the token went out; the add is still listed (%v)\n", pe.Name, err)
 			}
 		}
+	case kindRoomSeat, kindRoomInvite:
+		// The invite check's answer went out: a minted add moves to seated
+		// only now, so a send that failed replays the check, never a seat on
+		// the stale invite. A move that failed replays it too.
+		var r struct {
+			Room string `json:"room"`
+		}
+		if json.Unmarshal(reply.Body, &r) == nil {
+			return seatAdd(ctx, sv.p.backend, r.Room, pe.Channel)
+		}
 	}
 	return nil
+}
+
+// seatAdd moves a minted add over channel to seated.
+func seatAdd(ctx context.Context, b store.Backend, roomID, channel string) error {
+	return updateRooms(ctx, b, func(l *roomList) error {
+		if r := l.byID(roomID); r != nil {
+			if a := r.add(channel); a != nil && a.Stage == addMinted {
+				a.Stage = addSeated
+			}
+		}
+		return nil
+	})
 }
 
 // roomStep runs one step of a join for a room channel message: the reply to
@@ -243,7 +283,7 @@ func (sv *server) roomStep(ctx context.Context, pe roster.Peer, ch *store.Channe
 	case kindRoomInvite:
 		return p.onRoomInvite(ctx, pe, ch, m, out)
 	case kindRoomAccept:
-		return p.onRoomAccept(ctx, pe, ch, m, out)
+		return p.onRoomAccept(ctx, sv, pe, ch, m)
 	case kindRoomSeat:
 		return p.onRoomSeat(ctx, pe, ch, m, out)
 	case kindRoomJoin:
@@ -318,9 +358,15 @@ func newRoomName(l *roomList, id string) string {
 	return id
 }
 
-// onRoomAccept (the adder) mints the newcomer's token on its yes and answers
-// with the idx; an accept already minted for gets the same idx again.
-func (p *party) onRoomAccept(ctx context.Context, pe roster.Peer, ch *store.Channel, m *session.Message, out io.Writer) (*session.Message, string, error) {
+// onRoomAccept (the adder) mints the newcomer's token on its yes, then checks
+// the invite: the newcomer reads from from, so what folded below it since peer
+// room add — a handover, a removal, a rotation — reaches it only in an invite.
+// The fold brought to from builds the invite again; one that differs from the
+// invite sent goes out fresh, and the newcomer's next accept gets the seat.
+// One that matches is answered with the idx. An accept already minted for
+// mints nothing; past the check it gets the same idx again.
+func (p *party) onRoomAccept(ctx context.Context, sv *server, pe roster.Peer, ch *store.Channel, m *session.Message) (*session.Message, string, error) {
+	out := sv.out
 	var acc roomAccept
 	if err := json.Unmarshal(m.Body, &acc); err != nil {
 		return nil, fmt.Sprintf("room-accept: %v", err), nil
@@ -344,7 +390,7 @@ func (p *party) onRoomAccept(ctx context.Context, pe roster.Peer, ch *store.Chan
 				return fmt.Errorf("room %s: the add of %s left the rooms record", ref.Name, pe.Name)
 			}
 			if cp.Stage == addInvited {
-				cp.Stage, cp.Idx, cp.Token, cp.From = addSeated, uint16(minted.Idx), minted.Token, minted.From
+				cp.Stage, cp.Idx, cp.Token, cp.From = addMinted, uint16(minted.Idx), minted.Token, minted.From
 			}
 			*pa = *cp
 			return nil
@@ -353,6 +399,28 @@ func (p *party) onRoomAccept(ctx context.Context, pe roster.Peer, ch *store.Chan
 			return nil, "", err
 		}
 		fmt.Fprintf(out, "room %s: minted idx %d for %s (it reads from #%d)\n", ref.Name, pa.Idx, pe.Name, pa.From)
+	}
+	if pa.Stage == addMinted {
+		c, err := sv.openRoom(ctx, *ref)
+		if err != nil {
+			return nil, "", err
+		}
+		if err := c.pullBelow(ctx, pa.From); err != nil {
+			if errors.Is(err, errGone) {
+				return nil, err.Error(), nil
+			}
+			// The accept stays in the spool: the next round checks again.
+			return nil, "", fmt.Errorf("room %s: the invite check for %s waits for the next round: %w", ref.Name, pe.Name, err)
+		}
+		inv, sum, err := c.invite()
+		if err != nil {
+			return nil, "", err
+		}
+		if sum != pa.Invite {
+			fmt.Fprintf(out, "room %s: the room changed below #%d since %s's invite; a fresh one goes out before the seat\n", ref.Name, pa.From, pe.Name)
+			reply, err := p.channelMessage(ch, kindRoomInvite, inv)
+			return reply, "", err
+		}
 	}
 	reply, err := p.channelMessage(ch, kindRoomSeat, roomSeat{Room: ref.ID, Idx: pa.Idx})
 	return reply, "", err
@@ -484,7 +552,9 @@ func (p *party) onRoomJoin(ctx context.Context, sv *server, pe roster.Peer, ch *
 	switch pa.Stage {
 	case addInvited:
 		return nil, fmt.Sprintf("a room-join for room %s before its seat", ref.Name), nil
-	case addSeated:
+	case addMinted, addSeated:
+		// At minted the check's seat went out — only it sends one there —
+		// and the move to seated has not landed: the join proves the seat.
 		root, signed := ch.Root(), ch.Card()
 		if root == nil || signed == nil {
 			return nil, fmt.Sprintf("room %s: no card pinned for %s", ref.Name, pe.Name), nil

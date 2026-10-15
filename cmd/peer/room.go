@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -230,9 +231,10 @@ func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.A
 // room-accept, room-seat, the roster record on room-join, room-token — runs
 // in serve as the peer's answers arrive. An add whose roster record landed
 // but whose token never left is finished here by sending the token again;
-// one whose idx is minted and whose roster record has not landed sends the
-// seat again, and the newcomer's room-join brings the rest. A minted idx is
-// never dropped: nothing is minted twice for one add.
+// one whose seat went out and whose roster record has not landed sends the
+// seat again, and the newcomer's room-join brings the rest; one minted and
+// not yet checked waits for serve. A minted idx is never dropped: nothing is
+// minted twice for one add.
 func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out io.Writer) error {
 	dir, err := peerDir(dir)
 	if err != nil {
@@ -310,11 +312,21 @@ func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out i
 		}
 		fmt.Fprintf(out, "room %s: %s holds idx %d; sent its seat again — its room-join brings the roster record, then the token\n", ref.Name, peerName, pa.Idx)
 		return nil
+	case pa != nil && pa.Stage == addMinted:
+		// The idx is minted and serve has not checked the invite against the
+		// room at the newcomer's from: serve sends the seat, or a fresh invite
+		// when the room changed. A fresh invite from here would drop the idx.
+		fmt.Fprintf(out, "room %s: %s holds idx %d; your serve sends its seat once the invite is checked against the room below #%d\n", ref.Name, peerName, pa.Idx, pa.From)
+		return nil
 	}
 	for _, m := range st.Members() {
 		if m.Party == party {
 			return fmt.Errorf("room %s: %s is in it already, at idx %d", ref.Name, peerName, m.Idx)
 		}
+	}
+	inv, sum, err := c.invite()
+	if err != nil {
+		return err
 	}
 	err = updateRooms(ctx, p.backend, func(l *roomList) error {
 		cur := l.byID(ref.ID)
@@ -322,15 +334,11 @@ func runRoomAdd(ctx context.Context, dir, roomName, peerName, role string, out i
 			return fmt.Errorf("room %s left the rooms record under this command", ref.Name)
 		}
 		cur.dropAdd(pe.Channel)
-		cur.Adds = append(cur.Adds, pendingAdd{Peer: peerName, Channel: pe.Channel, Role: role, Stage: addInvited})
+		cur.Adds = append(cur.Adds, pendingAdd{Peer: peerName, Channel: pe.Channel, Role: role, Stage: addInvited, Invite: sum})
 		return nil
 	})
 	if err != nil {
 		return err
-	}
-	inv := roomInvite{Room: ref.ID, Relay: ref.Relay, Add: st.Add(), Admins: st.Admins()}
-	for _, m := range st.Members() {
-		inv.Roster = append(inv.Roster, m.Entry)
 	}
 	if err := p.sendOnChannel(ctx, *pe, kindRoomInvite, inv, out); err != nil {
 		return err
@@ -398,6 +406,8 @@ func runRoomMembers(ctx context.Context, dir, name string, out io.Writer) error 
 		switch a.Stage {
 		case addInvited:
 			fmt.Fprintf(out, "  adding %s: invited, waiting for their accept\n", a.Peer)
+		case addMinted:
+			fmt.Fprintf(out, "  adding %s: idx %d minted, its seat waits on the invite's check against the room below #%d\n", a.Peer, a.Idx, a.From)
 		case addSeated:
 			fmt.Fprintf(out, "  adding %s: idx %d minted, waiting for their room card\n", a.Peer, a.Idx)
 		case addRostered:
@@ -497,7 +507,12 @@ func (c *roomConn) say(seq int64, format string, args ...any) {
 // membership version is taken at head alone. A record whose delivery waits
 // on a seat's session stops nothing: it is committed with the cursor and
 // waits in the room spool (roomdeliver.go).
-func (c *roomConn) pull(ctx context.Context) error {
+func (c *roomConn) pull(ctx context.Context) error { return c.pullBelow(ctx, math.MaxInt64) }
+
+// pullBelow is pull stopped at the first record at seq below or past: the
+// fold brought to the room a newcomer reading from below starts at
+// (onRoomAccept's invite check). Stopped short of head, it takes no version.
+func (c *roomConn) pullBelow(ctx context.Context, below int64) error {
 	if c.sv == nil {
 		sv, err := commandServer(c.p, c.out)
 		if err != nil {
@@ -538,6 +553,9 @@ func (c *roomConn) pull(ctx context.Context) error {
 		for _, rec := range page.Records {
 			if rec.Seq <= c.st.Cursor() {
 				continue
+			}
+			if rec.Seq >= below {
+				return nil
 			}
 			if err := c.receive(rec); err != nil {
 				// Nothing of this record is kept: its seen id and counter

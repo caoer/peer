@@ -252,7 +252,7 @@ func (c *roomConn) markRostered(ctx context.Context, body room.RosterBody) {
 		}
 		for i := range r.Adds {
 			a := &r.Adds[i]
-			if a.Stage == addSeated && slices.ContainsFunc(body.Members, func(en room.Entry) bool { return en.Idx == a.Idx }) {
+			if (a.Stage == addMinted || a.Stage == addSeated) && slices.ContainsFunc(body.Members, func(en room.Entry) bool { return en.Idx == a.Idx }) {
 				a.Stage = addRostered
 			}
 		}

@@ -59,21 +59,26 @@ type addStage string
 
 const (
 	addInvited  addStage = "invited"  // room-invite sent, waiting for room-accept
-	addSeated   addStage = "seated"   // minted, room-seat sent, waiting for room-join
+	addMinted   addStage = "minted"   // minted; the seat waits on the invite's check against the fold at from
+	addSeated   addStage = "seated"   // room-seat sent, or a fresh room-invite whose accept gets it; waiting for room-join
 	addRostered addStage = "rostered" // the roster record landed; room-token goes out
 )
 
 // pendingAdd is one add in flight, held by the adder until the room-token
-// went out: the channel it runs over, the role asked for, and from the
-// mint on the idx, token and from the newcomer gets.
+// went out: the channel it runs over, the role asked for, the sum of the
+// invite peer room add sent, and from the mint on the idx, token and from the
+// newcomer gets.
 type pendingAdd struct {
 	Peer    string   `json:"peer"`
 	Channel string   `json:"channel"`
 	Role    string   `json:"role"`
 	Stage   addStage `json:"stage"`
-	Idx     uint16   `json:"idx,omitempty"`
-	Token   string   `json:"token,omitempty"`
-	From    int64    `json:"from,omitempty"`
+	// Invite is the sha256 of the room-invite's JSON (roomConn.invite): after
+	// the mint the fold brought to from is checked against it.
+	Invite string `json:"invite,omitempty"`
+	Idx    uint16 `json:"idx,omitempty"`
+	Token  string `json:"token,omitempty"`
+	From   int64  `json:"from,omitempty"`
 }
 
 // pendingHandover is one handover the admin ran: the member's channel, its
