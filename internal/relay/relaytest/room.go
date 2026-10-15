@@ -105,6 +105,13 @@ func (s *Server) roomSockets(id string, idx int) int {
 	return n
 }
 
+// RoomPulls is how many pull GETs room id has answered for idx's tokens.
+func (s *Server) RoomPulls(id string, idx int) int {
+	return s.Pulls(id, roomPullKey(idx))
+}
+
+func roomPullKey(idx int) string { return "idx " + strconv.Itoa(idx) }
+
 // serveRoom answers the room routes and reports whether p was one.
 func (s *Server) serveRoom(w http.ResponseWriter, r *http.Request) bool {
 	p := strings.TrimPrefix(r.URL.Path, "/peer")
@@ -319,6 +326,10 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 			rm.membership++
 		}
 		ok(map[string]any{"seq": row.Seq, "membership": rm.membership})
+		if s.push.drop > 0 {
+			s.push.drop--
+			return nil
+		}
 		for k := range s.rooms.socks {
 			if k.id == id && k.idx != row.Idx {
 				select {
@@ -348,6 +359,7 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 			page = append(page, row)
 			size += len(row.Body)
 		}
+		s.countPull(id, roomPullKey(tok.idx))
 		ok(map[string]any{"membership": rm.membership, "records": page})
 	default:
 		fail(w, relay.ErrNoSuchRoute)

@@ -17,8 +17,8 @@ import (
 // pushConfig is config.json's push: how a running serve uses the relay's
 // WebSocket push (wire contract § WebSocket push).
 type pushConfig struct {
-	// PullEvery is how many pushed frames serve takes on a channel before it
-	// pulls that channel anyway, so a lost frame with nothing behind it to
+	// PullEvery is how many pushed frames serve takes on a channel or a room
+	// before it pulls it anyway, so a lost frame with nothing behind it to
 	// show the gap is read before the next round; default 10.
 	PullEvery int `json:"pullEvery,omitempty"`
 }
@@ -41,10 +41,10 @@ var (
 )
 
 // loop is serve's life after start: a round every interval, and between
-// rounds, unless once, every served channel's push socket — each frame
-// taken as a pulled row is, the channel pulled on every connect and after
-// every push.pullEvery frames. A relay that never answers the upgrade
-// leaves the rounds' pull as it was.
+// rounds, unless once, the push socket of every served channel and every
+// room — each frame taken as a pulled row or record is, the channel or room
+// pulled on every connect and after every push.pullEvery frames. A relay
+// that never answers the upgrade leaves the rounds' pull as it was.
 func (sv *server) loop(ctx context.Context, every time.Duration, once bool, stderr io.Writer) int {
 	if !once {
 		sv.push = newPusher(ctx, sv)
@@ -85,18 +85,29 @@ func (sv *server) wait(ctx context.Context, every time.Duration) bool {
 	}
 }
 
-// pusher holds a push socket per served channel.
+// pusher holds a push socket per served channel and per room this party
+// is in (roompush.go).
 type pusher struct {
 	sv     *server
 	ctx    context.Context
 	events chan pushEvent
-	socks  map[string]*pushSocket // by channel id
+	socks  map[pushKey]*pushSocket
 	wg     sync.WaitGroup
+}
+
+// pushKey names one socket: a channel's by its id, or a room's.
+type pushKey struct {
+	room bool
+	id   string
 }
 
 type pushSocket struct {
 	cancel context.CancelFunc
-	// frames is how many frames were taken since the channel was last pulled.
+	// token is the room token the socket was opened with: a room whose
+	// token changes is opened again under the new one.
+	token string
+	// frames is how many frames were taken since the channel or room was
+	// last pulled.
 	frames int
 }
 
@@ -104,21 +115,29 @@ type pushKind int
 
 const (
 	pushOpen   pushKind = iota // the socket is open: pull first
-	pushFrame                  // one envelope pushed
+	pushFrame                  // one envelope or room record pushed
 	pushClosed                 // the socket closed; reconnecting
 	pushDown                   // the upgrade failed, first of a streak; trying again
-	pushGone                   // the relay refused the channel's token or channel: no more reconnects
+	pushGone                   // the relay refused the token, channel or room: no more reconnects
 )
 
 type pushEvent struct {
 	kind    pushKind
-	channel string
+	key     pushKey
 	rec     relay.Record
+	roomRec relay.RoomRecord
 	err     error
 }
 
+// pushStream is one open socket: next blocks for the event its next frame
+// carries.
+type pushStream struct {
+	next  func(context.Context) (pushEvent, error)
+	close func() error
+}
+
 func newPusher(ctx context.Context, sv *server) *pusher {
-	return &pusher{sv: sv, ctx: ctx, events: make(chan pushEvent, 64), socks: map[string]*pushSocket{}}
+	return &pusher{sv: sv, ctx: ctx, events: make(chan pushEvent, 64), socks: map[pushKey]*pushSocket{}}
 }
 
 // stop closes every socket and waits for their goroutines.
@@ -129,9 +148,15 @@ func (ps *pusher) stop() {
 	ps.wg.Wait()
 }
 
-// track opens a socket for every served channel without one and closes
-// those no longer served, by the roster as it is now.
+// track opens a socket for every served channel and every room without one
+// and closes those no longer served, by the roster and the rooms record as
+// they are now.
 func (ps *pusher) track(ctx context.Context) {
+	ps.trackChannels(ctx)
+	ps.trackRooms(ctx)
+}
+
+func (ps *pusher) trackChannels(ctx context.Context) {
 	r, err := roster.Load(ctx, ps.sv.p.backend)
 	if err != nil {
 		fmt.Fprintf(ps.sv.out, "push: %v\n", err)
@@ -143,40 +168,60 @@ func (ps *pusher) track(ctx context.Context) {
 			served[pe.Channel] = pe
 		}
 	}
-	for id, s := range ps.socks {
-		if _, ok := served[id]; !ok {
+	for k, s := range ps.socks {
+		if _, ok := served[k.id]; !ok && !k.room {
 			s.cancel()
-			delete(ps.socks, id)
+			delete(ps.socks, k)
 		}
 	}
 	for id, pe := range served {
-		if ps.socks[id] != nil {
+		k := pushKey{id: id}
+		if ps.socks[k] != nil {
 			continue
 		}
-		sctx, cancel := context.WithCancel(ps.ctx)
-		ps.socks[id] = &pushSocket{cancel: cancel}
-		ps.wg.Add(1)
-		go func() {
-			defer ps.wg.Done()
-			ps.hold(sctx, pe)
-		}()
+		rc := relay.New(pe.Relay, nil)
+		ps.open(k, "", func(ctx context.Context) (*pushStream, error) {
+			s, err := rc.Subscribe(ctx, pe.Channel, pe.Token)
+			if err != nil {
+				return nil, err
+			}
+			return &pushStream{
+				next: func(ctx context.Context) (pushEvent, error) {
+					rec, err := s.Next(ctx)
+					return pushEvent{rec: rec}, err
+				},
+				close: s.Close,
+			}, nil
+		}, func(err error) bool {
+			return errors.Is(err, relay.ErrBadToken) || errors.Is(err, relay.ErrNoSuchChannel)
+		})
 	}
 }
 
-// hold keeps one channel's socket open until ctx ends or the relay refuses
-// it for good, reconnecting with backoff after every close.
-func (ps *pusher) hold(ctx context.Context, pe roster.Peer) {
-	rc := relay.New(pe.Relay, nil)
+// open starts the goroutine that holds socket k.
+func (ps *pusher) open(k pushKey, token string, dial func(context.Context) (*pushStream, error), final func(error) bool) {
+	sctx, cancel := context.WithCancel(ps.ctx)
+	ps.socks[k] = &pushSocket{cancel: cancel, token: token}
+	ps.wg.Add(1)
+	go func() {
+		defer ps.wg.Done()
+		ps.hold(sctx, k, dial, final)
+	}()
+}
+
+// hold keeps one socket open until ctx ends or the relay refuses it for
+// good (final), reconnecting with backoff after every close.
+func (ps *pusher) hold(ctx context.Context, k pushKey, dial func(context.Context) (*pushStream, error), final func(error) bool) {
 	backoff, down := backoffMin, false
 	for ctx.Err() == nil {
-		s, err := rc.Subscribe(ctx, pe.Channel, pe.Token)
+		s, err := dial(ctx)
 		if err == nil {
 			down = false
 			opened := time.Now()
-			if ps.emit(ctx, pushEvent{kind: pushOpen, channel: pe.Channel}) {
-				err = ps.read(ctx, s, pe.Channel)
+			if ps.emit(ctx, pushEvent{kind: pushOpen, key: k}) {
+				err = ps.read(ctx, s, k)
 			}
-			s.Close()
+			s.close()
 			if time.Since(opened) > backoffMax {
 				backoff = backoffMin
 			}
@@ -184,8 +229,8 @@ func (ps *pusher) hold(ctx context.Context, pe roster.Peer) {
 		switch {
 		case ctx.Err() != nil:
 			return
-		case errors.Is(err, relay.ErrBadToken) || errors.Is(err, relay.ErrNoSuchChannel):
-			ps.emit(ctx, pushEvent{kind: pushGone, channel: pe.Channel, err: err})
+		case err != nil && final(err):
+			ps.emit(ctx, pushEvent{kind: pushGone, key: k, err: err})
 			return
 		case err == nil:
 		case down:
@@ -194,7 +239,7 @@ func (ps *pusher) hold(ctx context.Context, pe roster.Peer) {
 			if s == nil {
 				kind, down = pushDown, true
 			}
-			ps.emit(ctx, pushEvent{kind: kind, channel: pe.Channel, err: err})
+			ps.emit(ctx, pushEvent{kind: kind, key: k, err: err})
 		}
 		select {
 		case <-ctx.Done():
@@ -206,13 +251,14 @@ func (ps *pusher) hold(ctx context.Context, pe roster.Peer) {
 }
 
 // read passes the socket's frames on until it fails or closes.
-func (ps *pusher) read(ctx context.Context, s *relay.Socket, channel string) error {
+func (ps *pusher) read(ctx context.Context, s *pushStream, k pushKey) error {
 	for {
-		rec, err := s.Next(ctx)
+		ev, err := s.next(ctx)
 		if err != nil {
 			return err
 		}
-		if !ps.emit(ctx, pushEvent{kind: pushFrame, channel: channel, rec: rec}) {
+		ev.kind, ev.key = pushFrame, k
+		if !ps.emit(ctx, ev) {
 			return ctx.Err()
 		}
 	}
@@ -227,12 +273,16 @@ func (ps *pusher) emit(ctx context.Context, ev pushEvent) bool {
 	}
 }
 
-// handle acts on one socket event, with the channel's roster entry as it is
-// now: a frame is taken by the pulled row's path, an open or every
+// handle acts on one socket event — a room's in handleRoom — with the
+// channel's roster entry as it is now: a frame is taken by the pulled row's path, an open or every
 // push.pullEvery frames pulls the channel.
 func (ps *pusher) handle(ctx context.Context, ev pushEvent) {
-	s := ps.socks[ev.channel]
+	s := ps.socks[ev.key]
 	if s == nil {
+		return
+	}
+	if ev.key.room {
+		ps.handleRoom(ctx, ev, s)
 		return
 	}
 	r, err := roster.Load(ctx, ps.sv.p.backend)
@@ -240,7 +290,7 @@ func (ps *pusher) handle(ctx context.Context, ev pushEvent) {
 		fmt.Fprintf(ps.sv.out, "push: %v\n", err)
 		return
 	}
-	pe := r.ByChannel(ev.channel)
+	pe := r.ByChannel(ev.key.id)
 	if pe == nil || !serves(*pe) {
 		return
 	}

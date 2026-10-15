@@ -34,8 +34,21 @@ func (s *syncBuffer) String() string {
 // the test ends; reconnects back off in milliseconds.
 func runServe(t *testing.T, dir string, every time.Duration) *syncBuffer {
 	t.Helper()
+	fastBackoff(t)
+	return serveLoop(t, dir, every)
+}
+
+// fastBackoff makes reconnects back off in milliseconds until the test ends;
+// set once before any loop starts, as the loops read it.
+func fastBackoff(t *testing.T) {
 	oldMin, oldMax := backoffMin, backoffMax
 	backoffMin, backoffMax = 10*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() { backoffMin, backoffMax = oldMin, oldMax })
+}
+
+// serveLoop runs serve's loop on dir until the test ends.
+func serveLoop(t *testing.T, dir string, every time.Duration) *syncBuffer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	out := &syncBuffer{}
 	sv, err := openServer(dir, "", out)
@@ -52,7 +65,6 @@ func runServe(t *testing.T, dir string, every time.Duration) *syncBuffer {
 		if code := <-done; code != 0 {
 			t.Errorf("serve loop exit %d", code)
 		}
-		backoffMin, backoffMax = oldMin, oldMax
 		t.Logf("serve output:\n%s", out)
 	})
 	return out
