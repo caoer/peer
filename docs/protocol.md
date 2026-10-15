@@ -263,7 +263,7 @@ The frontmatter holds exactly these five keys; a vendor kind is written quoted. 
 |---|---|
 | `[[<session>/rosters/<role>-<slug>]]` | an inbox or quarantine record in that seat's session |
 | `human [[<session>/rosters/<role>-<slug>]]` | the same, in the session of the seat that relays to the person; `to:` stays the person's address |
-| `service <https URL>` | an HTTPS POST of `{from, to, kind, verified, at, body}` as JSON; a 2xx answer is the delivery; no redirect is followed; a failure is retried once per round, 20 rounds by default, then quarantined locally; a kind the row does not accept is never posted. The POST carries no signature: the URL is the service's secret. |
+| `service <https URL>` | an HTTPS POST of `{from, to, kind, verified, at, body}` as JSON; a 2xx answer is the delivery; no redirect is followed; a failure is retried once per round, 20 rounds by default, then quarantined locally; a kind the row does not accept is never posted; a `doc` or `file` posted with `blob not fetched` is also quarantined locally, where `peer fetch <id>` reads it. The POST carries no signature: the URL is the service's secret. |
 
 `accepts` holds one or more of the eight kinds, space-separated. A map outside this grammar delivers nothing. On such a party, a message addressed to an agent id the map does not carry, or to the party with no agent, is refused and consumed: it is not delivered anywhere.
 

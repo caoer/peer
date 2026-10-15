@@ -82,10 +82,20 @@ func (sv *server) toService(row seats.Row, m *session.Message, raw []byte) error
 	}
 	err := postService(row.URL, m)
 	if err == nil {
-		fmt.Fprintf(sv.out, "delivered %s %s → %s\n", m.Kind, m.ID, row.URL)
-		return nil
+		return sv.posted(row.URL, m)
 	}
 	return sv.serviceFailed(&serviceEntry{URL: row.URL, Message: raw}, m, err)
+}
+
+// posted reports m delivered to u. A doc or file whose content serve did not
+// fetch is also born as a local quarantine record: the body posted names
+// peer fetch <id> as its retry, and peer fetch reads the descriptor there.
+func (sv *server) posted(u string, m *session.Message) error {
+	fmt.Fprintf(sv.out, "delivered %s %s → %s\n", m.Kind, m.ID, u)
+	if !isAttachment(m.Kind) || contentFetched(m.Body) {
+		return nil
+	}
+	return sv.quarantineLocal(m, fmt.Sprintf("content not fetched; the record was posted to %s", u))
 }
 
 // retryServices tries every queued message once, in id order.
@@ -117,7 +127,11 @@ func (sv *server) retryServices() {
 			}
 			continue
 		}
-		fmt.Fprintf(sv.out, "delivered %s %s → %s\n", m.Kind, m.ID, e.URL)
+		if err := sv.posted(e.URL, m); err != nil {
+			// The entry stays: the next round posts it again and births its record.
+			fmt.Fprintf(sv.out, "service queue %s: %v\n", m.ID, err)
+			continue
+		}
 		if err := os.Remove(n); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(sv.out, "service queue %s: %v\n", m.ID, err)
 		}

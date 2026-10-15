@@ -253,6 +253,50 @@ func TestServeServiceQuarantineFetches(t *testing.T) {
 	}
 }
 
+// A doc or file posted to a service row with its content not fetched is
+// also a local quarantine record, so peer fetch <id> — the retry the posted
+// body names — fetches the content once the relay is healthy. One whose
+// content was fetched is posted and has no record.
+func TestServeServiceUnfetchedAttachmentFetches(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	hook := newHook(t, func(int, *http.Request) int { return http.StatusOK })
+	trustHooks(t, hook)
+	root := uccRoot(t)
+	serviceMapAccepts(t, root, "text file", map[string]string{"hook": hook.URL})
+	p := handshake(t, newDir(t, uccCfg(root)), newDir(t, config{}), base)
+	path, data := writeFile(t, "notes.txt", 4096)
+	id, _ := sendOK(t, p.guestDir, "--kind", "file", "--file", path, "zt/hook")
+	blobID := srv.Blobs(p.channel)[0]
+	orig := srv.Blob(p.channel, blobID)
+	bad := append([]byte(nil), orig...)
+	bad[10] ^= 0x80 // stands in for any fetch failure: relay 5xx, deploy, timeout
+	srv.SetBlob(p.channel, blobID, bad)
+	fetchedPath, _ := writeFile(t, "fetched.txt", 4096)
+	fetched, _ := sendOK(t, p.guestDir, "--kind", "file", "--file", fetchedPath, "zt/hook")
+
+	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	if hook.count() != 2 || !strings.Contains(string(hook.posts[0]), "peer fetch "+id+" tries again") {
+		t.Fatalf("hook posts %d: %s", hook.count(), hook.posts)
+	}
+	recs := records(t, deliverDirOf(p.hostDir), deliver.Quarantine)
+	if _, ok := recs[fetched]; ok {
+		t.Errorf("the file whose content was fetched has a local record:\n%s", out)
+	}
+	rec, ok := recs[id]
+	if !ok {
+		t.Fatalf("no local quarantine record for the file not fetched:\n%s", out)
+	}
+	if _, body := descriptorOf(t, rec); !strings.HasSuffix(body, "tries again\n\ncontent not fetched; the record was posted to "+hook.URL+"\n") {
+		t.Errorf("record body:\n%s", body)
+	}
+	srv.SetBlob(p.channel, blobID, orig) // the relay is healthy again
+	mustOK(t, "fetch", "--dir", p.hostDir, id)
+	got, err := os.ReadFile(filepath.Join(deliverDirOf(p.hostDir), string(deliver.Quarantine), id, "notes.txt"))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("peer fetch kept %d bytes: %v", len(got), err)
+	}
+}
+
 // Two OS processes serve one shared state (the file backend): one POST per
 // message, none lost, both spools and queues empty.
 func TestTwoHostsServeService(t *testing.T) {

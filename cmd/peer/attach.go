@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -108,6 +109,15 @@ func (sv *server) attachment(channel string, m *session.Message) []byte {
 		}
 	}
 	return fmt.Appendf(nil, "%s\n%s", line, m.Body)
+}
+
+// contentFetched reports whether a record body attachment composed says the
+// content is on this host. Serve's line follows the one-line descriptor and
+// a blank line, or opens the body when the descriptor did not parse, so the
+// peer's bytes never stand where it is read.
+func contentFetched(body []byte) bool {
+	desc, line, _ := bytes.Cut(body, []byte("\n\n"))
+	return bytes.HasPrefix(desc, []byte("{")) && bytes.HasPrefix(line, []byte("content: "))
 }
 
 // fetchAttachment gets the blob a descriptor names from the channel it came
