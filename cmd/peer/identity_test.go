@@ -5,13 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/caoer/peer/internal/card"
 	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/relay/relaytest"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
@@ -132,6 +138,114 @@ func TestIdentityRotate(t *testing.T) {
 		t.Fatalf("guest serve on the host's reply:\n%s", out)
 	}
 	_ = rc
+}
+
+// putBumpRelay fronts the fake relay and runs the armed bump once, on the
+// next envelope put — another host of the party committing the keys record
+// while the rotation is on the network.
+type putBumpRelay struct {
+	proxy http.Handler
+	bump  atomic.Pointer[func()]
+}
+
+func (b *putBumpRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/envelopes") {
+		if f := b.bump.Swap(nil); f != nil {
+			(*f)()
+		}
+	}
+	b.proxy.ServeHTTP(w, r)
+}
+
+// Another serving host restocks one-time prekeys while the rotation sends its
+// card: the keys record the rotation writes keeps the private halves that
+// host committed, whose public halves are on the relay, and carries the
+// signed prekey the rotation card announced.
+func TestIdentityRotateKeepsAConcurrentRestock(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	target, err := url.Parse(strings.TrimSuffix(base, "/peer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	br := &putBumpRelay{proxy: httputil.NewSingleHostReverseProxy(target)}
+	front := httptest.NewServer(br)
+	t.Cleanup(front.Close)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), front.URL+"/peer")
+
+	var restocked []uint32
+	bump := func() {
+		op, err := openParty(p.hostDir)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		k, err := op.keys(ctx)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		pks, err := session.NewPrekeys(ctx, k, 5)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := k.Commit(ctx); err != nil {
+			t.Error(err)
+			return
+		}
+		r, err := roster.Load(ctx, op.backend)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		pe := r.ByName("ancan")
+		if _, err := relay.New(pe.Relay, nil).PutPrekeys(ctx, p.channel, pe.Token, pks); err != nil {
+			t.Error(err)
+			return
+		}
+		for _, pk := range pks {
+			restocked = append(restocked, pk.ID)
+		}
+	}
+	br.bump.Store(&bump)
+	var out bytes.Buffer
+	if err := runIdentityRotate(ctx, p.hostDir, true, &out); err != nil {
+		t.Fatalf("rotate: %v\n%s", err, out.String())
+	}
+	if len(restocked) == 0 {
+		t.Fatalf("the restock never ran under the rotation:\n%s", out.String())
+	}
+
+	hp, _, _ := channelOf(t, p.hostDir, "ancan")
+	k, err := hp.keys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range restocked {
+		if r, _ := k.LoadPreKey(ctx, id); r == nil {
+			t.Errorf("one-time prekey %d, deposited during the rotation, is gone from the keys record", id)
+		}
+	}
+	if last := restocked[len(restocked)-1]; k.PartyKeys.NextPrekeyID <= last {
+		t.Errorf("next prekey id %d, want past the restocked %d", k.PartyKeys.NextPrekeyID, last)
+	}
+	oc, err := hp.store.OwnCard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := card.Verify(oc.Details, p.hostRoot.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := session.CurrentKey(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spk := k.PartyKeys.SignedPrekey
+	if k.PartyKeys.PreviousSignedPrekey != nil || cur.SignedPrekey.ID != spk.ID() || cur.SignedPrekey.Pub != keys.CurveText(spk.KeyPair().PublicKey().PublicKey()) {
+		t.Fatalf("keys record: signed prekey %d (previous held %v), the card announced %d", spk.ID(), k.PartyKeys.PreviousSignedPrekey != nil, cur.SignedPrekey.ID)
+	}
 }
 
 // On a pages state the rotation re-seals every record under the new

@@ -88,14 +88,12 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 	if err != nil {
 		return err
 	}
-	// The new keys record: a signed prekey under the new identity key with the
-	// next id, no previous one (the old was signed by the retired key and
-	// opens nothing a peer may still send), the one-time prekeys kept.
-	newPK := &keys.PartyKeys{SignedPrekey: k.PartyKeys.SignedPrekey, Prekeys: k.PartyKeys.Prekeys, NextPrekeyID: k.PartyKeys.NextPrekeyID}
+	// The signed prekey under the new identity key, with the next id: the
+	// card announces it and the keys record takes it in step 4.
+	newPK := &keys.PartyKeys{SignedPrekey: k.PartyKeys.SignedPrekey}
 	if err := newPK.RotateSignedPrekey(newID); err != nil {
 		return err
 	}
-	newPK.PreviousSignedPrekey = nil
 
 	// 1. The card: the old key with its until, then the new key — signed by
 	// the root, the same card the state holds from here (every host's).
@@ -147,12 +145,8 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 	// 4. Under the new identity: the keys record, every session dropped, the
 	// card record.
 	ns := store.New(newBackend, newID)
-	nk, err := ns.Keys(ctx)
+	nk, err := commitRotatedKeys(ctx, ns, k.PartyKeys, newPK)
 	if err != nil {
-		return err
-	}
-	nk.PartyKeys = newPK
-	if err := nk.Commit(ctx); err != nil {
 		return fmt.Errorf("keys record: %w", err)
 	}
 	dropped := 0
@@ -174,7 +168,7 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 	if err := putOwnCard(ctx, ns, newID, newPK, now, public, details); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "sessions dropped on %d channel(s); signed prekey %d under the new key; %d one-time prekeys kept\n", dropped, newPK.SignedPrekey.ID(), len(newPK.Prekeys))
+	fmt.Fprintf(out, "sessions dropped on %d channel(s); signed prekey %d under the new key; %d one-time prekeys kept\n", dropped, nk.SignedPrekey.ID(), len(nk.Prekeys))
 
 	// 5. The identity file: the old one kept beside it, retired.
 	retired := filepath.Join(dir, identityFile+".retired-"+now.UTC().Format("20060102T150405Z"))
@@ -209,6 +203,34 @@ func printRotateCost(out io.Writer, r *roster.Roster, sealed bool, identity stri
 		fmt.Fprintln(out, "- the file state stays readable; a second host of this party needs the new identity.json before it serves again")
 	}
 	fmt.Fprintln(out, "- the old identity.json is kept beside the new one as identity.json.retired-<time>; the old key signs nothing and opens nothing from here")
+}
+
+// commitRotatedKeys writes the keys record under the new identity: the
+// record as st holds it — its one-time prekeys and next id as another host
+// may have restocked or spent them while the rotation ran — with rotated's
+// signed prekey, the one the card announced, and no previous one (the old
+// was signed by the retired key and opens nothing a peer may still send). An
+// absent record starts from seed, the keys init wrote. A conflict reloads
+// the record and builds again.
+func commitRotatedKeys(ctx context.Context, st *store.Store, seed, rotated *keys.PartyKeys) (*keys.PartyKeys, error) {
+	for try := 1; ; try++ {
+		k, err := st.Keys(ctx)
+		if err != nil {
+			return nil, err
+		}
+		held := k.PartyKeys
+		if held == nil {
+			held = seed
+		}
+		k.PartyKeys = &keys.PartyKeys{SignedPrekey: rotated.SignedPrekey, Prekeys: held.Prekeys, NextPrekeyID: held.NextPrekeyID}
+		err = k.Commit(ctx)
+		if err == nil {
+			return k.PartyKeys, nil
+		}
+		if !errors.Is(err, store.ErrConflict) || try >= sendTries {
+			return nil, err
+		}
+	}
 }
 
 // copyRecord copies one record from the old to the new backend at the same
