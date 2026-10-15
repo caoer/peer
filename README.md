@@ -10,4 +10,6 @@ go build -o peer ./cmd/peer
 ./peer --help
 ```
 
-GPL-3.0 (see LICENSE).
+## License
+
+GPL-3.0 — peer links `go.mau.fi/libsignal` (GPL-3.0). The full text is in [LICENSE](LICENSE).
