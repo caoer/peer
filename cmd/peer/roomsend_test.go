@@ -562,3 +562,24 @@ func TestRoomPut409ResealsToCurrentRoster(t *testing.T) {
 		t.Fatalf("A's record is sealed to %v: want bob (1), not carol (2)", to)
 	}
 }
+
+// peer send into a room refuses a doc and a file — a room carries no blob —
+// and a name both a peer and a room carry: the room is named by its id then.
+func TestRoomSendRefusesBlobsAndAmbiguousName(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	a, b := newDir(t, config{}), newDir(t, config{})
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	createRoom(t, a, base, "r1")
+	f := filepath.Join(t.TempDir(), "attachment.txt")
+	if err := os.WriteFile(f, []byte("a blob"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"doc", "file"} {
+		code, _, errb := cmd(t, "send", "--dir", a, "--kind", kind, "--file", f, "r1")
+		if code == 0 || !strings.Contains(errb, "a "+kind+" goes to a peer: a room carries no blob") {
+			t.Fatalf("a %s into a room: exit %d, %s", kind, code, errb)
+		}
+	}
+	id := createRoom(t, a, base, "bob")
+	mustRefuse(t, "both a peer and a room are named bob: name the room by its id, "+id, "send", "--dir", a, "--text", "x", "bob")
+}
