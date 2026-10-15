@@ -189,10 +189,8 @@ func (c *roomConn) putEntry(ctx context.Context, e *store.Entry) (int64, error) 
 		if !errors.Is(err, relay.ErrStaleMembership) || try >= putTries {
 			return 0, fmt.Errorf("room %s: put: %w", c.ref.Name, err)
 		}
-		// The roster moved: fold to head and seal to it. A delivery that
-		// waits stops the pull where it is; the roster folded so far is the
-		// one this host holds, and the next 409 says so.
-		if err := c.pull(ctx); err != nil && !errors.Is(err, errWait) {
+		// The roster moved: fold to head and seal to it.
+		if err := c.pull(ctx); err != nil {
 			return 0, err
 		}
 	}
@@ -483,10 +481,7 @@ func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []str
 		return nil, err
 	}
 	if err := c.pull(ctx); err != nil {
-		if !errors.Is(err, errWait) {
-			return nil, err
-		}
-		fmt.Fprintf(warn, "peer send: room %s is not at head (%v); the record is sealed to the roster this host holds\n", ref.Name, err)
+		return nil, err
 	}
 	addrs, err := c.resolveTo(ctx, to)
 	if err != nil {

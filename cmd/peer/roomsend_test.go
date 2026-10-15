@@ -601,10 +601,55 @@ func TestRoomCommandPullBirthsInServeDeliver(t *testing.T) {
 	}
 }
 
-// A removal record behind a waiting delivery is never passed by the version
-// a put carries: the relay's membership version is taken at head alone, so a
-// send from the host where the delivery waits is never sealed to the removed
-// member at the version the removal's bump set.
+// A delivery that waits on a seat's session keeps its record in the room
+// spool while the cursor and the fold go on: the relay's membership version
+// is adopted at head, a send lands at once, and the waiting record is born
+// once the session is on this root.
+func TestRoomWaitDoesNotBlockPuts(t *testing.T) {
+	ctx := context.Background()
+	srv, _, base := relaytest.Start(t, login)
+	root := filepath.Join(t.TempDir(), "sessions")
+	writeRoomSeats(t, root, "*")
+	a, b := newDir(t, uccCfg(root)), newDir(t, config{})
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	id := createRoom(t, a, base, "r1")
+	addToRoom(t, a, b, "r1", "bob")
+	mustOK(t, "serve", "--dir", a, "--once")
+	mustOK(t, "serve", "--dir", b, "--once")
+	ops := filepath.Join(root, "projects", "ops")
+	if err := os.RemoveAll(ops); err != nil {
+		t.Fatal(err)
+	}
+	waiting, _ := roomSendOK(t, b, "--text", "waits at A", id[:8])
+	_, aref, _ := roomOf(t, a, "r1")
+	// The membership moves with no record: another mint.
+	if _, err := relay.New(base, nil).AddMember(ctx, id, aref.Token, relay.RoleWrite); err != nil {
+		t.Fatal(err)
+	}
+	roomSendOK(t, a, "--text", "from A", "r1")
+	mustOK(t, "serve", "--dir", a, "--once")
+	if st := mustOK(t, "status", "--dir", a); strings.Contains(st, "waiting in the room outbox") {
+		t.Fatalf("A's record waits behind the delivery:\n%s", st)
+	}
+	if _, _, ast := roomOf(t, a, "r1"); ast.Membership() != srv.RoomMembership(id) {
+		t.Fatalf("A holds membership %d, the relay %d", ast.Membership(), srv.RoomMembership(id))
+	}
+	if bornAnywhere(t, root, waiting) {
+		t.Fatalf("%s is born while its session is absent", waiting)
+	}
+	if err := os.MkdirAll(ops, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, "serve", "--dir", a, "--once")
+	if records(t, ops, deliver.Inbox)[waiting] == nil {
+		t.Fatalf("%s is not born in %s once the session is back", waiting, ops)
+	}
+}
+
+// A removal record behind a waiting delivery is folded before anything is
+// sealed at the version its bump set: a send past the wait is sealed
+// without the removed member, which reads nothing of it; once the revoke
+// lands, the next send takes the 409, pulls to head and lands.
 func TestRoomWaitBeforeRemovalSealsWithoutRemoved(t *testing.T) {
 	srv, base, front := startPathFront(t, http.MethodDelete, "/members/2")
 	root := filepath.Join(t.TempDir(), "sessions")
@@ -629,17 +674,20 @@ func TestRoomWaitBeforeRemovalSealsWithoutRemoved(t *testing.T) {
 	front.arm(fail503)                                                             // the removal's revoke
 	mustOK(t, "room", "remove", "--dir", a, "r1", "carol")
 
-	cmd(t, "send", "--dir", x, "--text", "hello", id[:8])
-	for _, r := range srv.RoomRecords(id) {
-		if r.Idx != 3 {
-			continue
-		}
-		rec, err := sealed.Parse(mustB64(t, r.Body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if slices.Contains(rec.Recipients(), 2) {
-			t.Fatalf("X's record #%d is sealed to %v after idx 2's removal", r.Seq, rec.Recipients())
-		}
+	hello, _ := roomSendOK(t, x, "--text", "hello", id[:8])
+	rows := srv.RoomRecords(id)
+	last := rows[len(rows)-1]
+	rec, err := sealed.Parse(mustB64(t, last.Body))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if last.Idx != 3 || slices.Contains(rec.Recipients(), 2) {
+		t.Fatalf("X's record #%d (writer idx %d) is sealed to %v, the removed idx 2 among them", last.Seq, last.Idx, rec.Recipients())
+	}
+	mustOK(t, "serve", "--dir", c, "--once")
+	if records(t, deliverDirOf(c), deliver.Inbox)[hello] != nil {
+		t.Fatal("C, removed, read X's record put after its removal")
+	}
+	mustOK(t, "serve", "--dir", a, "--once") // the revoke lands
+	roomSendOK(t, x, "--text", "hello again", id[:8])
 }

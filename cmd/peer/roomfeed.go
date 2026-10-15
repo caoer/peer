@@ -369,9 +369,6 @@ func (c *feedConn) pull(ctx context.Context) (int, error) {
 			if err := c.receive(rec); err != nil {
 				c.sv.dropSpool(c.pending)
 				c.pending = nil
-				if errors.Is(err, errWait) {
-					return n, fmt.Errorf("feed %s: waiting at #%d: %w", c.ref.Name, rec.Seq, err)
-				}
 				return n, err
 			}
 			r.Feed.Cursor = rec.Seq
@@ -457,7 +454,7 @@ func (sv *server) serveFeed(ctx context.Context, ref roomRef) error {
 		return err
 	}
 	switch _, err := fc.pull(ctx); {
-	case errors.Is(err, errGone), errors.Is(err, errWait):
+	case errors.Is(err, errGone):
 		fmt.Fprintf(sv.out, "%v\n", err)
 	case err != nil:
 		return err

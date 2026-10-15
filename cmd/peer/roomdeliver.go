@@ -21,7 +21,10 @@ import (
 // counter in one write — and the birth from the spool (settle). A host that
 // loses the Commit drops its entry and pulls again from the winner's cursor,
 // so two hosts serving one state birth each record once; a birth a crash cut
-// after the Commit comes from the spool on the next round or start.
+// after the Commit comes from the spool on the next round or start. A birth
+// that waits on a seat's session keeps its entry, committed, and the pull
+// goes on past it: every round's replay births it once the session is on
+// this root.
 //
 // A spool entry is a store.Entry: ID the message id, Channel the room id, Seq
 // the relay seq, Type "room", Body the message JSON.
@@ -119,8 +122,8 @@ func (sv *server) roomRows(name, id string) []seats.Row {
 // roomBorder is the border a room record crosses before the spool and the
 // Commit: a kind delivered from a room, a to of protocol addresses naming
 // this party, somewhere here to take it. An error is consumed with its
-// reason; errWait leaves the record where it is — a seat whose session is
-// not on this root yet.
+// reason. A seat whose session is not on this root yet does not stop the
+// record here: it waits at the birth (birthRoom), in the spool.
 func (sv *server) roomBorder(ref roomRef, m *roomMessage) error {
 	switch {
 	case !session.ValidKind(m.Kind) || m.Kind == session.KindCard || session.RoomKind(m.Kind):
@@ -133,20 +136,12 @@ func (sv *server) roomBorder(ref roomRef, m *roomMessage) error {
 			return fmt.Errorf("to %q is not a protocol address", t)
 		}
 	}
-	ts, refused, err := sv.roomTargets(ref.Name, ref.ID, m)
+	_, refused, err := sv.roomTargets(ref.Name, ref.ID, m)
 	if err != nil {
 		return err
 	}
 	for _, r := range refused {
 		fmt.Fprintf(sv.out, "room %s: %s %s: %v\n", ref.Name, m.Kind, m.ID, r)
-	}
-	for _, t := range ts {
-		if t.svc != nil || t.dir == sv.dir {
-			continue
-		}
-		if _, err := os.Stat(t.dir); err != nil {
-			return fmt.Errorf("the session %s is %w", t.dir, errWait)
-		}
 	}
 	return nil
 }
@@ -163,12 +158,9 @@ func (c *roomConn) deliverRecord(seq int64, m *roomMessage) error {
 
 // spoolRoom is any room reader's delivery step: the border, then the spool
 // entry. A record the border consumes is said through skip and yields no
-// entry; errWait stops the pull before the record.
+// entry.
 func (sv *server) spoolRoom(ref roomRef, seq int64, m *roomMessage, skip func(int64, string, ...any)) (*store.Entry, error) {
 	if err := sv.roomBorder(ref, m); err != nil {
-		if errors.Is(err, errWait) {
-			return nil, err
-		}
 		skip(seq, "%s %s: %v", m.Kind, m.ID, err)
 		return nil, nil
 	}
@@ -204,8 +196,9 @@ func (c *roomConn) settle() error {
 }
 
 // settleSpool births committed spool entries of room name, each removed
-// from the spool once born; a command's server marks them committed and
-// leaves them for serve (commandServer).
+// from the spool once born; one whose birth waits on a seat's session stays,
+// and a command's server marks them committed and leaves them for serve
+// (commandServer).
 func (sv *server) settleSpool(pending []*store.Entry, name string) error {
 	for _, e := range pending {
 		if err := sv.roomSpool.MarkCommitted(e); err != nil {
@@ -221,6 +214,10 @@ func (sv *server) settleSpool(pending []*store.Entry, name string) error {
 			}
 		}
 		if err := sv.birthRoom(e, name); err != nil {
+			if errors.Is(err, errWait) {
+				fmt.Fprintf(sv.out, "room %s #%d: %s waits in the room spool: %v\n", name, e.Seq, e.ID, err)
+				continue
+			}
 			if !errors.Is(err, deliver.ErrRecord) && !errors.Is(err, errSpool) {
 				return err
 			}
@@ -234,7 +231,9 @@ func (sv *server) settleSpool(pending []*store.Entry, name string) error {
 }
 
 // birthRoom writes a spooled room record at each of its targets, group the
-// room id; one that is there already stays as it is.
+// room id; one that is there already stays as it is. A target session not on
+// this root yet answers errWait before anything is written: the record waits
+// whole, in the spool.
 func (sv *server) birthRoom(e *store.Entry, name string) error {
 	var m roomMessage
 	if err := json.Unmarshal(e.Body, &m); err != nil {
@@ -243,6 +242,14 @@ func (sv *server) birthRoom(e *store.Entry, name string) error {
 	ts, refused, err := sv.roomTargets(name, m.Group, &m)
 	if err != nil {
 		return fmt.Errorf("%w: %v", deliver.ErrRecord, err)
+	}
+	for _, t := range ts {
+		if t.svc != nil || t.dir == sv.dir {
+			continue
+		}
+		if _, err := os.Stat(t.dir); err != nil {
+			return fmt.Errorf("the session %s is %w", t.dir, errWait)
+		}
 	}
 	for _, r := range refused {
 		fmt.Fprintf(sv.out, "room %s: %s %s: %v\n", name, m.Kind, m.ID, r)
@@ -277,7 +284,8 @@ func (sv *server) birthRoom(e *store.Entry, name string) error {
 
 // replayRoomSpool births the room spool entries whose Commit landed —
 // marked, or whose id the room state has seen — and drops the rest, whose
-// record the cursor brings again (store.ReplaySpool's rule, for rooms).
+// record the cursor brings again (store.ReplaySpool's rule, for rooms). An
+// entry whose birth waits on a seat's session stays for the next round.
 func (sv *server) replayRoomSpool(ctx context.Context) error {
 	es, err := sv.roomSpool.Entries()
 	if err != nil || len(es) == 0 {
@@ -313,6 +321,10 @@ func (sv *server) replayRoomSpool(ctx context.Context) error {
 			name = r.Name
 		}
 		if err := sv.birthRoom(e, name); err != nil {
+			if errors.Is(err, errWait) {
+				fmt.Fprintf(sv.out, "room %s #%d: %s waits in the room spool: %v\n", name, e.Seq, e.ID, err)
+				continue
+			}
 			if !errors.Is(err, deliver.ErrRecord) && !errors.Is(err, errSpool) {
 				return err
 			}

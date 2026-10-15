@@ -689,9 +689,9 @@ func (sv *server) openRoom(ctx context.Context, ref roomRef) (*roomConn, error) 
 // short; an admin's look for revoked readers; the daily rotation, an
 // identity change's re-signed card, and the retired keys whose time is up
 // (roommember.go); a feed admin's revokes of old links, and each followed
-// feed's pull (roomfeed.go). A delivery that waits on a seat's session stops that
-// room's pull for the round, as a channel's does; a room the party is out
-// of is said once and dropped.
+// feed's pull (roomfeed.go). A delivery that waits on a seat's session waits
+// in the room spool while the pull goes on; a room the party is out of is
+// said once and dropped.
 func (sv *server) serveRooms(ctx context.Context) error {
 	l, err := loadRooms(ctx, sv.p.backend)
 	if err != nil {
@@ -719,8 +719,6 @@ func (sv *server) serveRooms(ctx context.Context) error {
 		case errors.Is(err, errGone):
 			fmt.Fprintf(sv.out, "%v\n", err)
 			continue
-		case errors.Is(err, errWait):
-			fmt.Fprintf(sv.out, "%v\n", err)
 		case err != nil:
 			errs = append(errs, err)
 			continue

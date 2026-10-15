@@ -123,11 +123,11 @@ func (sv *server) pullRoom(ctx context.Context, ref roomRef) error {
 }
 
 // roomPulled says what a room pull ended on as the round says it: a room
-// this party is out of, or a delivery that waits, is a line, not an error;
-// a removal record of this party's idx that folded takes it out.
+// this party is out of is a line, not an error; a removal record of this
+// party's idx that folded takes it out.
 func (sv *server) roomPulled(ctx context.Context, c *roomConn, err error) error {
 	switch {
-	case errors.Is(err, errGone), errors.Is(err, errWait):
+	case errors.Is(err, errGone):
 		fmt.Fprintf(sv.out, "%v\n", err)
 		return nil
 	case err != nil:
@@ -164,10 +164,6 @@ func (sv *server) roomPushed(ctx context.Context, ref roomRef, rec relay.RoomRec
 	}
 	if err := c.receive(rec); err != nil {
 		c.dropPending()
-		if errors.Is(err, errWait) {
-			fmt.Fprintf(sv.out, "room %s: waiting at #%d: %v\n", ref.Name, rec.Seq, err)
-			return false, nil
-		}
 		return false, fail(err)
 	}
 	c.st.SetCursor(rec.Seq)

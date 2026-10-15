@@ -481,7 +481,8 @@ func (c *roomConn) say(seq int64, format string, args ...any) {
 // record, then birthing what the Commit carried; another host's commit
 // reloads the state and the pull goes on from its cursor. The relay's
 // membership version is taken at head alone. A record whose delivery waits
-// (errWait) stops the pull before it, the state as committed.
+// on a seat's session stops nothing: it is committed with the cursor and
+// waits in the room spool (roomdeliver.go).
 func (c *roomConn) pull(ctx context.Context) error {
 	if c.sv == nil {
 		sv, err := commandServer(c.p, c.out)
@@ -530,9 +531,6 @@ func (c *roomConn) pull(ctx context.Context) error {
 				c.dropPending()
 				if rerr := c.reload(ctx); rerr != nil {
 					return rerr
-				}
-				if errors.Is(err, errWait) {
-					return fmt.Errorf("room %s: waiting at #%d: %w", c.ref.Name, rec.Seq, err)
 				}
 				return err
 			}
@@ -769,7 +767,7 @@ func (c *roomConn) postMembership(ctx context.Context, kind string, body []byte)
 func (c *roomConn) post(ctx context.Context, mp membershipPost) (int64, room.Result, error) {
 	kind := mp.kind
 	for try := 1; ; try++ {
-		if err := c.pull(ctx); err != nil && !errors.Is(err, errWait) {
+		if err := c.pull(ctx); err != nil {
 			return 0, room.Result{}, err
 		}
 		body := mp.body

@@ -122,13 +122,7 @@ func openJoined(ctx context.Context, dir, name string, out io.Writer) (*roomConn
 		return nil, err
 	}
 	if err := c.pull(ctx); err != nil {
-		if errors.Is(err, errGone) {
-			return nil, err
-		}
-		if !errors.Is(err, errWait) {
-			return nil, err
-		}
-		fmt.Fprintf(out, "room %s: not at head (%v); acting on the roster this host holds\n", ref.Name, err)
+		return nil, err
 	}
 	return c, nil
 }
