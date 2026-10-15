@@ -187,9 +187,9 @@ func runRoomCreate(ctx context.Context, dir, relayBase, login string, add room.A
 		return err
 	}
 	c := &roomConn{p: p, ref: ref, rc: rc, st: st, out: out}
-	seq, err := c.put(ctx, m, ctr)
+	seq, err := c.send(ctx, m, ctr)
 	if err != nil {
-		fmt.Fprintf(out, "created room %s (%s), add: %s; record #0 did not reach the relay: %v\n", name, created.ID, add, err)
+		fmt.Fprintf(out, "created room %s (%s), add: %s; record #0 did not reach the relay (%v): peer serve puts it\n", name, created.ID, add, err)
 		return nil
 	}
 	fmt.Fprintf(out, "created room %s (%s), add: %s; you are idx 0, its admin (record #%d)\n", name, created.ID, add, seq)
@@ -403,9 +403,12 @@ type roomConn struct {
 	st  *room.State
 	ch  room.Channels
 	out io.Writer
-	// onMessage takes each opened record of a v1 kind before the cursor
-	// passes it; nil reports it as not delivered.
-	onMessage func(seq int64, m *roomMessage) error
+	// sv delivers each opened record of a v1 kind (roomdeliver.go): serve's
+	// own, or one a command's pull opens on first use — a pull that passes a
+	// record delivers it, whoever runs it.
+	sv *server
+	// pending is the spool entries the next Commit settles.
+	pending []*store.Entry
 }
 
 func (p *party) openRoom(ctx context.Context, ref roomRef, out io.Writer) (*roomConn, error) {
@@ -430,9 +433,18 @@ func (c *roomConn) say(seq int64, format string, args ...any) {
 }
 
 // pull reads the room to head in the contract's receiver order, folding the
-// membership records and committing the state after each record; another
-// host's commit reloads the state and the pull goes on from its cursor.
+// membership records, spooling the rest, and committing the state after each
+// record, then birthing what the Commit carried; another host's commit
+// reloads the state and the pull goes on from its cursor. A record whose
+// delivery waits (errWait) stops the pull before it, the state as committed.
 func (c *roomConn) pull(ctx context.Context) error {
+	if c.sv == nil {
+		sv, err := newServer(c.p, "", c.out)
+		if err != nil {
+			return err
+		}
+		c.sv = sv
+	}
 	for {
 		page, err := c.rc.PullRoom(ctx, c.ref.ID, c.ref.Token, c.st.Cursor())
 		if err != nil {
@@ -460,18 +472,38 @@ func (c *roomConn) pull(ctx context.Context) error {
 				continue
 			}
 			if err := c.receive(rec); err != nil {
+				// Nothing of this record is kept: its seen id and counter
+				// go with the state as loaded.
+				c.dropPending()
+				if rerr := c.reload(ctx); rerr != nil {
+					return rerr
+				}
+				if errors.Is(err, errWait) {
+					return fmt.Errorf("room %s: waiting at #%d: %w", c.ref.Name, rec.Seq, err)
+				}
 				return err
 			}
 			c.st.SetCursor(rec.Seq)
+			if err := c.beforeCommit(); err != nil {
+				c.dropPending()
+				return err
+			}
 			if err := c.st.Commit(ctx); err != nil {
 				if !errors.Is(err, store.ErrConflict) {
+					// The write may have landed: the entries stay for the
+					// next replay's seen check.
+					c.pending = nil
 					return err
 				}
-				c.say(rec.Seq, "another host advanced the room; reloading")
+				c.dropPending()
+				c.say(rec.Seq, "another host advanced the state; reloading")
 				if err := c.reload(ctx); err != nil {
 					return err
 				}
 				break
+			}
+			if err := c.settle(); err != nil {
+				return err
 			}
 		}
 	}
@@ -482,64 +514,68 @@ func (c *roomConn) pull(ctx context.Context) error {
 // that idx; the writer's counter (rule 10, reported, reading goes on); this
 // party's stanza, opened with the current seal key, then the retired ones,
 // against kh; the message's from is the roster's party at idx; dedupe by id.
-// A membership record folds; a record of any other kind goes to onMessage.
+// A membership record folds; a record of any other kind is delivered
+// (deliverRecord, roomdeliver.go).
 func (c *roomConn) receive(rec relay.RoomRecord) error {
 	if rec.Err != nil {
-		c.say(rec.Seq, "%v", rec.Err)
+		c.skip(rec.Seq, "%v", rec.Err)
 		return nil
 	}
 	r, err := sealed.Parse(rec.Body)
 	if err != nil {
-		c.say(rec.Seq, "%v", err)
+		c.skip(rec.Seq, "%v", err)
 		return nil
 	}
 	h := r.Header
 	if h.Room != c.ref.ID {
-		c.say(rec.Seq, "sealed for room %s", h.Room)
+		c.skip(rec.Seq, "sealed for room %s", h.Room)
 		return nil
 	}
 	if int(h.Idx) != rec.Idx {
-		c.say(rec.Seq, "the relay names writer idx %d and the record idx %d", rec.Idx, h.Idx)
+		c.skip(rec.Seq, "the relay names writer idx %d and the record idx %d", rec.Idx, h.Idx)
 		return nil
 	}
 	w := c.st.Member(h.Idx)
 	if w == nil {
-		c.say(rec.Seq, "from idx %d, which the roster does not hold", h.Idx)
+		c.skip(rec.Seq, "from idx %d, which the roster does not hold", h.Idx)
 		return nil
 	}
 	if err := r.Verify(w.Sign()); err != nil {
-		c.say(rec.Seq, "from idx %d: %v", h.Idx, err)
+		c.skip(rec.Seq, "from idx %d: %v", h.Idx, err)
 		return nil
 	}
 	// Rule 10 in one order (format review m4): a writer's first record is in
 	// order whatever it carries; CheckCtr names a gap or a step back after it.
 	last, ok := c.st.Counter(h.Idx)
 	if inOrder := c.st.CheckCounter(h.Idx, h.Ctr); ok && !inOrder {
-		c.say(rec.Seq, "idx %d: %v", h.Idx, sealed.CheckCtr(last, h.Ctr))
+		c.skip(rec.Seq, "idx %d: %v", h.Idx, sealed.CheckCtr(last, h.Ctr))
 	}
 	keys := append([]*ecdh.PrivateKey{c.st.SealKey()}, c.st.RetiredSealKeys()...)
 	plain, err := r.Open(c.st.Idx(), keys...)
 	switch {
-	case errors.Is(err, sealed.ErrNoStanza), errors.Is(err, sealed.ErrStanza):
-		return nil // a subset, a record sealed before this party was in, a retired key gone
+	case errors.Is(err, sealed.ErrNoStanza):
+		return nil // a subset, a record sealed before this party was in
+	case errors.Is(err, sealed.ErrStanza):
+		c.st.NoteReported() // a retired key gone: counted, not said (error map)
+		return nil
 	case errors.Is(err, sealed.ErrKeyCommit):
-		c.say(rec.Seq, "mis-keyed record from idx %d, refused: %v", h.Idx, err)
+		c.skip(rec.Seq, "mis-keyed record from idx %d, refused: %v", h.Idx, err)
 		return nil
 	case err != nil:
-		c.say(rec.Seq, "from idx %d: %v", h.Idx, err)
+		c.skip(rec.Seq, "from idx %d: %v", h.Idx, err)
 		return nil
 	}
 	m, err := parseRoomMessage(plain)
 	if err != nil {
-		c.say(rec.Seq, "from idx %d: %v", h.Idx, err)
+		c.skip(rec.Seq, "from idx %d: %v", h.Idx, err)
 		return nil
 	}
 	if m.Group != c.ref.ID {
-		c.say(rec.Seq, "from idx %d: the message names group %q", h.Idx, m.Group)
+		c.skip(rec.Seq, "from idx %d: the message names group %q", h.Idx, m.Group)
 		return nil
 	}
 	if party, _ := splitAddr(m.From); party != w.Party {
-		c.say(rec.Seq, "from %s, and the roster holds %s at idx %d", m.From, w.Party, h.Idx)
+		c.skip(rec.Seq, "from %s, and the roster holds %s at idx %d", m.From, w.Party, h.Idx)
 		return nil
 	}
 	if c.st.Seen(m.ID) {
@@ -550,19 +586,38 @@ func (c *roomConn) receive(rec relay.RoomRecord) error {
 		c.report(rec.Seq, c.st.Fold(room.Verified{Seq: rec.Seq, Idx: h.Idx, Kind: m.Kind, Body: m.Body, At: h.At}, c.ch))
 		return nil
 	}
-	if c.onMessage != nil {
-		return c.onMessage(rec.Seq, m)
+	return c.deliverRecord(rec.Seq, m)
+}
+
+// skip reports a record serve sets aside, or reads on past, and counts it in
+// the room state's reported count.
+func (c *roomConn) skip(seq int64, format string, args ...any) {
+	c.st.NoteReported()
+	c.say(seq, format, args...)
+}
+
+// beforeCommit runs serve's test hook on each entry the Commit will carry.
+func (c *roomConn) beforeCommit() error {
+	if c.sv.beforeCommit == nil {
+		return nil
 	}
-	c.say(rec.Seq, "a %s from %s; room messages are not delivered by this version", m.Kind, m.From)
+	for _, e := range c.pending {
+		if err := c.sv.beforeCommit(e); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// report tells the human what a fold did and what it set aside.
+// report tells the human what a fold did and what it set aside, and counts
+// both in the room state's dropped count (rules 7 and 4).
 func (c *roomConn) report(seq int64, res room.Result) {
 	if !res.Folded() {
+		c.st.NoteDropped(1)
 		c.say(seq, "dropped: %s", res.Dropped)
 		return
 	}
+	c.st.NoteDropped(len(res.Refused))
 	for _, r := range res.Refused {
 		c.say(seq, "refused %s", r)
 	}
@@ -582,12 +637,13 @@ func (c *roomConn) report(seq int64, res room.Result) {
 // postMembership puts a membership record of this party's: to head first,
 // then the record folded into the state and committed with its counter
 // before the put (contract: own records never come back from the relay),
-// then sealed to the roster as it now stands and put. An entry the fold
-// refuses refuses the record, nothing committed: the cap comes back with the
-// member count.
+// then through the room outbox, sealed to the roster as it now stands and
+// put. An entry the fold refuses refuses the record, nothing committed: the
+// cap comes back with the member count. An error wrapping errQueued says the
+// record is committed and waits in the room outbox.
 func (c *roomConn) postMembership(ctx context.Context, kind string, body []byte) (int64, room.Result, error) {
 	for try := 1; ; try++ {
-		if err := c.pull(ctx); err != nil {
+		if err := c.pull(ctx); err != nil && !errors.Is(err, errWait) {
 			return 0, room.Result{}, err
 		}
 		m, err := newRoomMessage(c.p.partyID(), c.ref.ID, kind, body)
@@ -618,47 +674,13 @@ func (c *roomConn) postMembership(ctx context.Context, kind string, body []byte)
 			}
 			return 0, res, err
 		}
-		seq, err := c.put(ctx, m, ctr)
+		seq, err := c.send(ctx, m, ctr)
 		return seq, res, err
 	}
 }
 
 // putTries bounds the re-seals after a 409 stale_membership.
 const putTries = 3
-
-// put seals m under ctr to the roster as the state holds it and puts it at
-// the state's membership version; a 409 folds the room to head and seals
-// again, the same message and counter, to the new roster.
-func (c *roomConn) put(ctx context.Context, m *roomMessage, ctr uint64) (int64, error) {
-	plain, err := json.Marshal(m)
-	if err != nil {
-		return 0, err
-	}
-	for try := 1; ; try++ {
-		var to []sealed.Recipient
-		for _, mem := range c.st.Members() {
-			to = append(to, sealed.Recipient{Idx: mem.Idx, Key: mem.Seal()})
-		}
-		b, err := sealed.Seal(sealed.Header{Room: c.ref.ID, Idx: c.st.Idx(), Ctr: ctr, At: m.At}, plain, to, c.st.SignKey())
-		if err != nil {
-			return 0, err
-		}
-		rcpt, err := c.rc.PutRecord(ctx, c.ref.ID, c.ref.Token, b, c.st.Membership(), false)
-		if err == nil {
-			c.st.ObserveMembership(rcpt.Membership)
-			if err := c.st.Commit(ctx); err != nil && !errors.Is(err, store.ErrConflict) {
-				fmt.Fprintf(c.out, "room %s: the membership version is not recorded: %v\n", c.ref.Name, err)
-			}
-			return rcpt.Seq, nil
-		}
-		if !errors.Is(err, relay.ErrStaleMembership) || try >= putTries {
-			return 0, fmt.Errorf("room %s: put: %w", c.ref.Name, err)
-		}
-		if err := c.pull(ctx); err != nil {
-			return 0, err
-		}
-	}
-}
 
 // channelRoots reads the confirmed channels' pins: rule 4's lookup from an
 // identity key to the root the channel pins for it, and each pinned root's

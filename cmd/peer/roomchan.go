@@ -424,6 +424,11 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 			return nil, "", err
 		}
 		seq, _, err := c.postMembership(ctx, room.KindRoster, body)
+		if errors.Is(err, errQueued) {
+			// Committed, folded and journaled: serve puts it, and the token
+			// follows its landing (finishAdds), rule 2's order.
+			return nil, fmt.Sprintf("the roster record adding %s is committed and did not land (%v); serve puts it, then sends the token", pe.Name, err), nil
+		}
 		if err != nil {
 			return nil, fmt.Sprintf("the roster record adding %s did not land (%v); peer room add %s %s starts the add again", pe.Name, err, ref.Name, pe.Name), nil
 		}
@@ -480,23 +485,42 @@ func (p *party) onRoomToken(ctx context.Context, pe roster.Peer, m *session.Mess
 	return nil, "", nil
 }
 
-// serveRooms pulls every room this party holds a token in.
+// serveRooms serves every room this party holds a token in: the pull to
+// head, delivering as it goes; this host's waiting records, put in ctr order
+// (roomsend.go); the token of every add whose roster record landed. A
+// delivery that waits on a seat's session stops that room's pull for the
+// round, as a channel's does.
 func (sv *server) serveRooms(ctx context.Context) error {
 	l, err := loadRooms(ctx, sv.p.backend)
 	if err != nil {
 		return err
 	}
+	sv.p.dropLeftRooms(l, sv.out)
 	var errs []error
 	for _, ref := range l.Rooms {
 		if ref.Stage != stageJoined {
 			continue
 		}
 		c, err := sv.p.openRoom(ctx, ref, sv.out)
-		if err == nil {
-			err = c.pull(ctx)
-		}
 		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		c.sv = sv
+		switch err := c.pull(ctx); {
+		case errors.Is(err, errWait):
+			fmt.Fprintf(sv.out, "%v\n", err)
+		case err != nil:
+			errs = append(errs, err)
+			continue
+		}
+		if res := c.flush(ctx); res.wait != nil {
+			fmt.Fprintf(sv.out, "room %s: %d records wait in the room outbox: %v\n", ref.Name, sv.p.waiting(ref.ID), res.wait)
+		}
+		if cur, err := loadRooms(ctx, sv.p.backend); err == nil {
+			if r := cur.byID(ref.ID); r != nil {
+				sv.p.finishAdds(ctx, *r, sv.out)
+			}
 		}
 	}
 	return errors.Join(errs...)

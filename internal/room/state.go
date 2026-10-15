@@ -117,6 +117,8 @@ type stateRecord struct {
 	Seen       []seenID          `json:"seen"`
 	Counters   map[uint16]uint64 `json:"counters,omitempty"`
 	Ctr        uint64            `json:"ctr"`
+	Dropped    int64             `json:"dropped,omitempty"`
+	Reported   int64             `json:"reported,omitempty"`
 }
 
 type ownKeyRecord struct {
@@ -168,6 +170,8 @@ type State struct {
 	seen       []seenID
 	counters   map[uint16]uint64
 	ctr        uint64
+	dropped    int64
+	reported   int64
 }
 
 // New is a fresh state at version 0 for the member at idx of room id with its
@@ -215,6 +219,7 @@ func Load(ctx context.Context, b store.Backend, id string) (*State, error) {
 		membership: rec.Membership, cursor: rec.Cursor,
 		admins: rec.Admins, removed: rec.Removed, seen: rec.Seen,
 		counters: rec.Counters, ctr: rec.Ctr,
+		dropped: rec.Dropped, reported: rec.Reported,
 	}
 	if s.counters == nil {
 		s.counters = map[uint16]uint64{}
@@ -255,6 +260,7 @@ func (s *State) marshal() ([]byte, error) {
 		Admins:  s.admins, Removed: s.removed,
 		Keys: ownKeyRecord{Sign: s.sign.Seed(), Seal: s.seal.Bytes()},
 		Seen: s.seen, Counters: s.counters, Ctr: s.ctr,
+		Dropped: s.dropped, Reported: s.reported,
 	}
 	for _, m := range s.members {
 		rec.Members = append(rec.Members, m.Entry)
@@ -357,6 +363,20 @@ func (s *State) NextCounter() uint64 {
 	s.ctr++
 	return s.ctr
 }
+
+// Dropped is how many records and roster entries the fold set aside (rules
+// 7 and 4): a record dropped whole, an entry refused.
+func (s *State) Dropped() int64 { return s.dropped }
+
+// NoteDropped counts n more records or entries the fold set aside.
+func (s *State) NoteDropped(n int) { s.dropped += int64(n) }
+
+// Reported is how many records the receiver reported: a counter gap or step
+// back, a stanza that did not open, a record that did not verify.
+func (s *State) Reported() int64 { return s.reported }
+
+// NoteReported counts one more reported record.
+func (s *State) NoteReported() { s.reported++ }
 
 // Members is the folded roster in idx order.
 func (s *State) Members() []*Member { return slices.Clone(s.members) }

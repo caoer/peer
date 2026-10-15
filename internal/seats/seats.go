@@ -25,6 +25,11 @@
 //     or service <url> with an https URL.
 //   - accepts: one or more of the eight kinds — text task question answer doc
 //     file card ack — separated by spaces.
+//   - rooms (optional, plan v2 decision 3): the rooms whose records with no
+//     agent in to land in this row's session — room names as this host
+//     names them, room ids, or * for every room — separated by spaces; empty
+//     or absent, none. A service row takes no rooms: a room record lands in
+//     a session.
 //
 // A row outside the grammar makes the whole map invalid: nothing is
 // delivered by a map that cannot be read, and nothing is consumed.
@@ -38,6 +43,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/caoer/peer/internal/card"
@@ -78,6 +84,8 @@ type Row struct {
 	URL string
 	// Accepts is the row's subset of the eight kinds, in the row's order.
 	Accepts []string
+	// Rooms is the rooms column: room names, room ids or "*"; nil for none.
+	Rooms []string
 }
 
 // Map is a parsed seat map.
@@ -98,6 +106,7 @@ var ErrMap = errors.New("seats: the map cannot be read")
 var (
 	seatRE      = regexp.MustCompile(`^([A-Za-z0-9=._-]+(?:/[A-Za-z0-9=._-]+)*)/rosters/([A-Za-z0-9._-]+)$`)
 	separatorRE = regexp.MustCompile(`^:?-+:?$`)
+	roomRE      = regexp.MustCompile(`^(\*|[A-Za-z0-9._-]{1,64})$`)
 )
 
 // Load reads and parses the map at path.
@@ -163,13 +172,16 @@ func Parse(b []byte) (*Map, error) {
 		}
 		c := cells(l)
 		at := func(name string) string {
-			if i := col[name]; i < len(c) {
+			if i, ok := col[name]; ok && i < len(c) {
 				return c[i]
 			}
 			return ""
 		}
 		r, err := parseRow(at("label"), at("to"), at("accepts"))
 		if err != nil {
+			return nil, err
+		}
+		if r.Rooms, err = parseRooms(r, at("rooms")); err != nil {
 			return nil, err
 		}
 		if _, dup := m.rows[r.Label]; dup {
@@ -237,6 +249,23 @@ func parseRow(label, to, accepts string) (Row, error) {
 	return r, nil
 }
 
+// parseRooms reads a row's rooms cell.
+func parseRooms(r Row, cell string) ([]string, error) {
+	var out []string
+	for _, name := range strings.Fields(cell) {
+		if !roomRE.MatchString(name) {
+			return nil, fmt.Errorf("%w: label %q: room %q is not a room name, a room id or *", ErrMap, r.Label, name)
+		}
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	if out != nil && r.Kind == Service {
+		return nil, fmt.Errorf("%w: label %q: a service row takes no rooms — a room record lands in a session", ErrMap, r.Label)
+	}
+	return out, nil
+}
+
 // parseSeat reads a seat wikilink: its session and the roster record's path.
 func parseSeat(label, link string) (session, seat string, err error) {
 	inner, ok := strings.CutPrefix(link, "[[")
@@ -263,6 +292,20 @@ func known(kind string) bool {
 func (m *Map) Row(label string) (Row, bool) {
 	r, ok := m.rows[label]
 	return r, ok
+}
+
+// InRoom is the rows, in the map's order, whose rooms column names the room
+// — by this host's name for it, by its id, or by * — the rows a room record
+// with no agent in to lands in.
+func (m *Map) InRoom(name, id string) []Row {
+	var out []Row
+	for _, l := range m.order {
+		r := m.rows[l]
+		if slices.ContainsFunc(r.Rooms, func(x string) bool { return x == "*" || x == name || x == id }) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Len is the number of rows.

@@ -25,7 +25,7 @@ import (
 const (
 	configFile = "config.json" // the party's relay, owner login, agents, details, state, deliver, roster
 	stateDir   = "state"       // the file store backend, unless config names another state
-	outboxDir  = "outbox"      // the send outbox (a store.Journal)
+	outboxDir  = "outbox"      // the send outbox (a store.Journal); room-outbox and room-spool beside it (roomsend.go, roomdeliver.go)
 	spoolDir   = "spool"       // the serve spool (a store.Journal)
 	deliverDir = "deliver"     // where serve delivers, unless config names another directory
 )
@@ -102,6 +102,8 @@ type party struct {
 	backend store.Backend
 	store   *store.Store
 	outbox  *store.Journal
+	// roomOutbox is this host's room records waiting for the relay (roomsend.go).
+	roomOutbox *store.Journal
 	// tl is the current round of timeline writes (timeline.go).
 	tl *timelineState
 }
@@ -156,6 +158,9 @@ func openParty(dir string) (*party, error) {
 	p.backend = b
 	p.store = store.New(b, p.id)
 	if p.outbox, err = store.OpenJournal(filepath.Join(dir, outboxDir)); err != nil {
+		return nil, err
+	}
+	if p.roomOutbox, err = store.OpenJournal(filepath.Join(dir, roomOutboxDir)); err != nil {
 		return nil, err
 	}
 	return p, nil

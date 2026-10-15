@@ -70,8 +70,10 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 type server struct {
 	p     *party
 	spool *store.Journal
-	dir   string
-	out   io.Writer
+	// roomSpool is the room records' spool (roomdeliver.go).
+	roomSpool *store.Journal
+	dir       string
+	out       io.Writer
 	// beat is the serve interval and page the roster page, nil without one
 	// (status.go).
 	beat time.Duration
@@ -114,17 +116,26 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newServer(p, deliverTo, out)
+}
+
+// newServer is the party's serve: its spools and delivery directory.
+func newServer(p *party, deliverTo string, out io.Writer) (*server, error) {
 	if deliverTo == "" {
 		deliverTo = p.cfg.Deliver
 	}
 	if deliverTo == "" {
-		deliverTo = filepath.Join(dir, deliverDir)
+		deliverTo = filepath.Join(p.dir, deliverDir)
 	}
-	spool, err := store.OpenJournal(filepath.Join(dir, spoolDir))
+	spool, err := store.OpenJournal(filepath.Join(p.dir, spoolDir))
 	if err != nil {
 		return nil, err
 	}
-	sv := &server{p: p, spool: spool, dir: deliverTo, out: out, unanswered: map[string][]relay.Prekey{}}
+	roomSpool, err := store.OpenJournal(filepath.Join(p.dir, roomSpoolDir))
+	if err != nil {
+		return nil, err
+	}
+	sv := &server{p: p, spool: spool, roomSpool: roomSpool, dir: deliverTo, out: out, unanswered: map[string][]relay.Prekey{}}
 	if err := sv.loadSeats(); err != nil {
 		return nil, err
 	}
@@ -138,7 +149,10 @@ var errSpool = errors.New("spool entry does not open")
 // start finishes the spool births a crash cut, before the first round.
 func (sv *server) start(ctx context.Context) error {
 	sv.p.timelineRound(sv.out)
-	return sv.replaySpool(ctx)
+	if err := sv.replaySpool(ctx); err != nil {
+		return err
+	}
+	return sv.replayRoomSpool(ctx)
 }
 
 // replaySpool births the spool entries whose commit landed and drops the
@@ -180,6 +194,9 @@ func (sv *server) round(ctx context.Context) error {
 	}
 	if err := sv.replaySpool(ctx); err != nil {
 		fmt.Fprintf(sv.out, "spool: %v\n", err)
+	}
+	if err := sv.replayRoomSpool(ctx); err != nil {
+		fmt.Fprintf(sv.out, "room spool: %v\n", err)
 	}
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
@@ -869,7 +886,7 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 	dir, place := sv.dir, deliver.Route(m.Kind, sv.p.accepts(agent))
 	if sv.seats != nil {
 		if row, ok := sv.serviceRow(m); ok {
-			return "", sv.toService(row, m, e.Body)
+			return "", sv.toService(row, m, e.Body, "")
 		}
 		if dir, place, err = sv.uccPlace(m); err != nil {
 			return "", err

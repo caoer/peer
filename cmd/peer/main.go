@@ -71,12 +71,16 @@ commands:
   send      encrypt a message and put it on the peer's channel
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
             (--kind doc|file: --file is attached, encrypted, as a blob)
-  serve     pull every channel, decrypt, deliver into inbox/ or quarantine/;
+            or seal it into a room, to every member or to the --to subset
+            [--dir D] [--kind K] [--from AGENT] [--text T | --file F]
+            [--to MEMBER[/AGENT],...] <room>
+  serve     pull every channel and room, decrypt, deliver into inbox/ or quarantine/;
             a doc or file's content lands in quarantine/<id>/<name>;
             rotate the signed prekey and restock one-time prekeys;
             between rounds, hold the relay's push socket per channel
             [--dir D] [--deliver DIR] [--once] [--every 30s]
-  status    print every peer from the local store, and its roster page row
+  status    print every peer from the local store, and its roster page row;
+            one line per room: idx, members, cursor, dropped, reported
             [--dir D] [--json]
   fetch     fetch a quarantined doc or file's content again
             [--dir D] [--deliver DIR] <message id | record path>
@@ -112,7 +116,8 @@ each round), keys (signedPrekeyEvery, oneTimeMin), push (pullEvery: pull
 a channel after this many pushed messages, default 10) and ucc (root, seats,
 serviceRetries: delivery by the fleet's seat map — a seat row's message,
 and a human row's, is an inbox record in the session of the seat the row
-names; a service row's is an HTTPS POST of the record as JSON to the row's
+names; a room record that names no agent lands in the session of each row
+whose rooms column names the room (by name, id or *), group: its room id; a service row's is an HTTPS POST of the record as JSON to the row's
 URL, tried again each round up to serviceRetries, default 20; the POST
 carries no signature: the URL is the service's secret, and verified: true
 means peer verified the sender).

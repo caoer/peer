@@ -89,7 +89,7 @@ func putRoomText(t *testing.T, dir, name, text string) (string, int64) {
 	if err := c.st.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	seq, err := c.put(ctx, m, ctr)
+	seq, err := c.send(ctx, m, ctr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestRoomThreePartiesCreateAddAdd(t *testing.T) {
 func TestRoomRecordInMintRosterWindow(t *testing.T) {
 	srv, _, base := relaytest.Start(t, login)
 	a, b, c := newDir(t, config{}), newDir(t, config{}), newDir(t, config{})
-	ab := handshakeNamed(t, a, b, base, "bob", "alice")
+	handshakeNamed(t, a, b, base, "bob", "alice")
 	handshakeNamed(t, a, c, base, "carol", "alice")
 	id := createRoom(t, a, base, "w")
 	addToRoom(t, a, b, "w", "bob")
@@ -217,11 +217,11 @@ func TestRoomRecordInMintRosterWindow(t *testing.T) {
 	textID, textSeq := putRoomText(t, b, id[:8], "in the window")
 	mustOK(t, "serve", "--dir", c, "--once") // seat → join
 	out := mustOK(t, "serve", "--dir", a, "--once")
-	if !strings.Contains(out, "a text from "+ab.guestParty) {
+	if !strings.Contains(out, "delivered text "+textID) {
 		t.Fatalf("A did not open B's text in the window:\n%s", out)
 	}
 	out = mustOK(t, "serve", "--dir", c, "--once") // token → joined, pull
-	if !strings.Contains(out, "joined room") || strings.Contains(out, "a text from") {
+	if !strings.Contains(out, "joined room") || strings.Contains(out, "delivered text") {
 		t.Fatalf("C's serve:\n%s", out)
 	}
 	_, cref, cst := roomOf(t, c, id[:8])
