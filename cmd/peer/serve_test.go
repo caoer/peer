@@ -69,29 +69,36 @@ type pair struct {
 
 func handshake(t *testing.T, hostDir, guestDir, base string) *pair {
 	t.Helper()
+	return handshakeNamed(t, hostDir, guestDir, base, "ancan", "zt")
+}
+
+// handshakeNamed is handshake with the petnames chosen: the host calls the
+// guest guestName, the guest calls the host hostName.
+func handshakeNamed(t *testing.T, hostDir, guestDir, base, guestName, hostName string) *pair {
+	t.Helper()
 	p := &pair{hostDir: hostDir, guestDir: guestDir, hostRoot: rootOf(t, hostDir), guestRoot: rootOf(t, guestDir)}
 	p.hostParty, p.guestParty = keys.PartyID(p.hostRoot.Public()), keys.PartyID(p.guestRoot.Public())
-	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, "ancan")
+	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, guestName)
 	link, _, _ := strings.Cut(out, "\n")
 	l, err := invite.Parse(link, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.channel = l.Channel
-	out = mustOK(t, "accept", "--dir", guestDir, "--name", "zt", link)
+	out = mustOK(t, "accept", "--dir", guestDir, "--name", hostName, link)
 	code := codeRE.FindStringSubmatch(out)
 	if code == nil {
 		t.Fatalf("accept printed no code:\n%s", out)
 	}
-	mustOK(t, "confirm", "--dir", hostDir, "--code", code[1], "ancan")
+	mustOK(t, "confirm", "--dir", hostDir, "--code", code[1], guestName)
 	// The guest's serve takes the host's details card and answers with its
 	// own; the host's serve takes that one.
 	out = mustOK(t, "serve", "--dir", guestDir, "--once")
-	if !strings.Contains(out, "confirmed zt: their card with details is pinned, yours went out") {
+	if !strings.Contains(out, "confirmed "+hostName+": their card with details is pinned, yours went out") {
 		t.Fatalf("guest serve:\n%s", out)
 	}
 	out = mustOK(t, "serve", "--dir", hostDir, "--once")
-	if !strings.Contains(out, "card from ancan pinned") {
+	if !strings.Contains(out, "card from "+guestName+" pinned") {
 		t.Fatalf("host serve:\n%s", out)
 	}
 	return p
