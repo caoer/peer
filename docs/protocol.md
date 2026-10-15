@@ -128,6 +128,7 @@ The Signal layer is libsignal protocol version 3 — X3DH and the Double Ratchet
 
 - `SignalMessage` = version byte (high nibble `3`) ‖ protobuf {1 `ratchetKey` (33-byte key), 2 `counter`, 3 `previousCounter`, 4 `ciphertext`} ‖ 8-byte MAC.
 - `PreKeySignalMessage` = version byte ‖ protobuf {1 `preKeyId`, 2 `baseKey` (33), 3 `identityKey` (33), 4 `message` (a `SignalMessage`), 5 `registrationId`, 6 `signedPreKeyId`}.
+- Serialization: the body is what `Serialize()` returns on a message built with libsignal's protobuf serializer, `serialize.NewProtoBufSerializer()` in `go.mau.fi/libsignal` — the version byte and protobuf above; peer uses that serializer for every wire message and record. The library's JSON serializer, `serialize.NewJSONSerializer()`, is **not** the wire format: its output begins with `{` (0x7B), which a receiver reads as message version 7 and refuses (`envelope: malformed: message version 7`).
 - A key is `0x05 ‖ 32 bytes`. A receiver validates every envelope before handing it to the library: an unknown or malformed field, a missing key or body, a key of another length or type, or a low-order Curve25519 point refuses the envelope.
 
 The relay can put any bytes on a channel; an envelope that does not validate or decrypt is skipped, and the reader's cursor moves past it.
