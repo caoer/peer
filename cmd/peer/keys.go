@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -164,7 +165,9 @@ func heldOf(ctx context.Context, dir, name string) (*party, roster.Peer, *store.
 // again: the peer's, when its first PreKey message is the record the channel
 // waited at, else one built here from the peer's prekey (U7's accept path;
 // prekey routing is symmetric, §6.1), carried by this party's card when the
-// root is here and by the next peer send otherwise.
+// root is here and by the next peer send otherwise. A held card that does not
+// supersede the pinned one is refused and nothing changes; peer keys reject
+// discards it.
 func runKeysAccept(ctx context.Context, dir, name string, out io.Writer) error {
 	p, pe, ch, held, c, seq, err := heldOf(ctx, dir, name)
 	if err != nil {
@@ -173,6 +176,9 @@ func runKeysAccept(ctx context.Context, dir, name string, out io.Writer) error {
 	key, err := session.CurrentKey(c)
 	if err != nil {
 		return fmt.Errorf("the held card: %w", err)
+	}
+	if err := supersedes(ch.Card(), c); err != nil {
+		return fmt.Errorf("the held card does not supersede the pinned one: %v; peer keys reject %s discards it", err, name)
 	}
 	newIdentity, err := keys.ParseCurve(key.Identity)
 	if err != nil {
@@ -275,7 +281,35 @@ func holdLine(name string, c *card.Card, seq int64) string {
 	if key, err := session.CurrentKey(c); err == nil {
 		identity = key.Identity
 	}
-	return fmt.Sprintf("%s: waiting at #%d: their card names a new identity key %s, signed by their root; verify the change with them over a channel you trust, then run peer keys accept %s — peer keys reject %s discards it\n", name, seq, identity, name, name)
+	return fmt.Sprintf("%s: waiting at #%d: their card names a new identity key %s, issued %s, signed by their root; verify the change with them over a channel you trust, then run peer keys accept %s — peer keys reject %s discards it\n", name, seq, identity, c.Issued.Format(time.RFC3339), name, name)
+}
+
+// supersedes is nil when c, a root-signed card naming a new identity key,
+// moves past the pinned card: issued after it, and with a current key the
+// pinned card does not list with an until. Anything else is an older card of
+// the peer's played again — whoever holds the key a rotation retired, and can
+// put on the channel, would roll the rotation back to that key (design §3.2).
+func supersedes(pinned *card.Signed, c *card.Card) error {
+	if pinned == nil {
+		return nil
+	}
+	var old card.Card
+	if err := json.Unmarshal(pinned.Body, &old); err != nil {
+		return fmt.Errorf("the pinned card does not read: %v", err)
+	}
+	if !c.Issued.After(old.Issued) {
+		return fmt.Errorf("it was issued %s, not after the pinned card (%s)", c.Issued.Format(time.RFC3339), old.Issued.Format(time.RFC3339))
+	}
+	key, err := session.CurrentKey(c)
+	if err != nil {
+		return nil
+	}
+	for i := range old.Keys {
+		if old.Keys[i].Until != nil && old.Keys[i].Identity == key.Identity {
+			return fmt.Errorf("its current key %s is one the pinned card retires", key.Identity)
+		}
+	}
+	return nil
 }
 
 // prekeyIdentityText is the identity key a PreKey envelope carries, in the

@@ -567,14 +567,16 @@ func (c *channelServe) checkAddress(m *session.Message) error {
 }
 
 // probeKeyChange reads a record the pinned card's keys refuse. A PreKey
-// record whose message is the peer's card, signed by the pinned root and
-// naming the identity key the record came under, is held for the human and
-// the channel waits before it: the cursor stays, so the record is there when
-// peer keys accept has pinned the card and serve builds the session from it.
-// Any other such record is refused and the cursor moves past it: a card that
-// does not verify, a message that is not a card, a key the card does not
-// name. The relay is untrusted and can put any PreKey record on a channel, so
-// nothing it can forge may stop the channel — only a root signature holds it.
+// record whose message is the peer's card, signed by the pinned root, naming
+// the identity key the record came under and superseding the pinned card, is
+// held for the human and the channel waits before it: the cursor stays, so
+// the record is there when peer keys accept has pinned the card and serve
+// builds the session from it. Any other such record is refused and the cursor
+// moves past it: a card that does not verify, a message that is not a card, a
+// key the card does not name, an older card played again. The relay is
+// untrusted and can put any PreKey record on a channel, so nothing it can
+// forge or replay may stop the channel — only a root signature on a newer
+// card holds it.
 func (c *channelServe) probeKeyChange(ctx context.Context, rec relay.Record, cause error) error {
 	refuse := func(why string) error {
 		c.ch.SetCursor(rec.Seq)
@@ -616,6 +618,9 @@ func (c *channelServe) probeKeyChange(ctx context.Context, rec relay.Record, cau
 	if got := prekeyIdentityText(rec.Env); got != key.Identity {
 		return refuse("a card under a new identity key that does not name the key the record came under")
 	}
+	if err := supersedes(c.ch.Card(), pc); err != nil {
+		return refuse(fmt.Sprintf("a card under a new identity key that does not supersede the pinned one: %v", err))
+	}
 	c.ch.Hold(signed, rec.Seq)
 	if err := c.ch.Commit(ctx); err != nil {
 		return err
@@ -628,7 +633,8 @@ func (c *channelServe) probeKeyChange(ctx context.Context, rec relay.Record, cau
 // root and listing the identity key the session uses, it refreshes the pin
 // when it is not older than the pinned card — agents, relays, details, signed
 // prekey, no human (design §3.3). Naming another identity key, or retiring the
-// one in use, it is a key change: held for the human, the channel waits
+// one in use, it is a key change: skipped when it does not supersede the
+// pinned card, else held for the human and the channel waits
 // (§3.2: 先提示人再生效). A guest still waiting for the host's details card
 // (state accepted) answers with its own details card and is confirmed.
 func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec relay.Record, m *session.Message) error {
@@ -643,6 +649,10 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 		return c.commit(ctx, rec)
 	}
 	if s.CheckIdentity(pc) != nil {
+		if err := supersedes(c.ch.Card(), pc); err != nil {
+			fmt.Fprintf(c.sv.out, "skip %s #%d: a card naming a new identity key that does not supersede the pinned one: %v\n", c.pe.Name, rec.Seq, err)
+			return c.commit(ctx, rec)
+		}
 		c.ch.Hold(signed, rec.Seq)
 		if err := c.commit(ctx, rec); err != nil {
 			return err

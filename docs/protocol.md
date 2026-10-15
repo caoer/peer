@@ -273,6 +273,7 @@ The frontmatter holds exactly these five keys; a vendor kind is written quoted. 
 - **One-time prekeys.** Restocked per channel, as above, after the channel is caught up. The private halves are stored before the public halves are deposited.
 - **Identity key change** (only when a key is suspected compromised). The root signs a card listing the old identity key with `until` set to now and the new key with its signed prekey under it. It goes out on every confirmed channel under the session in force; then every session is dropped. The peer's host reads that card, sees an identity key its pinned card does not list, verifies the root signature, holds the card and stops the channel there ("waiting at #N"). A person checks the change over a trusted channel and accepts it — the old session is deleted, the new card pinned, a new session built — or rejects it, which discards the card and leaves the pinned card and session as they were.
 - A record under an identity key the pinned card does not list is held only when it is a PreKey message whose content is a card, signed by the pinned root, naming that key. Anything else under an unlisted key is refused and skipped, so nothing the relay can forge stops a channel.
+- A key change card is held, and accepted, only when it supersedes the pinned card: issued after it, with a current key the pinned card does not list with an `until`. An older card is refused and skipped, so whoever holds a retired key cannot roll a rotation back by replaying the card that named it.
 
 ## Versions and unknown fields
 

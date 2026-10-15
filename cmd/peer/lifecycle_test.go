@@ -450,6 +450,105 @@ func TestKeyChangeWithoutRootSignatureIsRefused(t *testing.T) {
 	}
 }
 
+// After an accepted rotation, whoever still holds the retired key and can put
+// on the channel (the peer's relay token, which rotation keeps, or the relay)
+// plays the peer's older card back in a new session under that key. It does
+// not supersede the pinned card, so serve refuses it with the reason and the
+// channel goes on; peer keys accept refuses such a card too and peer keys
+// reject discards it; the peer's own older card in the session in force is
+// skipped the same way.
+func TestRetiredKeyCannotRollBackThePinnedCard(t *testing.T) {
+	ctx := context.Background()
+	_, rc, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+
+	// What the attacker holds: the guest's identity and card from before the
+	// rotation.
+	gp, _, gpe := channelOf(t, p.guestDir, "zt")
+	oldID := gp.id
+	oc, err := gp.store.OwnCard(ctx)
+	if err != nil || !oc.Present() {
+		t.Fatalf("guest card record: %v", err)
+	}
+	oldCard := oc.Details
+
+	// The genuine rotation, accepted by the host's human.
+	mustOK(t, "identity", "rotate", "--dir", p.guestDir, "--yes")
+	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); !strings.Contains(out, "peer keys accept ancan") {
+		t.Fatalf("host serve on the rotation:\n%s", out)
+	}
+	mustOK(t, "keys", "accept", "--dir", p.hostDir, "ancan")
+	mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	_, hch, _ := channelOf(t, p.hostDir, "ancan")
+	pinned := hch.Card().Body
+
+	// The attacker: the retired key, a session to the host's key, the old
+	// card and a text behind it.
+	ab, err := file.New(filepath.Join(t.TempDir(), "attacker"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := store.New(ab, oldID)
+	ach, _ := as.Channel(ctx, p.channel)
+	ak, _ := as.Keys(ctx)
+	if ak.PartyKeys, err = keys.GeneratePartyKeys(oldID, 1); err != nil {
+		t.Fatal(err)
+	}
+	_, gch, _ := channelOf(t, p.guestDir, "zt")
+	ach.PinRoot(p.hostRoot.Public())
+	ach.PinCard(gch.Card())
+	atk := &rotated{id: oldID, k: ak, ch: ach, sess: session.New(ach, ak), token: gpe.Token}
+	atk.establish(t, ctx, rc, p)
+	cm, _ := session.CardMessage(p.guestParty, p.hostParty, oldCard)
+	cardRcpt := atk.put(t, ctx, rc, p, cm)
+	tm, _ := session.NewMessage(p.guestParty+"/legal", p.hostParty+"/advisor", session.KindText, []byte("from the retired key"))
+	textRcpt := atk.put(t, ctx, rc, p, tm)
+
+	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	for _, w := range []string{"skip ancan #" + itoa(cardRcpt.Seq) + ": a card under a new identity key that does not supersede the pinned one: it was issued", "skip ancan #" + itoa(textRcpt.Seq)} {
+		if !strings.Contains(out, w) {
+			t.Fatalf("host serve does not say %q:\n%s", w, out)
+		}
+	}
+	if strings.Contains(out, "waiting at #") || strings.Contains(out, "delivered text "+tm.ID) {
+		t.Fatalf("the old card held or the retired key's text delivered:\n%s", out)
+	}
+	_, hch, _ = channelOf(t, p.hostDir, "ancan")
+	if held, _ := hch.Held(); held != nil || hch.Cursor() != textRcpt.Seq || !bytes.Equal(hch.Card().Body, pinned) {
+		t.Fatalf("held %v, cursor %d (want #%d), pin unchanged %v", held != nil, hch.Cursor(), textRcpt.Seq, bytes.Equal(hch.Card().Body, pinned))
+	}
+
+	// The same card held on the channel: accept refuses it and changes
+	// nothing, reject discards it.
+	hch.Hold(oldCard, cardRcpt.Seq)
+	if err := hch.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustRefuse(t, "the held card does not supersede the pinned one: it was issued", "keys", "accept", "--dir", p.hostDir, "ancan")
+	_, hch, _ = channelOf(t, p.hostDir, "ancan")
+	if !bytes.Equal(hch.Card().Body, pinned) {
+		t.Fatal("a refused accept changed the pinned card")
+	}
+	mustOK(t, "keys", "reject", "--dir", p.hostDir, "ancan")
+
+	// The guest's older card in the session in force: skipped, nothing held.
+	gp, gch, gpe = channelOf(t, p.guestDir, "zt")
+	var sink bytes.Buffer
+	if err := gp.publish(ctx, *gpe, oldCard, gch.Announced(), &sink); err != nil {
+		t.Fatal(err)
+	}
+	out = mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	if !strings.Contains(out, "a card naming a new identity key that does not supersede the pinned one") || strings.Contains(out, "waiting at #") {
+		t.Fatalf("host serve on the guest's older card:\n%s", out)
+	}
+
+	// The channel goes on under the new key.
+	id, _ := sendOK(t, p.guestDir, "--text", "on the new key", "zt/advisor")
+	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); !strings.Contains(out, "delivered text "+id) {
+		t.Fatalf("host serve after the refusals:\n%s", out)
+	}
+}
+
 // ageSignedPrekey makes the party's current signed prekey look age old.
 func ageSignedPrekey(t *testing.T, ctx context.Context, dir string, age time.Duration) {
 	t.Helper()
