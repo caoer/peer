@@ -600,3 +600,46 @@ func TestRoomCommandPullBirthsInServeDeliver(t *testing.T) {
 		t.Fatalf("record %s: in serve's --deliver directory %v, in the default one %v", id, inCustom, inDefault)
 	}
 }
+
+// A removal record behind a waiting delivery is never passed by the version
+// a put carries: the relay's membership version is taken at head alone, so a
+// send from the host where the delivery waits is never sealed to the removed
+// member at the version the removal's bump set.
+func TestRoomWaitBeforeRemovalSealsWithoutRemoved(t *testing.T) {
+	srv, base, front := startPathFront(t, http.MethodDelete, "/members/2")
+	root := filepath.Join(t.TempDir(), "sessions")
+	writeRoomSeats(t, root, "*")
+	a, b, c := newDir(t, config{}), newDir(t, config{}), newDir(t, config{})
+	x := newDir(t, uccCfg(root))
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	handshakeNamed(t, a, c, base, "carol", "alice")
+	ax := handshakeNamed(t, a, x, base, "xavier", "alice")
+	id := createRoom(t, a, base, "r1")
+	addToRoom(t, a, b, "r1", "bob")   // idx 1
+	addToRoom(t, a, c, "r1", "carol") // idx 2
+	addToRoom(t, a, x, "r1", "xavier")
+	for _, d := range []string{a, b, c, x} {
+		mustOK(t, "serve", "--dir", d, "--once")
+	}
+	if err := os.RemoveAll(filepath.Join(root, "projects", "ops")); err != nil {
+		t.Fatal(err)
+	}
+	roomSendOK(t, b, "--to", ax.guestParty+"/zt", "--text", "deliverable", id[:8]) // born at X
+	roomSendOK(t, b, "--text", "waits at X", id[:8])                               // X's * row waits
+	front.arm(fail503)                                                             // the removal's revoke
+	mustOK(t, "room", "remove", "--dir", a, "r1", "carol")
+
+	cmd(t, "send", "--dir", x, "--text", "hello", id[:8])
+	for _, r := range srv.RoomRecords(id) {
+		if r.Idx != 3 {
+			continue
+		}
+		rec, err := sealed.Parse(mustB64(t, r.Body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(rec.Recipients(), 2) {
+			t.Fatalf("X's record #%d is sealed to %v after idx 2's removal", r.Seq, rec.Recipients())
+		}
+	}
+}

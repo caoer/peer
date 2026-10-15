@@ -479,8 +479,9 @@ func (c *roomConn) say(seq int64, format string, args ...any) {
 // pull reads the room to head in the contract's receiver order, folding the
 // membership records, spooling the rest, and committing the state after each
 // record, then birthing what the Commit carried; another host's commit
-// reloads the state and the pull goes on from its cursor. A record whose
-// delivery waits (errWait) stops the pull before it, the state as committed.
+// reloads the state and the pull goes on from its cursor. The relay's
+// membership version is taken at head alone. A record whose delivery waits
+// (errWait) stops the pull before it, the state as committed.
 func (c *roomConn) pull(ctx context.Context) error {
 	if c.sv == nil {
 		sv, err := commandServer(c.p, c.out)
@@ -498,12 +499,16 @@ func (c *roomConn) pull(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("room %s: pull: %w", c.ref.Name, err)
 		}
-		fresh := page.Membership > c.st.Membership()
-		c.st.ObserveMembership(page.Membership)
 		if len(page.Records) == 0 {
-			if !fresh {
+			// At head every record past the cursor is folded, and the
+			// relay's membership version is the fold's. A page's version is
+			// never taken before its records fold — a removal in it bumped
+			// it — so a put never carries a version ahead of the fold: a pull
+			// cut short puts at the folded one, takes the 409 and pulls again.
+			if page.Membership <= c.st.Membership() {
 				return nil
 			}
+			c.st.ObserveMembership(page.Membership)
 			if err := c.st.Commit(ctx); err != nil {
 				if errors.Is(err, store.ErrConflict) {
 					if err := c.reload(ctx); err != nil {
