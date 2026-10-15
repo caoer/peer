@@ -97,9 +97,9 @@ func (p *party) writeTimeline(ctx context.Context, name, channel, dir string, se
 	}
 }
 
-// timelineSpooled writes the timeline record of a spooled message born at
-// start, the crash-cut tail of a round; body is the entry's plaintext as the
-// spool holds it.
+// timelineSpooled writes the timeline record of a spooled message born by a
+// spool replay, the cut tail of an earlier round; body is the entry's
+// plaintext as the spool holds it.
 func (sv *server) timelineSpooled(ctx context.Context, e *store.Entry, body []byte) {
 	m, err := session.UnmarshalMessage(body)
 	if err != nil {

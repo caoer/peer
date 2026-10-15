@@ -18,8 +18,8 @@ import (
 // directory outside the tree: the serve spool (a decrypted message awaiting
 // its inbox birth) and the send outbox (a ciphertext awaiting its relay
 // put). The sequence is Add → Commit → MarkCommitted → deliver or put →
-// Remove; a CAS loser Removes its entry; on start ReplaySpool and
-// ReplayOutbox finish what a crash cut.
+// Remove; a CAS loser Removes its entry; ReplaySpool and ReplayOutbox finish
+// what a crash or a failed step cut, every serve round.
 type Journal struct{ dir string }
 
 // Entry is one journaled message.
@@ -118,9 +118,10 @@ func (j *Journal) write(e *Entry) error {
 	return os.Rename(tmp, e.path)
 }
 
-// ReplaySpool runs on start: it delivers the spool entries whose Commit
-// landed — marked committed, or whose id the channel record has seen — and
-// drops the rest, whose message the cursor will pull again. A delivered
+// ReplaySpool runs on serve's start and before every round's pulls: it
+// delivers the spool entries whose Commit landed — marked committed, or whose
+// id the channel record has seen — and drops the rest, whose message the
+// cursor will pull again. A delivered
 // entry is removed, so a replay delivers each message once; an entry
 // another host also committed may be delivered twice — a duplicate at most,
 // never a loss (decision 5).

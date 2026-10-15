@@ -32,7 +32,8 @@ import (
 // session state under CAS, birth the record from the spool. Any number of a
 // party's hosts may serve one state: the commit winner alone births the
 // record, a loser drops its spool entry and pulls again from the committed
-// cursor, a crash after the commit replays the spool on the next start.
+// cursor, and a birth a crash or an error cut after the commit comes from the
+// spool on the next round or start.
 func cmdServe(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -130,12 +131,17 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 // would fail on it the same way.
 var errSpool = errors.New("spool entry does not open")
 
-// start finishes the spool births a crash cut (the outbox is every round's
-// work, below). An entry that can never be born — its own address, kind or id
-// refuses — is dropped with its reason, so one such entry cannot stop
-// delivery on every channel.
+// start finishes the spool births a crash cut, before the first round.
 func (sv *server) start(ctx context.Context) error {
 	sv.p.timelineRound(sv.out)
+	return sv.replaySpool(ctx)
+}
+
+// replaySpool births the spool entries whose commit landed and drops the
+// rest (store.ReplaySpool). An entry that can never be born — its own
+// address, kind or id refuses — is dropped with its reason, so one such entry
+// cannot stop delivery on every channel.
+func (sv *server) replaySpool(ctx context.Context) error {
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
 		plain := e.Body
 		sv.withAttachment(e)
@@ -151,11 +157,14 @@ func (sv *server) start(ctx context.Context) error {
 	})
 }
 
-// round replays the outbox, then pulls every channel that has a session
-// once; one channel's failure does not stop the others. The outbox is a
-// round's work, not a start's: under serve --every, a long-lived loop is all
-// that runs, and a message whose put failed after its commit goes out on the
-// next round, as peer send promises.
+// round replays the spool and the outbox, then pulls every channel that has
+// a session once; one channel's failure does not stop the others. Both
+// replays are a round's work, not a start's: under serve --every, a
+// long-lived loop is all that runs. A message whose birth failed after its
+// commit — the cursor already past it, so no pull brings it again — is born
+// on the next round, and its entry is settled before the pull; a message
+// whose put failed after its commit goes out on the next round, as peer send
+// promises.
 func (sv *server) round(ctx context.Context) error {
 	sv.card = nil
 	if err := sv.loadSeats(); err != nil {
@@ -164,6 +173,9 @@ func (sv *server) round(ctx context.Context) error {
 	sv.p.timelineRound(sv.out)
 	if sv.seats != nil {
 		sv.retryServices()
+	}
+	if err := sv.replaySpool(ctx); err != nil {
+		fmt.Fprintf(sv.out, "spool: %v\n", err)
 	}
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
@@ -516,7 +528,8 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	// the truth, so this entry is this host's to drop and the message comes
 	// again from the committed cursor. Any other error may have landed the
 	// write — the pages backend answers after the PUT went out — so the entry
-	// stays on disk for ReplaySpool's seen check, which births it once.
+	// stays on disk for the next round's ReplaySpool seen check, which births
+	// it once when the write landed and drops it when it did not.
 	if err := c.ch.Commit(ctx); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			c.sv.spool.Remove(e)

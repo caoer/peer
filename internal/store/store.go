@@ -13,8 +13,8 @@
 //
 // The orders decision 5 fixes: serve = decrypt → spool → Commit → inbox
 // birth from the spool; send = encrypt → outbox → Commit → put → clear. The
-// Journal is the spool and the outbox; ReplaySpool and ReplayOutbox run on
-// start and finish what a crash interrupted.
+// Journal is the spool and the outbox; ReplaySpool and ReplayOutbox run every
+// serve round and finish what a crash or a failed step interrupted.
 package store
 
 import (
