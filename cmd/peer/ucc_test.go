@@ -20,7 +20,7 @@ import (
 // uccSession is the fixture map's session. Its roster records are seats no
 // agent holds — vacant — and the record lands all the same: nothing in peer
 // reads liveness (UCC design v2 § 5, the record is the delivery).
-const uccSession = "year=2026/month=10/14-09-agent-protocol-design"
+const uccSession = "projects/demo"
 
 // uccRoot is a sessions root for a test: the fixture map — the first real
 // map, internal/seats/testdata/seats.md — at peers/seats.md, and the session
@@ -34,10 +34,10 @@ func uccRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for n, body := range map[string]string{
-		"INTENT.md":                                "---\ntype: intent\nsession: 14-09-agent-protocol-design\n---\n# Intent\n",
-		"rosters/leader-peer-v1.md":                "---\ntype: roster\nrole: leader\n---\n# leader-peer-v1\n",
-		"rosters/worker-cli.md":                    "---\ntype: roster\nrole: worker\n---\n# worker-cli\n",
-		"rosters/advisor-agent-protocol-design.md": "---\ntype: roster\nrole: advisor\n---\n# advisor-agent-protocol-design\n",
+		"INTENT.md":                 "---\ntype: intent\nsession: demo\n---\n# Intent\n",
+		"rosters/leader-peer-v1.md": "---\ntype: roster\nrole: leader\n---\n# leader-peer-v1\n",
+		"rosters/worker-cli.md":     "---\ntype: roster\nrole: worker\n---\n# worker-cli\n",
+		"rosters/advisor-demo.md":   "---\ntype: roster\nrole: advisor\n---\n# advisor-demo\n",
 	} {
 		if err := os.WriteFile(filepath.Join(sd, filepath.FromSlash(n)), []byte(body), 0o644); err != nil {
 			t.Fatal(err)

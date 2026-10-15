@@ -10,7 +10,7 @@ import (
 	"github.com/caoer/peer/internal/card"
 )
 
-const sess = "year=2026/month=10/14-09-agent-protocol-design"
+const sess = "projects/demo"
 
 // The fixture is the first real map: two seats in the protocol session, the
 // human, born in the session of the advisor position that relays to him, and
@@ -31,7 +31,7 @@ func TestParse(t *testing.T) {
 	for _, want := range []Row{
 		{Label: "leader", Kind: Seat, Session: sess, Seat: sess + "/rosters/leader-peer-v1", Accepts: seat},
 		{Label: "cli", Kind: Seat, Session: sess, Seat: sess + "/rosters/worker-cli", Accepts: seat},
-		{Label: "zt", Kind: Human, Session: sess, Seat: sess + "/rosters/advisor-agent-protocol-design", Accepts: []string{"text", "question", "answer"}},
+		{Label: "zt", Kind: Human, Session: sess, Seat: sess + "/rosters/advisor-demo", Accepts: []string{"text", "question", "answer"}},
 		{Label: "hook", Kind: Service, URL: "https://example.net/peer/hook", Accepts: []string{"text"}},
 	} {
 		got, ok := m.Row(want.Label)
