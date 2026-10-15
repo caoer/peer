@@ -154,7 +154,7 @@ peer room rotate team
 ```
 
 - `remove` (admins) takes a member out by peer name, party id or idx: nothing sent after it is readable by them, and their token is revoked.
-- `handover` (admins) makes a member you have a confirmed channel with an admin too.
+- `handover` (admins) makes a member you have a confirmed channel with an admin too. A read member — so any member of a feed — cannot take it.
 - `leave` takes you out. The last admin cannot leave while others stay: hand over first, or close.
 - `close` (admins) removes everyone, revokes every token and drops the room. A room you left, were removed from, or saw closed stays in `status` with that word, and sending into it is refused.
 - `rotate` replaces your room key now; `peer serve` does it daily on its own.

@@ -297,10 +297,11 @@ func (c *roomConn) markRead(ctx context.Context) {
 	}
 }
 
-// runRoomHandover makes a member an admin: the handover record, the
+// runRoomHandover makes a write member an admin: the handover record, the
 // admin-flagged token from POST …/admin, then room-admin over the channel;
 // a re-run after the record landed sends the stored token again, no second
-// grant.
+// grant. A read member — every member of a feed — is refused before any
+// record, by its role on the relay's members list.
 func runRoomHandover(ctx context.Context, dir, name, peerName string, out io.Writer) error {
 	c, err := openJoined(ctx, dir, name, out)
 	if err != nil {
@@ -326,6 +327,21 @@ func runRoomHandover(ctx context.Context, dir, name, peerName string, out io.Wri
 	}
 	if m.Idx == c.st.Idx() {
 		return fmt.Errorf("room %s: %s is you", c.ref.Name, peerName)
+	}
+	// The relay grants admin to a write seat alone; a record posted for a
+	// read one would fold an admin no relay token backs.
+	ms, err := c.rc.ListMembers(ctx, c.ref.ID, c.ref.Token)
+	if err != nil {
+		return fmt.Errorf("room %s: the relay's members are not listed, so %s's role is not known: %w", c.ref.Name, peerName, err)
+	}
+	for _, rm := range ms.Members {
+		if uint16(rm.Idx) != m.Idx || rm.Role == relay.RoleWrite {
+			continue
+		}
+		if c.st.Feed() {
+			return fmt.Errorf("room %s is a feed: %s (idx %d) is a %s member, as every member of a feed is, and a feed cannot be handed over", c.ref.Name, peerName, m.Idx, rm.Role)
+		}
+		return fmt.Errorf("room %s: %s (idx %d) is a %s member; admin goes to a write member alone", c.ref.Name, peerName, m.Idx, rm.Role)
 	}
 	if h := c.ref.handover(pe.Channel); h != nil {
 		// A re-run: the stored token goes out again, no second grant.

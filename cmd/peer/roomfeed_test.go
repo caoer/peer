@@ -364,6 +364,29 @@ func TestRoomCloseRevokesStraySeat(t *testing.T) {
 	}
 }
 
+// A feed's member reads, and the relay grants admin to a write member
+// alone: a handover to it is refused before anything is posted — no
+// handover record on the relay, no membership bump, the admin set and the
+// rooms record unchanged — and the creator stays the last admin, so its
+// leave is still refused.
+func TestRoomHandoverRefusesReadMember(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	a, b := newDir(t, config{}), newDir(t, config{})
+	handshakeNamed(t, a, b, base, "bob", "alice")
+	id := createRoom(t, a, base, "f1", "--feed")
+	addReader(t, a, b, "f1", "bob")
+	rows, m0 := len(srv.RoomRecords(id)), srv.RoomMembership(id)
+
+	mustRefuse(t, "is a read member, as every member of a feed is, and a feed cannot be handed over", "room", "handover", "--dir", a, "f1", "bob")
+	if n, m := len(srv.RoomRecords(id)), srv.RoomMembership(id); n != rows || m != m0 {
+		t.Fatalf("the relay after the refused handover: %d records, membership %d; want %d, %d", n, m, rows, m0)
+	}
+	if _, ref, st := roomOf(t, a, "f1"); !slices.Equal(st.Admins(), []uint16{0}) || len(ref.Handovers) != 0 {
+		t.Fatalf("A after the refused handover: admins %v, handovers %+v", st.Admins(), ref.Handovers)
+	}
+	mustRefuse(t, "you are its last admin", "room", "leave", "--dir", a, "f1")
+}
+
 // stripLink drops the link from the party's state for room id, as a state
 // that never made the link holds it.
 func stripLink(t *testing.T, dir, id string) {
