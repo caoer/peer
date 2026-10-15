@@ -5,13 +5,30 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 )
 
-// version is set at build time with -ldflags "-X main.version=...".
+// version is set at build time with -ldflags "-X main.version=..." (the
+// release binaries); a `go install …@<tag>` build carries the tag in its
+// build info instead, and a plain `go build` carries neither.
 var version = "dev"
 
 func main() {
+	bi, ok := debug.ReadBuildInfo()
+	version = versionFrom(version, bi, ok)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// versionFrom is the stamped version when there is one, else the module
+// version the Go toolchain recorded for a `go install …@<tag>` build, else "dev".
+func versionFrom(stamped string, bi *debug.BuildInfo, ok bool) string {
+	if stamped != "" && stamped != "dev" {
+		return stamped
+	}
+	if ok && bi != nil && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
