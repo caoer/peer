@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"io"
+	"net/http"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/caoer/peer/internal/invite"
+	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/relay/relaytest"
 	"github.com/caoer/peer/internal/room"
 )
@@ -296,5 +298,62 @@ func TestRoomAddRefusesWithoutConfirmedChannel(t *testing.T) {
 	_, ref, _ := roomOf(t, a, "r")
 	if len(ref.Adds) != 0 {
 		t.Fatalf("refused adds left %+v", ref.Adds)
+	}
+}
+
+// The roster record adding carol fails its put and waits in the room outbox;
+// a later send puts it, so the add is rostered and its token has not gone
+// out. A re-run of peer room add sends the stored token again — no second
+// mint, the relay's members as they were — and carol joins with it.
+func TestRoomAddRerunResendsToken(t *testing.T) {
+	ctx := context.Background()
+	srv, base, front := startFront(t)
+	a, c := newDir(t, config{}), newDir(t, config{})
+	handshakeNamed(t, a, c, base, "carol", "alice")
+	id := createRoom(t, a, base, "r1")
+	mustOK(t, "room", "add", "--dir", a, "r1", "carol")
+	for i, dir := range []string{c, a, c} {
+		if out, want := mustOK(t, "serve", "--dir", dir, "--once"), []string{"invites you", "minted idx", "seated at idx"}[i]; !strings.Contains(out, want) {
+			t.Fatalf("serve %d of the add: no %q in\n%s", i+1, want, out)
+		}
+	}
+	// Every room put fails for the length of A's serve: the step's put and
+	// the round's outbox flush, which would land the record and send the
+	// token in the same round.
+	var down func(http.ResponseWriter, *http.Request) bool
+	down = func(w http.ResponseWriter, r *http.Request) bool {
+		front.arm(down)
+		return fail503(w, r)
+	}
+	front.arm(down)
+	out := mustOK(t, "serve", "--dir", a, "--once")
+	front.onPut.Store(nil)
+	if !strings.Contains(out, "is committed and did not land") || strings.Contains(out, "its token went out") {
+		t.Fatalf("A's serve on carol's join, the roster put failing:\n%s", out)
+	}
+	roomSendOK(t, a, "--text", "the roster record goes first", "r1")
+	if out := mustOK(t, "room", "members", "--dir", a, "r1"); !strings.Contains(out, "adding carol: idx 1 in the roster, token not sent") {
+		t.Fatalf("A's members after the roster record landed:\n%s", out)
+	}
+	m1 := srv.RoomMembership(id)
+	_, aref, _ := roomOf(t, a, "r1")
+	ms1, err := relay.New(base, nil).ListMembers(ctx, id, aref.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out = mustOK(t, "room", "add", "--dir", a, "r1", "carol")
+	if !strings.Contains(out, "room r1: sent carol the token for idx 1 again") {
+		t.Fatalf("the add re-run:\n%s", out)
+	}
+	ms2, err := relay.New(base, nil).ListMembers(ctx, id, aref.Token)
+	if err != nil || len(ms2.Members) != len(ms1.Members) || srv.RoomMembership(id) != m1 {
+		t.Fatalf("the re-run minted: members %d → %d, membership %d → %d (%v)", len(ms1.Members), len(ms2.Members), m1, srv.RoomMembership(id), err)
+	}
+	if out := mustOK(t, "serve", "--dir", c, "--once"); !strings.Contains(out, "joined room") {
+		t.Fatalf("carol's serve on the resent token:\n%s", out)
+	}
+	if _, _, cst := roomOf(t, c, id[:8]); cst.Idx() != 1 || len(cst.Members()) != 2 {
+		t.Fatalf("carol's state: idx %d, %d members", cst.Idx(), len(cst.Members()))
 	}
 }
