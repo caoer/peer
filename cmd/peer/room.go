@@ -631,7 +631,9 @@ func (c *roomConn) receive(rec relay.RoomRecord) error {
 	}
 	c.st.MarkSeen(m.ID, rec.Seq)
 	if room.MembershipKind(m.Kind) {
-		res := c.st.Fold(room.Verified{Seq: rec.Seq, Idx: h.Idx, Kind: m.Kind, Body: m.Body, At: h.At}, c.ch)
+		// The relay's at, never the header's: a key's retirement is read at
+		// the moment the relay stored the record, not at the writer's word.
+		res := c.st.Fold(room.Verified{Seq: rec.Seq, Idx: h.Idx, Kind: m.Kind, Body: m.Body, At: rec.At}, c.ch)
 		c.report(rec.Seq, res)
 		if slices.Contains(res.Updated, c.st.Idx()) {
 			// An admin's roster entry carrying this party's own card — a

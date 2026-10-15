@@ -59,7 +59,10 @@ type Verified struct {
 	// Kind and Body are the message's kind and body JSON.
 	Kind string
 	Body []byte
-	// At is the header's time: the moment a party card's key retirement is read against.
+	// At is when the relay stored the record (its `at`) — the moment a party
+	// card's key retirement is read against, never the header's `at`, which
+	// the writer chooses and signs. An own record folded at send takes the
+	// local clock.
 	At time.Time
 }
 
@@ -232,8 +235,10 @@ func (s *State) foldHandover(rec Verified) Result {
 }
 
 // applyEntry folds one roster entry: both cards verify, the idx is free or
-// the party's own, the cross-check holds (rule 4), the record stays under
-// the cap. An entry no newer than the folded card at its idx is ignored. An
+// the party's own, the party card is issued no earlier than the folded one
+// (an older card may still list a retired identity key), the cross-check
+// holds (rule 4), the record stays under the cap. An entry whose room card
+// is no newer than the folded card at its idx is ignored. An
 // admin's entry (and the invite's, which Seed folds) may take a removed or
 // left idx — a newcomer's state holds no removed set, so the fold agrees
 // everywhere; a non-admin's entry there is refused (sub-rule 1).
@@ -257,6 +262,17 @@ func (s *State) applyEntry(e Entry, ch Channels, at time.Time, admin bool, res *
 	if cur != nil && cur.Party != e.Party {
 		res.refuse("%s: the idx is held by %s", where, cur.Party)
 		return
+	}
+	if cur != nil {
+		folded, err := partyCard(cur)
+		if err != nil {
+			res.refuse("%s: folded party card: %v", where, err)
+			return
+		}
+		if pc.Issued.Before(folded.Issued) {
+			res.refuse("%s: party card issued %s, before the folded party card's %s", where, pc.Issued.UTC().Format(time.RFC3339), folded.Issued.UTC().Format(time.RFC3339))
+			return
+		}
 	}
 	rc, err := Verify(e.RoomCard, pc, at)
 	if err != nil {
