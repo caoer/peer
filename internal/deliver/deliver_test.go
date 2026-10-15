@@ -137,3 +137,13 @@ func TestWriteOnce(t *testing.T) {
 		t.Fatalf("quarantine write: born=%v err=%v", born, err)
 	}
 }
+
+// A roster notice lands in the inbox whatever the seat's accepts says: a
+// list without roster, and an empty list that takes no other kind.
+func TestRouteRosterWhateverAccepts(t *testing.T) {
+	for _, accepts := range [][]string{{"text", "task"}, {}, nil} {
+		if got := Route(KindRoster, accepts); got != Inbox {
+			t.Errorf("Route(%q, %v) = %s, want %s", KindRoster, accepts, got, Inbox)
+		}
+	}
+}
