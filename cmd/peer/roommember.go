@@ -235,6 +235,12 @@ func runRoomLeave(ctx context.Context, dir, name string, out io.Writer) error {
 		return err
 	}
 	st := c.st
+	if st.Feed() && st.IsAdmin(st.Idx()) {
+		// The link's read seat is outside the roster and only the owner's
+		// admin token revokes it: a leave would drop that token and leave
+		// the seat live for the room's retention.
+		return fmt.Errorf("room %s is a feed: its owner ends it with peer room close %s; a leave would keep its link's read seat live with no admin left to revoke it", c.ref.Name, c.ref.Name)
+	}
 	if st.IsAdmin(st.Idx()) && len(st.Admins()) == 1 && len(st.Members()) > 1 {
 		return fmt.Errorf("room %s: you are its last admin and %d other members stay; hand over first (peer room handover %s <peer>) or close it (peer room close %s)", c.ref.Name, len(st.Members())-1, c.ref.Name, c.ref.Name)
 	}
