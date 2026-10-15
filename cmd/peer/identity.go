@@ -7,10 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go.mau.fi/libsignal/ecc"
 
 	"github.com/caoer/peer/internal/card"
 	"github.com/caoer/peer/internal/keys"
@@ -27,8 +30,12 @@ import (
 // session in force, then every session is dropped (换身份密钥即作废旧会话),
 // the state is re-sealed under the new identity's key, the keys record takes
 // the new signed prekey (the one-time prekeys stay — they are not bound to
-// the identity) and a new identity.json is written. Without --yes it prints
-// what that costs the fleet and refuses.
+// the identity) and a new identity.json is written. What the card names is
+// on disk before it goes out — the new key as identity.json.next until it is
+// renamed over identity.json, its signed prekey as keys.json.next until the
+// keys record holds it — so a rotation that stops part way leaves a key that
+// opens the state, and running the command again completes that rotation.
+// Without --yes it prints what that costs the fleet and refuses.
 func cmdIdentity(args []string, stdout, stderr io.Writer) int {
 	usage := func() int {
 		fmt.Fprintln(stderr, "usage: peer identity rotate [--dir D] [--yes]")
@@ -57,8 +64,35 @@ func cmdIdentity(args []string, stdout, stderr io.Writer) int {
 // errNoYes is the refusal without --yes.
 var errNoYes = errors.New("refused: run again with --yes once the cost above is understood")
 
-func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer) error {
-	dir, err := peerDir(dir)
+// A rotation keeps what its card names on disk from before the card goes
+// out: nextIdentityFile holds the new identity until it is renamed over
+// identity.json, so a key that opens the state is there at every step;
+// nextKeysFile holds the new signed prekey until the keys record does, so a
+// rotation completed by a second run commits the key the card announced.
+const (
+	nextIdentityFile = identityFile + ".next"
+	nextKeysFile     = partyKeysFile + ".next"
+)
+
+// nextIdentity is the identity a rotation that has not completed moves to,
+// nil when there is none. A .next that is the identity in force already is
+// removed: its rotation completed.
+func nextIdentity(dir string, current *keys.Identity) (*keys.Identity, error) {
+	path := filepath.Join(dir, nextIdentityFile)
+	next := new(keys.Identity)
+	if err := readJSON(path, next); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if next.PublicKey() == current.PublicKey() {
+		return nil, os.Remove(path)
+	}
+	return next, nil
+}
+
+func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer) (err error) {
+	dir, err = peerDir(dir)
 	if err != nil {
 		return err
 	}
@@ -69,49 +103,106 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 	if p.root == nil {
 		return errNoRoot(dir)
 	}
-	k, err := p.keys(ctx)
+	// The identity in force is identity.json's. A rotation that stopped part
+	// way left the key it moves to in identity.json.next; it is completed
+	// under that key, not begun again — its card may be out and the state
+	// sealed under that key already.
+	oldID := new(keys.Identity)
+	if err := readJSON(filepath.Join(dir, identityFile), oldID); err != nil {
+		return err
+	}
+	newID, err := nextIdentity(dir, oldID)
 	if err != nil {
 		return err
 	}
+	resume := newID != nil
 	r, err := roster.Load(ctx, p.backend)
 	if err != nil {
 		return err
 	}
 	sealed := p.cfg.State.Page != "" || p.cfg.State.Slug != ""
-	oldIdentity := keys.CurveText(p.id.PublicKey())
+	oldIdentity := keys.CurveText(oldID.PublicKey())
 	if !yes {
+		if resume {
+			fmt.Fprintf(out, "a rotation to identity key %s stopped part way (%s holds it): --yes completes it under that key\n", keys.CurveText(newID.PublicKey()), nextIdentityFile)
+		}
 		printRotateCost(out, r, sealed, oldIdentity)
 		return errNoYes
 	}
-
-	now := time.Now()
-	newID, err := keys.GenerateIdentity(p.id.Party)
+	// Once the new key is on disk, a failure says how the rotation completes.
+	nextOnDisk := resume
+	defer func() {
+		if err != nil && nextOnDisk {
+			err = fmt.Errorf("%w; the rotation stopped part way and %s holds the new key: run peer identity rotate --yes again to complete it", err, nextIdentityFile)
+		}
+	}()
+	oldBackend, err := openBackend(dir, p.cfg, oldID)
 	if err != nil {
 		return err
 	}
-	// The signed prekey under the new identity key, with the next id: the
-	// card announces it and the keys record takes it in step 4.
-	newPK := &keys.PartyKeys{SignedPrekey: k.PartyKeys.SignedPrekey}
-	if err := newPK.RotateSignedPrekey(newID); err != nil {
+
+	now := time.Now()
+	if !resume {
+		if newID, err = keys.GenerateIdentity(oldID.Party); err != nil {
+			return err
+		}
+	}
+	newIdentity := keys.CurveText(newID.PublicKey())
+	newBackend, err := openBackend(dir, p.cfg, newID)
+	if err != nil {
+		return err
+	}
+	if resume {
+		// Its re-seal may have begun: it is finished first, and the rest
+		// reads the state under the new key.
+		fmt.Fprintf(out, "completing the rotation to identity key %s\n", newIdentity)
+		if sealed {
+			if err := reseal(ctx, oldBackend, newBackend, r, out); err != nil {
+				return err
+			}
+		}
+		p.id, p.backend, p.store = newID, newBackend, store.New(newBackend, newID)
+	}
+	k, err := p.keys(ctx)
+	if err != nil {
+		return err
+	}
+	// The signed prekey under the new identity key, on disk before the card
+	// names it; announce is whether the card still goes out.
+	newPK, announce, err := rotationPrekey(dir, k.PartyKeys, newID)
+	if err != nil {
 		return err
 	}
 
 	// 1. The card: the old key with its until, then the new key — signed by
 	// the root, the same card the state holds from here (every host's).
-	old := card.New(p.id, k.PartyKeys, nil, nil, now).Keys[0]
-	old.Until = &now
+	old, err := p.retiredKey(ctx, oldID, k.PartyKeys, now)
+	if err != nil {
+		return err
+	}
 	public, details, err := p.buildOwnCard(newID, newPK, now, old)
 	if err != nil {
 		return err
 	}
-	newIdentity := keys.CurveText(newID.PublicKey())
-	fmt.Fprintf(out, "new identity key %s; %s retires at %s\n", newIdentity, oldIdentity, now.UTC().Format(time.RFC3339))
+	// The new identity on disk before the card names it, and before any
+	// record is sealed under it.
+	if !resume {
+		b, err := json.MarshalIndent(newID, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := writeNew(filepath.Join(dir, nextIdentityFile), append(b, '\n')); err != nil {
+			return err
+		}
+		nextOnDisk = true
+	}
+	fmt.Fprintf(out, "new identity key %s; %s retires at %s\n", newIdentity, oldIdentity, old.Until.UTC().Format(time.RFC3339))
 
 	// 2. Out on every confirmed channel under the session in force: the peer
 	// holds it for its human (U13's receiver) and rebuilds from our prekeys
 	// after peer keys accept.
 	for _, pe := range r.Peers {
-		if pe.State != roster.Confirmed {
+		if !announce || pe.State != roster.Confirmed {
 			continue
 		}
 		if err := p.publish(ctx, pe, details, newPK.SignedPrekey.ID(), out); err != nil {
@@ -121,26 +212,10 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 
 	// 3. The state under the new identity's seal: every record copied under
 	// CAS, so a host that commits meanwhile is seen, not overwritten.
-	newBackend, err := openBackend(dir, p.cfg, newID)
-	if err != nil {
-		return err
-	}
-	if sealed {
-		names := []string{roster.Key, store.KeysKey, store.OwnCardKey}
-		for _, pe := range r.Peers {
-			names = append(names, store.ChannelKey(pe.Channel), status.ActivityKey(pe.Channel))
+	if sealed && !resume {
+		if err := reseal(ctx, oldBackend, newBackend, r, out); err != nil {
+			return err
 		}
-		n := 0
-		for _, name := range names {
-			copied, err := copyRecord(ctx, p.backend, newBackend, name)
-			if err != nil {
-				return fmt.Errorf("re-seal %s: %w", name, err)
-			}
-			if copied {
-				n++
-			}
-		}
-		fmt.Fprintf(out, "state re-sealed under the new identity key: %d records\n", n)
 	}
 
 	// 4. Under the new identity: the keys record, every session dropped, the
@@ -149,6 +224,9 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 	nk, err := commitRotatedKeys(ctx, ns, k.PartyKeys, newPK)
 	if err != nil {
 		return fmt.Errorf("keys record: %w", err)
+	}
+	if err := os.Remove(filepath.Join(dir, nextKeysFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	dropped := 0
 	for _, pe := range r.Peers {
@@ -171,18 +249,21 @@ func runIdentityRotate(ctx context.Context, dir string, yes bool, out io.Writer)
 	}
 	fmt.Fprintf(out, "sessions dropped on %d channel(s); signed prekey %d under the new key; %d one-time prekeys kept\n", dropped, nk.SignedPrekey.ID(), len(nk.Prekeys))
 
-	// 5. The identity file: the old one kept beside it, retired.
+	// 5. The identity file: the old one kept beside it, retired, then
+	// identity.json.next renamed over it — the one step that makes the new
+	// key identity.json and leaves no .next.
 	retired := filepath.Join(dir, identityFile+".retired-"+now.UTC().Format("20060102T150405Z"))
-	if err := os.Rename(filepath.Join(dir, identityFile), retired); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(newID, "", "  ")
+	b, err := os.ReadFile(filepath.Join(dir, identityFile))
 	if err != nil {
 		return err
 	}
-	if err := writeNew(filepath.Join(dir, identityFile), append(b, '\n')); err != nil {
+	if err := writeNew(retired, b); err != nil {
 		return err
 	}
+	if err := os.Rename(filepath.Join(dir, nextIdentityFile), filepath.Join(dir, identityFile)); err != nil {
+		return err
+	}
+	nextOnDisk = false
 	fmt.Fprintf(out, "wrote %s; the old one is %s\n", filepath.Join(dir, identityFile), filepath.Base(retired))
 	fleet := fmt.Sprintf("fleet: put the new %s where sops holds it and deploy; a host still holding the old one cannot open the state until then. Each peer runs peer keys accept <you> after checking the new key with you over a channel you trust.", identityFile)
 	if steps := unconfirmedSteps(r); len(steps) > 0 {
@@ -263,12 +344,112 @@ func commitRotatedKeys(ctx context.Context, st *store.Store, seed, rotated *keys
 	}
 }
 
+// rotationPrekey is the signed prekey a rotation to newID commits, and
+// whether its card still goes out. A stopped rotation's, from keys.json.next,
+// is announced again: the keys record does not hold it yet, so every session
+// is in force. One the keys record holds under newID already is the stopped
+// rotation's after its commit: its card is out. Otherwise a new one with the
+// next id after held's goes on disk as keys.json.next before the card names
+// it.
+func rotationPrekey(dir string, held *keys.PartyKeys, newID *keys.Identity) (*keys.PartyKeys, bool, error) {
+	path := filepath.Join(dir, nextKeysFile)
+	pending := new(keys.PartyKeys)
+	switch err := readJSON(path, pending); {
+	case err == nil && signedBy(pending, newID):
+		return &keys.PartyKeys{SignedPrekey: pending.SignedPrekey}, true, nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return nil, false, err
+	}
+	if signedBy(held, newID) {
+		return &keys.PartyKeys{SignedPrekey: held.SignedPrekey}, false, nil
+	}
+	pk := &keys.PartyKeys{SignedPrekey: held.SignedPrekey}
+	if err := pk.RotateSignedPrekey(newID); err != nil {
+		return nil, false, err
+	}
+	pk.PreviousSignedPrekey = nil
+	b, err := json.Marshal(pk)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return nil, false, err
+	}
+	return pk, true, nil
+}
+
+// retiredKey is the old identity key's entry on the rotation card, until now
+// unless it carries an until already. The keys record gives it while its
+// signed prekey is the old key's; once a stopped rotation committed the new
+// key's, the card on the state gives it — that card lists the old key.
+func (p *party) retiredKey(ctx context.Context, oldID *keys.Identity, pk *keys.PartyKeys, now time.Time) (card.Key, error) {
+	if signedBy(pk, oldID) {
+		old := card.New(oldID, pk, nil, nil, now).Keys[0]
+		old.Until = &now
+		return old, nil
+	}
+	want := keys.CurveText(oldID.PublicKey())
+	oc, err := p.store.OwnCard(ctx)
+	if err != nil {
+		return card.Key{}, err
+	}
+	if oc.Present() {
+		if c, err := card.Verify(oc.Details, p.root.Public()); err == nil {
+			for _, old := range c.Keys {
+				if old.Identity != want {
+					continue
+				}
+				if old.Until == nil {
+					old.Until = &now
+				}
+				return old, nil
+			}
+		}
+	}
+	return card.Key{}, fmt.Errorf("neither the keys record nor the card on the state carries identity key %s", want)
+}
+
+// signedBy reports whether pk's signed prekey carries id's signature.
+func signedBy(pk *keys.PartyKeys, id *keys.Identity) bool {
+	spk := pk.SignedPrekey
+	return ecc.VerifySignature(id.KeyPair.PublicKey().PublicKey(), spk.KeyPair().PublicKey().Serialize(), spk.Signature())
+}
+
+// reseal copies every record a rotation moves — the roster, the keys and
+// card records, each channel's record and activity — from the old seal to
+// the new one.
+func reseal(ctx context.Context, from, to store.Backend, r *roster.Roster, out io.Writer) error {
+	names := []string{roster.Key, store.KeysKey, store.OwnCardKey}
+	for _, pe := range r.Peers {
+		names = append(names, store.ChannelKey(pe.Channel), status.ActivityKey(pe.Channel))
+	}
+	n := 0
+	for _, name := range names {
+		moved, err := copyRecord(ctx, from, to, name)
+		if err != nil {
+			return fmt.Errorf("re-seal %s: %w", name, err)
+		}
+		if moved {
+			n++
+		}
+	}
+	fmt.Fprintf(out, "state re-sealed under the new identity key: %d records\n", n)
+	return nil
+}
+
 // copyRecord copies one record from the old to the new backend at the same
 // version, so another host's commit between the read and the write refuses
-// and the copy is read again. Absent records are skipped.
+// and the copy is read again. It reports whether the record is on the new
+// backend: absent records are skipped, and one the new backend opens already
+// — a rotation completing a stopped one — stays as it is.
 func copyRecord(ctx context.Context, from, to store.Backend, key string) (bool, error) {
 	for try := 1; ; try++ {
 		data, v, err := from.Load(ctx, key)
+		if errors.Is(err, store.ErrCorrupt) {
+			if moved, _, terr := to.Load(ctx, key); terr == nil && moved != nil {
+				return true, nil
+			}
+		}
 		if err != nil {
 			return false, err
 		}

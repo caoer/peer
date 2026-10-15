@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -277,6 +278,120 @@ func TestIdentityRotateKeepsAConcurrentRestock(t *testing.T) {
 	spk := k.PartyKeys.SignedPrekey
 	if k.PartyKeys.PreviousSignedPrekey != nil || cur.SignedPrekey.ID != spk.ID() || cur.SignedPrekey.Pub != keys.CurveText(spk.KeyPair().PublicKey().PublicKey()) {
 		t.Fatalf("keys record: signed prekey %d (previous held %v), the card announced %d", spk.ID(), k.PartyKeys.PreviousSignedPrekey != nil, cur.SignedPrekey.ID)
+	}
+}
+
+// A state page that fails the keys record's write after the re-seal stops
+// the rotation part way, with the state sealed under the new key: the key is
+// on disk as identity.json.next, so the party still opens the state, and
+// running the rotation again completes it — identity.json is the new key,
+// .next is gone, the keys record carries a signed prekey under the new key,
+// and the guest takes the key and talks to it.
+func TestIdentityRotateCompletesAfterAStateFailure(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	ps := pagestest.New("state-0123456789abcdef", "zt:state-secret")
+	target, err := url.Parse(ps.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	var armed atomic.Bool
+	var keysPuts atomic.Int32
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Armed: the re-seal's copy of the keys record lands, the rotation's
+		// own write of it meets a 503.
+		if armed.Load() && r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/"+store.KeysKey) && keysPuts.Add(1) == 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"unavailable"}`))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	cfg := hostCfg()
+	cfg.State = stateConfig{Page: front.URL, Slug: ps.Slug, Login: ps.Bearer}
+	p := handshake(t, newDir(t, cfg), newDir(t, config{}), base)
+	idPath, nextPath := filepath.Join(p.hostDir, identityFile), filepath.Join(p.hostDir, identityFile+".next")
+	oldIdentity, _ := os.ReadFile(idPath)
+
+	armed.Store(true)
+	code, out, errb := cmd(t, "identity", "rotate", "--dir", p.hostDir, "--yes")
+	armed.Store(false)
+	if code != 1 || !strings.Contains(out, "state re-sealed under the new identity key") {
+		t.Fatalf("rotate with the keys write failing: exit %d\n%s%s", code, out, errb)
+	}
+	// The state opens under the identity the party picks.
+	np, err := openParty(p.hostDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := roster.Load(ctx, np.backend); err != nil || len(r.Peers) != 1 {
+		t.Fatalf("the state after the stopped rotation: %v", err)
+	}
+	next, err := os.ReadFile(nextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(nextPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("identity.json.next: %v %v", fi.Mode(), err)
+	}
+	if b, _ := os.ReadFile(idPath); !bytes.Equal(b, oldIdentity) || bytes.Equal(next, oldIdentity) {
+		t.Fatal("identity.json changed, or identity.json.next is the old key")
+	}
+	if !strings.Contains(errb, "peer identity rotate --yes again") {
+		t.Errorf("the stopped rotation does not say how to complete it: %q", errb)
+	}
+
+	out = mustOK(t, "identity", "rotate", "--dir", p.hostDir, "--yes")
+	if b, _ := os.ReadFile(idPath); !bytes.Equal(b, next) {
+		t.Fatalf("identity.json is not the key identity.json.next held:\n%s", out)
+	}
+	for _, name := range []string{identityFile + ".next", partyKeysFile + ".next"} {
+		if _, err := os.Stat(filepath.Join(p.hostDir, name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s after the rotation completed: %v", name, err)
+		}
+	}
+	retired, _ := filepath.Glob(filepath.Join(p.hostDir, identityFile+".retired-*"))
+	if len(retired) != 1 {
+		t.Fatalf("retired identity files: %v", retired)
+	}
+	if b, _ := os.ReadFile(retired[0]); !bytes.Equal(b, oldIdentity) {
+		t.Fatal("the retired file is not the old identity")
+	}
+	hp, _, _ := channelOf(t, p.hostDir, "ancan")
+	k, err := hp.keys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oc, err := hp.store.OwnCard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := card.Verify(oc.Details, p.hostRoot.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := session.CurrentKey(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spk := k.PartyKeys.SignedPrekey
+	if cur.Identity != keys.CurveText(hp.id.PublicKey()) || cur.SignedPrekey.ID != spk.ID() || cur.SignedPrekey.Pub != keys.CurveText(spk.KeyPair().PublicKey().PublicKey()) {
+		t.Fatalf("keys record: signed prekey %d; the card names %s with signed prekey %d", spk.ID(), cur.Identity, cur.SignedPrekey.ID)
+	}
+
+	// The guest takes the new key; a text flows on a session under it.
+	if out := mustOK(t, "serve", "--dir", p.guestDir, "--once"); !strings.Contains(out, "peer keys accept zt") {
+		t.Fatalf("guest serve on the rotation:\n%s", out)
+	}
+	mustOK(t, "keys", "accept", "--dir", p.guestDir, "zt")
+	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); !strings.Contains(out, "card from ancan pinned") {
+		t.Fatalf("host serve on the guest's new session:\n%s", out)
+	}
+	id, _ := sendOK(t, p.guestDir, "--text", "after the completed rotation", "zt/advisor")
+	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); !strings.Contains(out, "delivered text "+id) {
+		t.Fatalf("host serve:\n%s", out)
 	}
 }
 

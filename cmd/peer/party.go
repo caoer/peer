@@ -134,6 +134,25 @@ func openParty(dir string) (*party, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A rotation that stopped part way left its new key in identity.json.next
+	// (identity.go): once the state opens under that key, it is the party's
+	// until peer identity rotate --yes completes the rotation.
+	next, err := nextIdentity(dir, p.id)
+	if err != nil {
+		return nil, err
+	}
+	if next != nil {
+		nb, err := openBackend(dir, p.cfg, next)
+		if err != nil {
+			return nil, err
+		}
+		switch _, err := roster.Load(context.Background(), nb); {
+		case err == nil:
+			p.id, b = next, nb
+		case !errors.Is(err, store.ErrCorrupt):
+			return nil, err
+		}
+	}
 	p.backend = b
 	p.store = store.New(b, p.id)
 	if p.outbox, err = store.OpenJournal(filepath.Join(dir, outboxDir)); err != nil {
