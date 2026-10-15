@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -204,5 +205,44 @@ func TestAcceptResumesAfterAFailurePastTheToken(t *testing.T) {
 	}
 	if _, ok := records(t, deliverDirOf(hostDir), deliver.Inbox)[id]; !ok {
 		t.Fatalf("%s is not in the host inbox", id)
+	}
+}
+
+// The guest's answer to the host's details card commits the channel, the
+// cursor past that card, before the roster says confirmed. When that commit
+// lands and its answer is lost, the answer never reaches the relay and the
+// roster stays accepted; the next round finishes both: the guest's details
+// card goes out and the guest is confirmed.
+func TestServeGuestConfirmsAfterItsAnswerWasCutShort(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	hostDir, guestDir := newDir(t, hostCfg()), newDir(t, config{})
+	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, "ancan")
+	link, _, _ := strings.Cut(out, "\n")
+	out = mustOK(t, "accept", "--dir", guestDir, "--name", "zt", link)
+	mustOK(t, "confirm", "--dir", hostDir, "--code", codeRE.FindStringSubmatch(out)[1], "ancan")
+
+	var log bytes.Buffer
+	sv, err := openServer(guestDir, "", &log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv.p.store = store.New(landThenFail{sv.p.backend}, sv.p.id)
+	if err := sv.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sv.round(ctx); err == nil {
+		t.Fatalf("guest round: no error, want the lost answer\n%s", log.String())
+	}
+	if _, gch, gpe := channelOf(t, guestDir, "zt"); gpe.State != roster.Accepted || gch.Cursor() < 1 {
+		t.Fatalf("after the lost answer: state %s, cursor %d", gpe.State, gch.Cursor())
+	}
+
+	mustOK(t, "serve", "--dir", guestDir, "--once")
+	if _, _, gpe := channelOf(t, guestDir, "zt"); gpe.State != roster.Confirmed {
+		t.Fatalf("guest state %s after the next round", gpe.State)
+	}
+	if out := mustOK(t, "serve", "--dir", hostDir, "--once"); !strings.Contains(out, "card from ancan pinned") {
+		t.Fatalf("the guest's details card did not reach the host:\n%s", out)
 	}
 }

@@ -255,6 +255,9 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 	if c.parked() {
 		return nil
 	}
+	if err := c.finishConfirm(ctx); err != nil {
+		fmt.Fprintf(sv.out, "%s: not confirmed yet: %v\n", pe.Name, err)
+	}
 	if err := c.announce(ctx); err != nil {
 		fmt.Fprintf(sv.out, "%s: card not sent: %v\n", pe.Name, err)
 	}
@@ -335,6 +338,56 @@ func (c *channelServe) parked() bool {
 	}
 	fmt.Fprint(c.sv.out, holdLine(c.pe.Name, pc, seq))
 	return true
+}
+
+// finishConfirm finishes a guest's answer to the host's details card that an
+// earlier round cut short (receiveCard). That answer commits the channel —
+// the cursor past the card — and then writes the roster; a crash, a failed
+// roster write or a commit whose answer was lost between the two leaves the
+// channel accepted, and no later pull brings the card again. A message from
+// the host that opened here is what shows it: the host has a session only
+// from its own confirm on, and its details card is the first thing it sends
+// in it. The guest's details card goes out again — the answer cut short may
+// never have reached the relay, and the host pins a repeat as it pinned the
+// first — and the roster says confirmed; a failure in either leaves the
+// channel accepted for the next round to finish.
+func (c *channelServe) finishConfirm(ctx context.Context) error {
+	if c.pe.Side != roster.Guest || c.pe.State != roster.Accepted || !c.ch.Received() {
+		return nil
+	}
+	answer := ""
+	if own, announced, ok := c.sv.ownCard(ctx); !ok {
+		answer = "; yours was not sent (no card on the state): peer card publish puts it there and serve sends it"
+	} else {
+		if err := c.sv.p.publish(ctx, c.pe, own, announced, c.sv.out); err != nil {
+			return err
+		}
+		if err := c.load(ctx); err != nil {
+			return err
+		}
+	}
+	if err := c.confirm(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.sv.out, "confirmed %s: their messages open here, so their side is confirmed%s\n", c.pe.Name, answer)
+	return nil
+}
+
+// confirm marks the guest's roster entry confirmed.
+func (c *channelServe) confirm(ctx context.Context) error {
+	err := roster.Update(ctx, c.sv.p.backend, func(r *roster.Roster) error {
+		cur := r.ByName(c.pe.Name)
+		if cur == nil || cur.Channel != c.pe.Channel {
+			return fmt.Errorf("the roster entry for %s changed under this serve", c.pe.Name)
+		}
+		cur.State = roster.Confirmed
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	c.pe.State = roster.Confirmed
+	return nil
 }
 
 // announce sends this party's card on a confirmed channel whose last card
@@ -764,7 +817,8 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 	// pin on both sides). Send commits the channel — the pin, the cursor,
 	// the ratchet — before the put. A host without the root key (it lives
 	// off the fleet) pins and confirms without answering; its details card
-	// goes out with peer card publish.
+	// goes out with peer card publish. Anything that cuts this short once the
+	// commit landed is finished by the next round's finishConfirm.
 	answer := ""
 	if own, announced, ok := c.sv.ownCard(ctx); !ok {
 		if err := c.commit(ctx, rec); err != nil {
@@ -788,18 +842,9 @@ func (c *channelServe) receiveCard(ctx context.Context, s *session.Session, rec 
 		}
 		c.commitKeys(ctx, rec)
 	}
-	err = roster.Update(ctx, c.sv.p.backend, func(r *roster.Roster) error {
-		cur := r.ByName(c.pe.Name)
-		if cur == nil || cur.Channel != c.pe.Channel {
-			return fmt.Errorf("the roster entry for %s changed under this serve", c.pe.Name)
-		}
-		cur.State = roster.Confirmed
-		return nil
-	})
-	if err != nil {
+	if err := c.confirm(ctx); err != nil {
 		return err
 	}
-	c.pe.State = roster.Confirmed
 	if answer == "" {
 		answer = "yours went out"
 	}

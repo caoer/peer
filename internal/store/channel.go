@@ -170,6 +170,11 @@ func (c *Channel) MarkSeen(id string, seq int64) {
 	}
 }
 
+// Received reports whether a message from the peer has opened on this
+// channel: the seen set holds an id. The set drops its oldest ids past
+// MaxSeen and is never emptied.
+func (c *Channel) Received() bool { return len(c.rec.Seen) > 0 }
+
 // Root is the peer's pinned root public key, nil before PinRoot.
 func (c *Channel) Root() ed25519.PublicKey {
 	if c.rec.Root == nil {
