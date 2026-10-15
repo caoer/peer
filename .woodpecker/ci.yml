@@ -1,5 +1,5 @@
 # The test suite, run on every push to any branch and every pull request.
-# It runs tests only; releases are built elsewhere (U19).
+# It runs tests only; releases are built by scripts/release-build.sh.
 
 # Every step is a container image: keep the lane off the darwin local-backend
 # agent, which execs an image name as a shell binary and dies with no log.
@@ -10,12 +10,11 @@ when:
   - event: push
   - event: pull_request
 
-# Clone with our own non-rotating read PAT (repo secret forgejo_clone_token;
-# sops home-wiki-secrets infra/svc/common.sops.yaml,
-# forgejo_woodpecker_clone_token), not the server-stamped netrc, which Forgejo
-# expires hourly so a clone that starts late in the shared queue dies with
-# exit 128. `environment:` (not settings:) is the mechanism — same block as
-# ccc-pages and ccc-statusd.
+# Clone with our own non-rotating read token (repo secret forgejo_clone_token),
+# not the server-stamped netrc, which Forgejo expires hourly so a clone that
+# starts late in the shared queue dies with exit 128. Forgejo takes the user
+# from the token, so the netrc username is not checked. `environment:` (not
+# settings:) is the mechanism.
 clone:
   - name: clone
     image: docker.io/woodpeckerci/plugin-git:2.9.2
@@ -24,7 +23,7 @@ clone:
       PLUGIN_TAGS: "false"
       PLUGIN_RECURSIVE: "false"
       CI_NETRC_MACHINE: git.0xdao.app
-      CI_NETRC_USERNAME: caoer115
+      CI_NETRC_USERNAME: token
       CI_NETRC_PASSWORD:
         from_secret: forgejo_clone_token
 
