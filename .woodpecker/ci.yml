@@ -1,0 +1,48 @@
+# The test suite, run on every push to any branch and every pull request.
+# It runs tests only; releases are built elsewhere (U19).
+
+# Every step is a container image: keep the lane off the darwin local-backend
+# agent, which execs an image name as a shell binary and dies with no log.
+labels:
+  platform: linux/amd64
+
+when:
+  - event: push
+  - event: pull_request
+
+# Clone with our own non-rotating read PAT (repo secret forgejo_clone_token;
+# sops home-wiki-secrets infra/svc/common.sops.yaml,
+# forgejo_woodpecker_clone_token), not the server-stamped netrc, which Forgejo
+# expires hourly so a clone that starts late in the shared queue dies with
+# exit 128. `environment:` (not settings:) is the mechanism — same block as
+# ccc-pages and ccc-statusd.
+clone:
+  - name: clone
+    image: docker.io/woodpeckerci/plugin-git:2.9.2
+    environment:
+      PLUGIN_PARTIAL: "false"
+      PLUGIN_TAGS: "false"
+      PLUGIN_RECURSIVE: "false"
+      CI_NETRC_MACHINE: git.0xdao.app
+      CI_NETRC_USERNAME: caoer115
+      CI_NETRC_PASSWORD:
+        from_secret: forgejo_clone_token
+
+steps:
+  - name: go-test
+    # The exact toolchain go.mod names; GOTOOLCHAIN=local fails loud instead of
+    # downloading another one when the two drift apart.
+    image: golang:1.26.5-bookworm
+    environment:
+      GOTOOLCHAIN: local
+    commands:
+      - go version
+      # Unprivileged: root writes through permission bits, so a test asserting
+      # that an unwritable path is refused would pass vacuously under uid 0.
+      - useradd -m ci && chown -R ci "$CI_WORKSPACE"
+      # The package list the suite must cover; every line of it reappears in
+      # go test's output as ok / FAIL / [no test files].
+      - runuser -u ci -- env HOME=/home/ci PATH="$PATH" GOTOOLCHAIN=local go list ./...
+      - runuser -u ci -- env HOME=/home/ci PATH="$PATH" GOTOOLCHAIN=local go vet ./...
+      # PEER_LIVE_RELAY stays unset: internal/relay/live_test.go skips without it.
+      - runuser -u ci -- env HOME=/home/ci PATH="$PATH" GOTOOLCHAIN=local go test ./...
