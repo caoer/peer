@@ -98,11 +98,21 @@ commands:
             over its confirmed channel (serve runs the rest: their accept,
             the mint, their room card, the roster record, the token), list
             the members, each marked you, matches your channel or vouched
-            by the admin
+            by the admin; remove a member (the roster record, then the
+            revoke), leave (your leave record, then your revoke; the last
+            admin hands over or closes), hand the room to a member (the
+            handover record, its admin token over the channel), close it
+            (everyone removed and revoked, the state dropped), or rotate
+            your seal key now (serve rotates it daily)
             room create [--dir D] [--relay URL] [--login USER:TOKEN]
                         [--add admins|members] <name>
             room add [--dir D] [--read] <room> <peer>
             room members [--dir D] <room>
+            room remove [--dir D] <room> <peer | party id | idx>
+            room leave [--dir D] <room>
+            room handover [--dir D] <room> <peer>
+            room close [--dir D] <room>
+            room rotate [--dir D] <room>
   version   print the version
 
 the card any command sends is the one on the state (record "card"), signed by

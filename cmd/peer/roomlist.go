@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/caoer/peer/internal/store"
 )
@@ -28,7 +29,17 @@ const (
 	stageSeated roomStage = "seated"
 	// stageJoined: the party holds a token and pulls the room.
 	stageJoined roomStage = "joined"
+	// stageLeft, stageRemoved, stageClosed: the party is out of the room —
+	// by its own leave, by an admin's removal, or by its own close. The
+	// state is dropped and pulls stop; the name stays reserved, and a new
+	// invite to the same room seats the party afresh.
+	stageLeft    roomStage = "left"
+	stageRemoved roomStage = "removed"
+	stageClosed  roomStage = "closed"
 )
+
+// gone reports whether the stage is one the party is out of the room at.
+func (s roomStage) gone() bool { return s == stageLeft || s == stageRemoved || s == stageClosed }
 
 // addStage is how far an add this party runs as the adder has gone.
 type addStage string
@@ -52,6 +63,20 @@ type pendingAdd struct {
 	From    int64    `json:"from,omitempty"`
 }
 
+// pendingHandover is one handover the admin ran: the member's channel, its
+// idx, and from the grant on the admin-flagged token, kept so a re-run sends
+// the stored token again and never grants a second one.
+type pendingHandover struct {
+	Peer    string `json:"peer"`
+	Channel string `json:"channel"`
+	Idx     uint16 `json:"idx"`
+	// Recorded is set once the handover record landed: the grant follows.
+	Recorded bool   `json:"recorded,omitempty"`
+	Token    string `json:"token,omitempty"`
+	// Sent is set once the token went out over the channel; a re-run clears it.
+	Sent bool `json:"sent,omitempty"`
+}
+
 // roomRef is one room as this party sees it: a local name, the relay and
 // this party's token on it, and the joins and adds in flight. The room's
 // roster, keys, cursor and counters are the room state (room.State).
@@ -63,6 +88,10 @@ type roomRef struct {
 	Token string    `json:"token,omitempty"`
 	Idx   uint16    `json:"idx"`
 	From  int64     `json:"from"`
+	// Read is a read member: it pulls and puts nothing, so its room card and
+	// its leave go over its channel (the room-token's role, or the relay's
+	// read_only on a first put).
+	Read bool `json:"read,omitempty"`
 	// Via is the channel the invite came on: only it may seat this party
 	// and hand it the token.
 	Via string `json:"via,omitempty"`
@@ -70,6 +99,24 @@ type roomRef struct {
 	// the state from it.
 	Invite *roomInvite  `json:"invite,omitempty"`
 	Adds   []pendingAdd `json:"adds,omitempty"`
+	// Removals are the idxs whose removal record landed and whose revoke
+	// has not: serve revokes them each round until the relay answers.
+	Removals  []uint16          `json:"removals,omitempty"`
+	Handovers []pendingHandover `json:"handovers,omitempty"`
+	// CardSent is when this party's room card last went over a channel to
+	// an admin (a read member's rotation, an identity change); it goes again
+	// after room.RotateEvery when the admin's roster entry has not folded.
+	CardSent time.Time `json:"cardSent,omitempty"`
+}
+
+// handover is the pending handover over channel, nil when none.
+func (r *roomRef) handover(channel string) *pendingHandover {
+	for i := range r.Handovers {
+		if r.Handovers[i].Channel == channel {
+			return &r.Handovers[i]
+		}
+	}
+	return nil
 }
 
 // add is the pending add over channel, nil when none.

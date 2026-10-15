@@ -110,13 +110,15 @@ func (s *State) Fold(rec Verified, ch Channels) Result {
 
 // Seed folds the roster a room-invite carries into a newcomer's fresh state
 // — the inviter's word, bounded by rule 4 and each entry's signatures as a
-// roster record is, with no author to authorize — and admits the admin set
-// the invite names (idx 0 is in it already).
+// roster record is, with no author to authorize — and takes the admin set
+// the invite names as the starting one: record #0 and the handovers before
+// the newcomer's from are below it, and a creator that left is out of it.
 func (s *State) Seed(entries []Entry, admins []uint16, ch Channels, at time.Time) Result {
 	var res Result
 	for _, e := range entries {
 		s.applyEntry(e, ch, at, true, &res)
 	}
+	s.admins = nil
 	for _, a := range admins {
 		if s.admit(a) {
 			res.Admitted = append(res.Admitted, a)

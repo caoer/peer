@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,10 +25,11 @@ import (
 	"github.com/caoer/peer/internal/store"
 )
 
-// cmdRoom runs the room commands: create, add, members.
+// cmdRoom runs the room commands: create, add, members, remove, leave,
+// handover, close, rotate.
 func cmdRoom(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: peer room create|add|members [flags] ...")
+		fmt.Fprintln(stderr, "usage: peer room create|add|members|remove|leave|handover|close|rotate [flags] ...")
 		return 2
 	}
 	switch args[0] {
@@ -37,8 +39,10 @@ func cmdRoom(args []string, stdout, stderr io.Writer) int {
 		return cmdRoomAdd(args[1:], stdout, stderr)
 	case "members":
 		return cmdRoomMembers(args[1:], stdout, stderr)
+	case "remove", "leave", "handover", "close", "rotate":
+		return cmdRoomMember(args[0], args[1:], stdout, stderr)
 	}
-	fmt.Fprintf(stderr, "peer room: unknown command %q (create, add, members)\n", args[0])
+	fmt.Fprintf(stderr, "peer room: unknown command %q (create, add, members, remove, leave, handover, close, rotate)\n", args[0])
 	return 2
 }
 
@@ -311,6 +315,10 @@ func runRoomMembers(ctx context.Context, dir, name string, out io.Writer) error 
 		fmt.Fprintf(out, "room %s (%s): invited; waiting for the adder's seat\n", ref.Name, ref.ID)
 		return nil
 	}
+	if ref.Stage.gone() {
+		fmt.Fprintf(out, "room %s (%s): %s\n", ref.Name, ref.ID, ref.Stage)
+		return nil
+	}
 	st, err := room.Load(ctx, p.backend, ref.ID)
 	if err != nil {
 		return err
@@ -402,7 +410,9 @@ type roomConn struct {
 	rc  *relay.Client
 	st  *room.State
 	ch  room.Channels
-	out io.Writer
+	// names is each confirmed channel's peer name by party id (channelRoots).
+	names map[string]string
+	out   io.Writer
 	// sv delivers each opened record of a v1 kind (roomdeliver.go): serve's
 	// own, or one a command's pull opens on first use — a pull that passes a
 	// record delivers it, whoever runs it.
@@ -416,11 +426,11 @@ func (p *party) openRoom(ctx context.Context, ref roomRef, out io.Writer) (*room
 	if err != nil {
 		return nil, err
 	}
-	ch, _, err := p.channelRoots(ctx)
+	ch, names, err := p.channelRoots(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &roomConn{p: p, ref: ref, rc: relay.New(ref.Relay, nil), st: st, ch: ch, out: out}, nil
+	return &roomConn{p: p, ref: ref, rc: relay.New(ref.Relay, nil), st: st, ch: ch, names: names, out: out}, nil
 }
 
 func (c *roomConn) reload(ctx context.Context) (err error) {
@@ -447,6 +457,10 @@ func (c *roomConn) pull(ctx context.Context) error {
 	}
 	for {
 		page, err := c.rc.PullRoom(ctx, c.ref.ID, c.ref.Token, c.st.Cursor())
+		if errors.Is(err, relay.ErrRevoked) {
+			// Removed by an admin, or the room closed: pulls stop here.
+			return c.gone(ctx, stageRemoved)
+		}
 		if err != nil {
 			return fmt.Errorf("room %s: pull: %w", c.ref.Name, err)
 		}
@@ -583,10 +597,60 @@ func (c *roomConn) receive(rec relay.RoomRecord) error {
 	}
 	c.st.MarkSeen(m.ID, rec.Seq)
 	if room.MembershipKind(m.Kind) {
-		c.report(rec.Seq, c.st.Fold(room.Verified{Seq: rec.Seq, Idx: h.Idx, Kind: m.Kind, Body: m.Body, At: h.At}, c.ch))
+		res := c.st.Fold(room.Verified{Seq: rec.Seq, Idx: h.Idx, Kind: m.Kind, Body: m.Body, At: h.At}, c.ch)
+		c.report(rec.Seq, res)
+		if slices.Contains(res.Updated, c.st.Idx()) {
+			// An admin's roster entry carrying this party's own card — a
+			// read member's rotation, an identity change — is where the
+			// replaced seal key's roomcard landed (rule 3).
+			c.st.Posted(rec.Seq)
+		}
+		if res.Folded() && (m.Kind == room.KindRoster || m.Kind == room.KindLeave) {
+			// The membership notice reaches the agents as one record of
+			// kind roster (contract § Kinds); handover and roomcard fold alone.
+			return c.deliverRecord(rec.Seq, c.notice(m, res))
+		}
 		return nil
 	}
 	return c.deliverRecord(rec.Seq, m)
+}
+
+// notice is the roster delivery record for a folded roster or leave record:
+// the record's id, writer and time, kind roster, to nobody (the whole room),
+// and a body in plain words — who joined, renewed its card or left, by idx
+// and party (with the peer name where this host holds its channel), and the
+// members as they now stand.
+func (c *roomConn) notice(m *roomMessage, res room.Result) *roomMessage {
+	who := func(idx uint16, party string) string {
+		s := fmt.Sprintf("idx %d %s", idx, party)
+		switch {
+		case idx == c.st.Idx():
+			s += " (you)"
+		case c.names[party] != "":
+			s += " (" + c.names[party] + ")"
+		}
+		return s
+	}
+	var lines []string
+	for _, idx := range res.Joined {
+		if mem := c.st.Member(idx); mem != nil {
+			lines = append(lines, who(idx, mem.Party)+" joined")
+		}
+	}
+	for _, idx := range res.Updated {
+		if mem := c.st.Member(idx); mem != nil {
+			lines = append(lines, who(idx, mem.Party)+" renewed its room card")
+		}
+	}
+	for _, idx := range res.Left {
+		lines = append(lines, fmt.Sprintf("idx %d left", idx))
+	}
+	var members []string
+	for _, mem := range c.st.Members() {
+		members = append(members, who(mem.Idx, mem.Party))
+	}
+	lines = append(lines, fmt.Sprintf("members of room %s now: %s", c.ref.ID, strings.Join(members, ", ")))
+	return &roomMessage{V: 1, ID: m.ID, From: m.From, Kind: deliver.KindRoster, At: m.At, Body: []byte(strings.Join(lines, "\n")), Group: c.ref.ID}
 }
 
 // skip reports a record serve sets aside, or reads on past, and counts it in
@@ -634,6 +698,21 @@ func (c *roomConn) report(seq int64, res room.Result) {
 	}
 }
 
+// membershipPost is one membership record to put: its kind and body, whether
+// the put bumps the membership version (a removal record), and prep, which
+// runs on the state at head before the fold — the rotation's key swap — and
+// returns the body to post, or done when the state at head says the post is
+// moot (another host rotated first).
+type membershipPost struct {
+	kind string
+	body []byte
+	bump bool
+	prep func(st *room.State) (body []byte, done bool, err error)
+}
+
+// errMoot is a post the state at head made unnecessary.
+var errMoot = errors.New("nothing to post")
+
 // postMembership puts a membership record of this party's: to head first,
 // then the record folded into the state and committed with its counter
 // before the put (contract: own records never come back from the relay),
@@ -642,9 +721,26 @@ func (c *roomConn) report(seq int64, res room.Result) {
 // cap comes back with the member count. An error wrapping errQueued says the
 // record is committed and waits in the room outbox.
 func (c *roomConn) postMembership(ctx context.Context, kind string, body []byte) (int64, room.Result, error) {
+	return c.post(ctx, membershipPost{kind: kind, body: body})
+}
+
+// post is postMembership with the record's bump flag and prep step.
+func (c *roomConn) post(ctx context.Context, mp membershipPost) (int64, room.Result, error) {
+	kind := mp.kind
 	for try := 1; ; try++ {
 		if err := c.pull(ctx); err != nil && !errors.Is(err, errWait) {
 			return 0, room.Result{}, err
+		}
+		body := mp.body
+		if mp.prep != nil {
+			var done bool
+			var err error
+			if body, done, err = mp.prep(c.st); err != nil {
+				return 0, room.Result{}, err
+			}
+			if done {
+				return 0, room.Result{}, errMoot
+			}
 		}
 		m, err := newRoomMessage(c.p.partyID(), c.ref.ID, kind, body)
 		if err != nil {
@@ -674,10 +770,46 @@ func (c *roomConn) postMembership(ctx context.Context, kind string, body []byte)
 			}
 			return 0, res, err
 		}
-		seq, err := c.send(ctx, m, ctr)
+		seq, err := c.sendEntry(ctx, m, ctr, mp.bump)
 		return seq, res, err
 	}
 }
+
+// gone takes this party out of the room: the rooms record marks the stage —
+// left, removed or closed — and forgets the token, the room state is
+// dropped (its keys with it), and this host's waiting records for the room
+// go with it. It returns errGone, which serve prints and goes on from.
+func (c *roomConn) gone(ctx context.Context, stage roomStage) error {
+	err := updateRooms(ctx, c.p.backend, func(l *roomList) error {
+		if r := l.byID(c.ref.ID); r != nil && !r.Stage.gone() {
+			r.Stage, r.Token, r.Adds, r.Removals, r.Handovers = stage, "", nil, nil, nil
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for try := 1; ; try++ {
+		err := c.st.Drop(ctx)
+		if err == nil || !errors.Is(err, store.ErrConflict) || try >= sendTries {
+			if err != nil {
+				fmt.Fprintf(c.out, "room %s: the room state is not dropped: %v\n", c.ref.Name, err)
+			}
+			break
+		}
+		if err := c.reload(ctx); err != nil {
+			break
+		}
+	}
+	c.ref.Stage, c.ref.Token = stage, ""
+	if l, err := loadRooms(ctx, c.p.backend); err == nil {
+		c.p.dropLeftRooms(l, io.Discard)
+	}
+	return fmt.Errorf("room %s: %w: %s", c.ref.Name, errGone, stage)
+}
+
+// errGone is a room this party is out of: pulls stop, the state is dropped.
+var errGone = errors.New("you are out of the room")
 
 // putTries bounds the re-seals after a 409 stale_membership.
 const putTries = 3

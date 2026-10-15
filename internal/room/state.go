@@ -104,8 +104,12 @@ func newMember(e Entry, rc *Card) *Member {
 }
 
 type stateRecord struct {
-	V          int               `json:"v"`
-	Room       string            `json:"room"`
+	V    int    `json:"v"`
+	Room string `json:"room"`
+	// Gone marks a tombstone (Drop): the party left or was removed, or the
+	// room closed. Load answers ErrNoRoom for it, and a fresh state's Commit
+	// takes its version.
+	Gone       bool              `json:"gone,omitempty"`
 	Idx        uint16            `json:"idx"`
 	Add        Add               `json:"add"`
 	Membership int64             `json:"membership"`
@@ -211,6 +215,9 @@ func Load(ctx context.Context, b store.Backend, id string) (*State, error) {
 	if rec.V != recordVersion {
 		return nil, fmt.Errorf("%w: %s: record version %d, want %d", store.ErrCorrupt, key, rec.V, recordVersion)
 	}
+	if rec.Gone {
+		return nil, fmt.Errorf("%w: %s (left)", ErrNoRoom, id)
+	}
 	if rec.Room != id || !rec.Add.valid() {
 		return nil, fmt.Errorf("%w: %s: room %q add %q", store.ErrCorrupt, key, rec.Room, rec.Add)
 	}
@@ -295,11 +302,48 @@ func (s *State) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: %d bytes, cap %d", ErrCap, n, MaxSealed)
 	}
 	v, err := s.b.Store(ctx, Key(s.id), data, s.version)
+	if errors.Is(err, store.ErrConflict) && s.version == 0 {
+		// A fresh state over a tombstone: the party is seated again after
+		// it left, and the record is its own to take.
+		if tv, gone := tombstone(ctx, s.b, s.id); gone {
+			v, err = s.b.Store(ctx, Key(s.id), data, tv)
+		}
+	}
 	if err != nil {
 		return err
 	}
 	s.version = v
 	return nil
+}
+
+// Drop replaces the record with a tombstone at the next version: the party
+// left or was removed, or the room closed, and its keys and roster are not
+// kept. Load answers ErrNoRoom from then on; a fresh state's Commit takes the
+// tombstone's place. Another host's version refuses with store.ErrConflict.
+func (s *State) Drop(ctx context.Context) error {
+	data, err := json.Marshal(stateRecord{V: recordVersion, Room: s.id, Gone: true})
+	if err != nil {
+		return err
+	}
+	v, err := s.b.Store(ctx, Key(s.id), data, s.version)
+	if err != nil {
+		return err
+	}
+	s.version = v
+	return nil
+}
+
+// tombstone reports whether the room's record is a tombstone, and its version.
+func tombstone(ctx context.Context, b store.Backend, id string) (int64, bool) {
+	data, v, err := b.Load(ctx, Key(id))
+	if err != nil || data == nil {
+		return 0, false
+	}
+	var rec stateRecord
+	if json.Unmarshal(data, &rec) != nil || !rec.Gone {
+		return 0, false
+	}
+	return v, true
 }
 
 // ID is the room id.

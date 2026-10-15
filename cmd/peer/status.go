@@ -243,12 +243,19 @@ func runRoomStatus(ctx context.Context, dir string) ([]string, error) {
 		case stageSeated:
 			out = append(out, fmt.Sprintf("room %s (%s): seated at idx %d, waiting for the room token", ref.Name, ref.ID, ref.Idx))
 			continue
+		case stageLeft, stageRemoved, stageClosed:
+			out = append(out, fmt.Sprintf("room %s (%s): %s", ref.Name, ref.ID, ref.Stage))
+			continue
 		}
 		st, err := room.Load(ctx, p.backend, ref.ID)
 		if err != nil {
 			return nil, fmt.Errorf("room %s: %w", ref.Name, err)
 		}
-		line := fmt.Sprintf("room %s (%s)  idx %d  %d members  cursor #%d  dropped %d  reported %d", ref.Name, ref.ID, st.Idx(), len(st.Members()), st.Cursor(), st.Dropped(), st.Reported())
+		role := ""
+		if ref.Read {
+			role = " (read)"
+		}
+		line := fmt.Sprintf("room %s (%s)  idx %d%s  %d members  cursor #%d  dropped %d  reported %d", ref.Name, ref.ID, st.Idx(), role, len(st.Members()), st.Cursor(), st.Dropped(), st.Reported())
 		if n := p.waiting(ref.ID); n > 0 {
 			line += fmt.Sprintf("  %d waiting in the room outbox", n)
 		}

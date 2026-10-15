@@ -114,7 +114,7 @@ func TestRoomSendServeBothWays(t *testing.T) {
 		mustOK(t, "serve", "--dir", d, "--once")
 	}
 	for _, d := range []string{tr.a, tr.b, tr.c} {
-		in := records(t, deliverDirOf(d), deliver.Inbox)
+		in := withoutRoster(t, records(t, deliverDirOf(d), deliver.Inbox))
 		if len(in) != 2 {
 			t.Fatalf("%s holds %d records, want the other two's", parties[d], len(in))
 		}
@@ -155,7 +155,7 @@ func TestRoomSendSubset(t *testing.T) {
 	if strings.Contains(outC, "gap") || strings.Contains(outC, "step back") {
 		t.Fatalf("C reported the subset record:\n%s", outC)
 	}
-	in := records(t, deliverDirOf(tr.c), deliver.Inbox)
+	in := withoutRoster(t, records(t, deliverDirOf(tr.c), deliver.Inbox))
 	if _, ok := in[bob]; ok || len(in) != 2 || in[all1] == nil || in[all2] == nil {
 		t.Fatalf("C holds %d records (bob's %v)", len(in), in[bob] != nil)
 	}
@@ -165,7 +165,7 @@ func TestRoomSendSubset(t *testing.T) {
 	}
 
 	mustOK(t, "serve", "--dir", tr.b, "--once")
-	in = records(t, deliverDirOf(tr.b), deliver.Inbox)
+	in = withoutRoster(t, records(t, deliverDirOf(tr.b), deliver.Inbox))
 	if len(in) != 3 {
 		t.Fatalf("B holds %d records, want 3", len(in))
 	}
@@ -213,7 +213,7 @@ func TestRoomReplayRejected(t *testing.T) {
 	if !strings.Contains(out, "step back") || strings.Contains(out, "delivered") {
 		t.Fatalf("B's serve of the replay:\n%s", out)
 	}
-	if in := records(t, deliverDirOf(tr.b), deliver.Inbox); len(in) != 1 || in[id] == nil {
+	if in := withoutRoster(t, records(t, deliverDirOf(tr.b), deliver.Inbox)); len(in) != 1 || in[id] == nil {
 		t.Fatalf("B holds %d records", len(in))
 	}
 	if _, _, bst := roomOf(t, tr.b, tr.bcRoom); bst.Reported() != 1 {
@@ -345,7 +345,7 @@ func TestRoomOutboxReplay(t *testing.T) {
 	if strings.Contains(out, "gap") || strings.Contains(out, "step back") {
 		t.Fatalf("B reported a counter break:\n%s", out)
 	}
-	in := records(t, deliverDirOf(tr.b), deliver.Inbox)
+	in := withoutRoster(t, records(t, deliverDirOf(tr.b), deliver.Inbox))
 	for _, id := range []string{first, second, third} {
 		if in[id] == nil {
 			t.Fatalf("B lacks %s; holds %d", id, len(in))

@@ -65,11 +65,17 @@ func permanentRoomPut(err error) bool {
 // so a receiver's counter gap names a record that never landed. It returns
 // m's seq; an error wrapping errQueued says m waits in the outbox.
 func (c *roomConn) send(ctx context.Context, m *roomMessage, ctr uint64) (int64, error) {
+	return c.sendEntry(ctx, m, ctr, false)
+}
+
+// sendEntry is send with the entry's bump flag: a removal record bumps the
+// membership version with its put, however often the put is retried.
+func (c *roomConn) sendEntry(ctx context.Context, m *roomMessage, ctr uint64, bump bool) (int64, error) {
 	plain, err := json.Marshal(m)
 	if err != nil {
 		return 0, err
 	}
-	e := &store.Entry{ID: m.ID, Channel: c.ref.ID, Seq: int64(ctr), Type: m.Kind, Body: plain}
+	e := &store.Entry{ID: m.ID, Channel: c.ref.ID, Seq: int64(ctr), Type: m.Kind, Body: plain, Bump: bump}
 	if err := c.p.roomOutbox.Add(e); err != nil {
 		return 0, fmt.Errorf("room %s: ctr %d is committed and the room outbox did not take the record: %w", c.ref.Name, ctr, err)
 	}
@@ -144,7 +150,7 @@ func (c *roomConn) putEntry(ctx context.Context, e *store.Entry) (int64, error) 
 		if err != nil {
 			return 0, err
 		}
-		rcpt, err := c.rc.PutRecord(ctx, c.ref.ID, c.ref.Token, b, c.st.Membership(), false)
+		rcpt, err := c.rc.PutRecord(ctx, c.ref.ID, c.ref.Token, b, c.st.Membership(), e.Bump)
 		if err == nil {
 			c.landed(ctx, e, rcpt)
 			return rcpt.Seq, nil
@@ -162,12 +168,22 @@ func (c *roomConn) putEntry(ctx context.Context, e *store.Entry) (int64, error) 
 }
 
 // landed records what a put's answer says: the membership version, the seq
-// of an own roomcard (rule 3 reads it before a replaced seal key retires)
-// and, for a roster record, the adds it carried — their token goes out next.
+// of an own roomcard — or of a roster entry carrying this party's own card
+// (rule 3 reads it before a replaced seal key retires) — and, for a roster
+// record, the adds it carried, whose token goes out next, and the removals,
+// whose revoke follows.
 func (c *roomConn) landed(ctx context.Context, e *store.Entry, rcpt relay.RoomReceipt) {
+	var body room.RosterBody
+	if e.Type == room.KindRoster {
+		var m roomMessage
+		if json.Unmarshal(e.Body, &m) != nil || json.Unmarshal(m.Body, &body) != nil {
+			body = room.RosterBody{}
+		}
+	}
+	own := slices.ContainsFunc(body.Members, func(en room.Entry) bool { return en.Idx == c.st.Idx() })
 	for try := 1; ; try++ {
 		c.st.ObserveMembership(rcpt.Membership)
-		if e.Type == room.KindRoomCard {
+		if e.Type == room.KindRoomCard || own {
 			c.st.Posted(rcpt.Seq)
 		}
 		err := c.st.Commit(ctx)
@@ -183,19 +199,23 @@ func (c *roomConn) landed(ctx context.Context, e *store.Entry, rcpt relay.RoomRe
 			break
 		}
 	}
-	if e.Type == room.KindRoster {
-		c.markRostered(ctx, e)
+	if len(body.Members) > 0 || len(body.Removed) > 0 {
+		c.markRostered(ctx, body)
+	}
+	if e.Type == room.KindHandover {
+		var m roomMessage
+		var h room.HandoverBody
+		if json.Unmarshal(e.Body, &m) == nil && json.Unmarshal(m.Body, &h) == nil {
+			c.markHandedOver(ctx, h.Idx)
+		}
 	}
 }
 
-// markRostered moves the adds a landed roster record carried to rostered:
-// rule 2 lets their token go out now (finishAdds).
-func (c *roomConn) markRostered(ctx context.Context, e *store.Entry) {
-	var m roomMessage
-	var body room.RosterBody
-	if json.Unmarshal(e.Body, &m) != nil || json.Unmarshal(m.Body, &body) != nil || len(body.Members) == 0 {
-		return
-	}
+// markRostered records what a landed roster record did on the rooms record:
+// the adds it carried move to rostered — rule 2 lets their token go out now
+// (finishAdds) — and the idxs it removed wait for their revoke
+// (finishRemovals).
+func (c *roomConn) markRostered(ctx context.Context, body room.RosterBody) {
 	err := updateRooms(ctx, c.p.backend, func(l *roomList) error {
 		r := l.byID(c.ref.ID)
 		if r == nil {
@@ -207,10 +227,15 @@ func (c *roomConn) markRostered(ctx context.Context, e *store.Entry) {
 				a.Stage = addRostered
 			}
 		}
+		for _, idx := range body.Removed {
+			if !slices.Contains(r.Removals, idx) {
+				r.Removals = append(r.Removals, idx)
+			}
+		}
 		return nil
 	})
 	if err != nil {
-		fmt.Fprintf(c.out, "room %s: the roster record landed and its adds are not marked: %v\n", c.ref.Name, err)
+		fmt.Fprintf(c.out, "room %s: the roster record landed and the rooms record does not say so: %v\n", c.ref.Name, err)
 	}
 }
 
@@ -254,7 +279,12 @@ func (p *party) finishAdds(ctx context.Context, ref roomRef, out io.Writer) {
 func (c *roomConn) seal(m *roomMessage, plain []byte, ctr uint64) ([]byte, error) {
 	to := c.recipients(m)
 	if len(to) == 0 {
-		return nil, fmt.Errorf("%w: nobody its to names is in room %s", errUnputtable, c.ref.Name)
+		if m.Kind != room.KindLeave {
+			return nil, fmt.Errorf("%w: nobody its to names is in room %s", errUnputtable, c.ref.Name)
+		}
+		// The admin's own leave after a close has no reader left: it is on
+		// the wire for the relay's log, sealed to its own idx.
+		to = []sealed.Recipient{{Idx: c.st.Idx(), Key: c.st.SealKey().PublicKey()}}
 	}
 	h := sealed.Header{Room: c.ref.ID, Idx: c.st.Idx(), Ctr: ctr, At: m.At}
 	b, err := sealed.Seal(h, plain, to, c.st.SignKey())
@@ -397,10 +427,12 @@ func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []str
 		return nil, err
 	}
 	ref := l.byName(name)
-	if ref == nil {
+	switch {
+	case ref == nil:
 		return nil, fmt.Errorf("no room named %s", name)
-	}
-	if ref.Stage != stageJoined {
+	case ref.Stage.gone():
+		return nil, fmt.Errorf("room %s: you %s it already", ref.Name, pastTense(ref.Stage))
+	case ref.Stage != stageJoined:
 		return nil, fmt.Errorf("room %s: you are not in it yet (%s)", ref.Name, ref.Stage)
 	}
 	c, err := p.openRoom(ctx, *ref, warn)

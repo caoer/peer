@@ -17,6 +17,7 @@ import (
 
 	"github.com/caoer/peer/internal/card"
 	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/room"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
 	"github.com/caoer/peer/internal/status"
@@ -416,12 +417,19 @@ func signedBy(pk *keys.PartyKeys, id *keys.Identity) bool {
 }
 
 // reseal copies every record a rotation moves — the roster, the keys and
-// card records, each channel's record and activity — from the old seal to
-// the new one.
+// card records, each channel's record and activity, the rooms record and
+// each room's state — from the old seal to the new one.
 func reseal(ctx context.Context, from, to store.Backend, r *roster.Roster, out io.Writer) error {
-	names := []string{roster.Key, store.KeysKey, store.OwnCardKey}
+	names := []string{roster.Key, store.KeysKey, store.OwnCardKey, roomsKey}
 	for _, pe := range r.Peers {
 		names = append(names, store.ChannelKey(pe.Channel), status.ActivityKey(pe.Channel))
+	}
+	if l, err := loadRooms(ctx, from); err != nil {
+		return fmt.Errorf("re-seal %s: %w", roomsKey, err)
+	} else {
+		for _, ref := range l.Rooms {
+			names = append(names, room.Key(ref.ID))
+		}
 	}
 	n := 0
 	for _, name := range names {

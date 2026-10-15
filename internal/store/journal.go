@@ -34,6 +34,9 @@ type Entry struct {
 	Body []byte `json:"body"`
 	// Committed is set by MarkCommitted once the Commit this entry waited on landed.
 	Committed bool `json:"committed"`
+	// Bump is a room outbox entry whose put bumps the membership version: a
+	// removal record, which bumps however often it is retried.
+	Bump bool `json:"bump,omitempty"`
 
 	path string
 }

@@ -20,6 +20,12 @@ import (
 	"time"
 )
 
+// KindRoster is a room's membership notice (wire contract v2 § Kinds): one
+// record per roster or leave record the fold accepted, born in the inbox of
+// every seat the room reaches — the rooms column is its acceptance, so an
+// agent's accepts list does not quarantine it.
+const KindRoster = "roster"
+
 // Place is where a record is born under the delivery directory.
 type Place string
 
@@ -39,7 +45,7 @@ func Route(kind string, accepts []string) Place {
 	if kind == "doc" || kind == "file" {
 		return Quarantine
 	}
-	if accepts == nil {
+	if kind == KindRoster || accepts == nil {
 		return Inbox
 	}
 	for _, k := range accepts {

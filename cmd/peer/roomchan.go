@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/caoer/peer/internal/card"
@@ -18,14 +19,16 @@ import (
 )
 
 // The channel kinds of a room's join (contract § Kinds), in the adder's
-// order: invite → accept → (mint) → seat → join → (roster) → token. They are
-// the session's own business, like card, and never delivered.
+// order: invite → accept → (mint) → seat → join → (roster) → token; and
+// room-admin, a handover's token. They are the session's own business, like
+// card, and never delivered.
 const (
 	kindRoomInvite = session.KindRoomInvite
 	kindRoomAccept = session.KindRoomAccept
 	kindRoomSeat   = session.KindRoomSeat
 	kindRoomJoin   = session.KindRoomJoin
 	kindRoomToken  = session.KindRoomToken
+	kindRoomAdmin  = session.KindRoomAdmin
 )
 
 // roomInvite carries no token: the newcomer takes add and its starting admin
@@ -57,6 +60,16 @@ type roomToken struct {
 	Idx   uint16 `json:"idx"`
 	Token string `json:"token"`
 	From  int64  `json:"from"`
+	// Role is the token's role, write or read: a read member learns here
+	// that its card and its leave go over the channel.
+	Role string `json:"role,omitempty"`
+}
+
+// roomAdmin carries a handover's admin-flagged token, sent after the
+// handover record landed.
+type roomAdmin struct {
+	Room  string `json:"room"`
+	Token string `json:"token"`
 }
 
 // channelMessage is a room channel message to the channel's peer.
@@ -70,7 +83,7 @@ func (p *party) channelMessage(ch *store.Channel, kind string, payload any) (*se
 
 // roomTokenMessage is the payload of the token an add hands over.
 func roomTokenMessage(roomID string, pa *pendingAdd) roomToken {
-	return roomToken{Room: roomID, Idx: pa.Idx, Token: pa.Token, From: pa.From}
+	return roomToken{Room: roomID, Idx: pa.Idx, Token: pa.Token, From: pa.From, Role: pa.Role}
 }
 
 // sendOnChannel sends a channel message from a command, in decision 5's
@@ -175,6 +188,8 @@ func (p *party) roomStep(ctx context.Context, pe roster.Peer, ch *store.Channel,
 		return p.onRoomJoin(ctx, pe, ch, m, out)
 	case kindRoomToken:
 		return p.onRoomToken(ctx, pe, m, out)
+	case kindRoomAdmin:
+		return p.onRoomAdmin(ctx, pe, m, out)
 	}
 	return nil, fmt.Sprintf("kind %s", m.Kind), nil
 }
@@ -202,7 +217,7 @@ func (p *party) onRoomInvite(ctx context.Context, pe roster.Peer, ch *store.Chan
 	err := updateRooms(ctx, p.backend, func(l *roomList) error {
 		held = nil
 		ref := l.byID(inv.Room)
-		if ref != nil && ref.Stage != stageInvited {
+		if ref != nil && ref.Stage != stageInvited && !ref.Stage.gone() {
 			cp := *ref
 			held = &cp
 			return nil
@@ -211,7 +226,8 @@ func (p *party) onRoomInvite(ctx context.Context, pe roster.Peer, ch *store.Chan
 			l.Rooms = append(l.Rooms, roomRef{Name: newRoomName(l, inv.Room), ID: inv.Room})
 			ref = &l.Rooms[len(l.Rooms)-1]
 		}
-		ref.Relay, ref.Via, ref.Invite, ref.Stage = inv.Relay, pe.Channel, &inv, stageInvited
+		// A room the party left is taken afresh: the name stays, the rest is new.
+		*ref = roomRef{Name: ref.Name, ID: ref.ID, Relay: inv.Relay, Via: pe.Channel, Invite: &inv, Stage: stageInvited}
 		return nil
 	})
 	if err != nil {
@@ -391,6 +407,13 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 	if err := json.Unmarshal(m.Body, &j); err != nil {
 		return nil, fmt.Sprintf("room-join: %v", err), nil
 	}
+	if l, err := loadRooms(ctx, p.backend); err != nil {
+		return nil, "", err
+	} else if ref := l.byID(j.Room); ref != nil && ref.Stage == stageJoined && ref.add(pe.Channel) == nil {
+		// No add in flight over this channel: a member's new card — a read
+		// member's rotation, an identity change — for this admin to announce.
+		return p.onCardUpdate(ctx, pe, ch, *ref, j, out)
+	}
 	ref, pa, skip, err := p.pendingFor(ctx, j.Room, pe.Channel, kindRoomJoin)
 	if err != nil || skip != "" {
 		return nil, skip, err
@@ -449,8 +472,57 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 	return reply, "", err
 }
 
+// onCardUpdate (an admin) takes a member's new room card over the channel —
+// a read member's rotation, or a card re-signed after an identity change —
+// checks it against the party card the channel pins, and posts the roster
+// entry update that announces it: the pinned party card and the new room
+// card at the member's idx.
+func (p *party) onCardUpdate(ctx context.Context, pe roster.Peer, ch *store.Channel, ref roomRef, j roomJoin, out io.Writer) (*session.Message, string, error) {
+	root, signed := ch.Root(), ch.Card()
+	if root == nil || signed == nil {
+		return nil, fmt.Sprintf("room %s: no card pinned for %s", ref.Name, pe.Name), nil
+	}
+	pc, err := card.Verify(signed, root)
+	if err != nil {
+		return nil, fmt.Sprintf("room %s: %s's pinned card: %v", ref.Name, pe.Name, err), nil
+	}
+	rc, err := room.Verify(j.RoomCard, pc, time.Now())
+	if err != nil {
+		return nil, fmt.Sprintf("room %s: %s's room card: %v", ref.Name, pe.Name, err), nil
+	}
+	c, err := p.openRoom(ctx, ref, out)
+	if err != nil {
+		return nil, "", err
+	}
+	party := keys.PartyID(root)
+	cur := c.st.Member(rc.Idx)
+	switch {
+	case rc.Room != ref.ID || cur == nil || cur.Party != party:
+		return nil, fmt.Sprintf("room %s: %s's room card is for idx %d, which %s does not hold", ref.Name, pe.Name, rc.Idx, pe.Name), nil
+	case !c.st.IsAdmin(c.st.Idx()):
+		return nil, fmt.Sprintf("room %s: %s's new room card needs an admin's roster entry, and you are not in the admin set", ref.Name, pe.Name), nil
+	}
+	entry := room.Entry{Idx: rc.Idx, Party: party, Card: room.PartyCard{Body: signed.Body, Sig: signed.Sig}, RoomCard: j.RoomCard}
+	body, err := json.Marshal(room.RosterBody{Members: []room.Entry{entry}})
+	if err != nil {
+		return nil, "", err
+	}
+	seq, res, err := c.postMembership(ctx, room.KindRoster, body)
+	switch {
+	case errors.Is(err, errQueued):
+		return nil, fmt.Sprintf("the roster entry with %s's new room card is committed and did not land (%v); serve puts it", pe.Name, err), nil
+	case err != nil:
+		return nil, fmt.Sprintf("the roster entry with %s's new room card did not land: %v", pe.Name, err), nil
+	case len(res.Updated) == 0:
+		return nil, fmt.Sprintf("room %s: %s's room card is no newer than the one folded; nothing posted", ref.Name, pe.Name), nil
+	}
+	fmt.Fprintf(out, "room %s: %s's new room card is announced (roster #%d)\n", ref.Name, pe.Name, seq)
+	return nil, "", nil
+}
+
 // onRoomToken (the newcomer) takes its token: the room is joined and serve
-// pulls it from here on.
+// pulls it from here on; a read token's role says the card and the leave go
+// over the channel.
 func (p *party) onRoomToken(ctx context.Context, pe roster.Peer, m *session.Message, out io.Writer) (*session.Message, string, error) {
 	var tok roomToken
 	if err := json.Unmarshal(m.Body, &tok); err != nil {
@@ -474,22 +546,68 @@ func (p *party) onRoomToken(ctx context.Context, pe roster.Peer, m *session.Mess
 			skip = fmt.Sprintf("a room-token for room %s at idx %d; you are seated at idx %d", ref.Name, tok.Idx, ref.Idx)
 		default:
 			name = ref.Name
-			ref.Stage, ref.Token, ref.From = stageJoined, tok.Token, tok.From
+			ref.Stage, ref.Token, ref.From, ref.Read = stageJoined, tok.Token, tok.From, tok.Role == relay.RoleRead
 		}
 		return nil
 	})
 	if err != nil || skip != "" {
 		return nil, skip, err
 	}
-	fmt.Fprintf(out, "joined room %s as idx %d (it reads from #%d)\n", name, tok.Idx, tok.From)
+	role := ""
+	if tok.Role == relay.RoleRead {
+		role = ", read"
+	}
+	fmt.Fprintf(out, "joined room %s as idx %d%s (it reads from #%d)\n", name, tok.Idx, role, tok.From)
+	return nil, "", nil
+}
+
+// onRoomAdmin (the member handed the room) takes the admin-flagged token:
+// it proves itself on an admin route before it replaces the one in use.
+func (p *party) onRoomAdmin(ctx context.Context, pe roster.Peer, m *session.Message, out io.Writer) (*session.Message, string, error) {
+	var adm roomAdmin
+	if err := json.Unmarshal(m.Body, &adm); err != nil {
+		return nil, fmt.Sprintf("room-admin: %v", err), nil
+	}
+	if !relay.ValidToken(adm.Token) {
+		return nil, "room-admin: a malformed token", nil
+	}
+	l, err := loadRooms(ctx, p.backend)
+	if err != nil {
+		return nil, "", err
+	}
+	ref := l.byID(adm.Room)
+	if ref == nil || ref.Stage != stageJoined {
+		return nil, fmt.Sprintf("a room-admin for room %q, which this party is not in", adm.Room), nil
+	}
+	ms, err := relay.New(ref.Relay, nil).ListMembers(ctx, ref.ID, adm.Token)
+	if err != nil {
+		return nil, fmt.Sprintf("room %s: the admin token %s sent does not work on the relay (%v)", ref.Name, pe.Name, err), nil
+	}
+	if !slices.ContainsFunc(ms.Members, func(mm relay.Member) bool { return mm.Idx == int(ref.Idx) && mm.Admin && !mm.Revoked }) {
+		return nil, fmt.Sprintf("room %s: the token %s sent is not an admin token for your idx %d", ref.Name, pe.Name, ref.Idx), nil
+	}
+	err = updateRooms(ctx, p.backend, func(l *roomList) error {
+		if cur := l.byID(ref.ID); cur != nil && cur.Stage == stageJoined {
+			cur.Token = adm.Token
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	fmt.Fprintf(out, "room %s: %s handed you the admin token; you can add, remove, hand over and close\n", ref.Name, pe.Name)
 	return nil, "", nil
 }
 
 // serveRooms serves every room this party holds a token in: the pull to
 // head, delivering as it goes; this host's waiting records, put in ctr order
-// (roomsend.go); the token of every add whose roster record landed. A
-// delivery that waits on a seat's session stops that room's pull for the
-// round, as a channel's does.
+// (roomsend.go); the token of every add whose roster record landed; the
+// revoke of every removal and the token of every handover a round cut
+// short; an admin's look for revoked readers; the daily rotation, an
+// identity change's re-signed card, and the retired keys whose time is up
+// (roommember.go). A delivery that waits on a seat's session stops that
+// room's pull for the round, as a channel's does; a room the party is out
+// of is said once and dropped.
 func (sv *server) serveRooms(ctx context.Context) error {
 	l, err := loadRooms(ctx, sv.p.backend)
 	if err != nil {
@@ -508,10 +626,18 @@ func (sv *server) serveRooms(ctx context.Context) error {
 		}
 		c.sv = sv
 		switch err := c.pull(ctx); {
+		case errors.Is(err, errGone):
+			fmt.Fprintf(sv.out, "%v\n", err)
+			continue
 		case errors.Is(err, errWait):
 			fmt.Fprintf(sv.out, "%v\n", err)
 		case err != nil:
 			errs = append(errs, err)
+			continue
+		}
+		if c.st.Removed(c.st.Idx()) {
+			// An admin's removal record folded; the revoke follows it.
+			fmt.Fprintf(sv.out, "%v\n", c.gone(ctx, stageRemoved))
 			continue
 		}
 		if res := c.flush(ctx); res.wait != nil {
@@ -520,8 +646,22 @@ func (sv *server) serveRooms(ctx context.Context) error {
 		if cur, err := loadRooms(ctx, sv.p.backend); err == nil {
 			if r := cur.byID(ref.ID); r != nil {
 				sv.p.finishAdds(ctx, *r, sv.out)
+				c.ref.Read, c.ref.CardSent = r.Read, r.CardSent
 			}
 		}
+		c.finishRemovals(ctx)
+		c.finishHandovers(ctx)
+		if c.st.IsAdmin(c.st.Idx()) {
+			c.checkRevoked(ctx)
+		}
+		now := roomClock()
+		if err := c.rotate(ctx, now, false); err != nil {
+			fmt.Fprintf(sv.out, "room %s: rotation: %v\n", ref.Name, err)
+		}
+		if err := c.recard(ctx, now); err != nil {
+			fmt.Fprintf(sv.out, "%v\n", err)
+		}
+		c.retire(ctx, now)
 	}
 	return errors.Join(errs...)
 }

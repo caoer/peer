@@ -432,11 +432,12 @@ func TestCrossCheckRefusal(t *testing.T) {
 	if res = s.Fold(roster(3, 0, room.RosterBody{Members: []room.Entry{z.entry(t, t0)}}), channels); !slices.Equal(res.Joined, []uint16{3}) {
 		t.Fatalf("a party on no channel is the admin's word: %+v", res)
 	}
-	// Seed applies the same check to an invite's roster, and admits the invite's admin set.
+	// Seed applies the same check to an invite's roster, and takes the
+	// invite's admin set as the starting one: a creator that left is out of it.
 	n := newMember(t, 4)
 	s2, _ := room.New(newBackend(), roomID, 4, room.AddAdmins, n.keys)
 	res = s2.Seed([]room.Entry{puppet.entry(t, t0), xm.entry(t, t0), z.entry(t, t0)}, []uint16{2}, channels, at)
-	if !slices.Equal(res.Joined, []uint16{2, 3}) || len(res.Refused) != 1 || !slices.Equal(res.Admitted, []uint16{2}) || !slices.Equal(s2.Admins(), []uint16{0, 2}) {
+	if !slices.Equal(res.Joined, []uint16{2, 3}) || len(res.Refused) != 1 || !slices.Equal(res.Admitted, []uint16{2}) || !slices.Equal(s2.Admins(), []uint16{2}) {
 		t.Fatalf("seed: %+v admins %v", res, s2.Admins())
 	}
 	// With no channels to check against, the entry is the admin's word.
