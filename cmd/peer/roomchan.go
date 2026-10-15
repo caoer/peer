@@ -86,11 +86,24 @@ func roomTokenMessage(roomID string, pa *pendingAdd) roomToken {
 	return roomToken{Room: roomID, Idx: pa.Idx, Token: pa.Token, From: pa.From, Role: pa.Role}
 }
 
-// sendOnChannel sends a channel message from a command, in decision 5's
-// order: a commit another host beat reloads the channel and encrypts again;
-// a put that fails after the commit leaves the message in the outbox for the
-// next send or serve.
+// sendOnChannel sends a channel message of kind with payload (sendMessage).
 func (p *party) sendOnChannel(ctx context.Context, pe roster.Peer, kind string, payload any, out io.Writer) error {
+	ch, err := p.store.Channel(ctx, pe.Channel)
+	if err != nil {
+		return err
+	}
+	m, err := p.channelMessage(ch, kind, payload)
+	if err != nil {
+		return err
+	}
+	return p.sendMessage(ctx, pe, m, out)
+}
+
+// sendMessage sends a channel message in decision 5's order: a commit
+// another host beat reloads the channel and encrypts again; a put that fails
+// after the commit leaves the message in the outbox for the next send or
+// serve.
+func (p *party) sendMessage(ctx context.Context, pe roster.Peer, m *session.Message, out io.Writer) error {
 	rc := relay.New(pe.Relay, nil)
 	for try := 1; ; try++ {
 		ch, err := p.store.Channel(ctx, pe.Channel)
@@ -101,10 +114,6 @@ func (p *party) sendOnChannel(ctx context.Context, pe roster.Peer, kind string, 
 			return fmt.Errorf("no session with %s yet", pe.Name)
 		}
 		k, err := p.keys(ctx)
-		if err != nil {
-			return err
-		}
-		m, err := p.channelMessage(ch, kind, payload)
 		if err != nil {
 			return err
 		}
@@ -133,38 +142,88 @@ func dropPendingAdd(ctx context.Context, b store.Backend, roomID, channel string
 	})
 }
 
-// receiveRoom handles a room channel message in serve: the step it calls for
-// runs, and its answer, when it has one, goes back on the channel's snapshot
-// — so one commit moves the cursor past the message and carries the answer's
-// ratchet. A message that cannot be acted on is skipped with its reason and
-// the cursor moves; a store conflict returns, and the pull reloads and reads
-// the message again (every step is safe to run twice).
-func (c *channelServe) receiveRoom(ctx context.Context, s *session.Session, rec relay.Record, m *session.Message) error {
-	reply, skip, err := c.sv.p.roomStep(ctx, c.pe, c.ch, m, c.sv.out)
+// receiveRoom handles a room channel message in serve in decision 5's order,
+// as a message is born: spooled, the channel committed past it, then its step
+// run from the spool. That commit is the claim: of a party's hosts pulling
+// the message, the one whose commit lands runs the step and a loser reloads
+// past it, so a step's relay write — the mint, the roster record — happens
+// once however many hosts serve the state (C9 finding 1). A step cut after
+// the commit runs from the spool on the next round or start (replaySpool);
+// every step is safe to run twice on one host.
+func (c *channelServe) receiveRoom(ctx context.Context, rec relay.Record, m *session.Message) error {
+	plain, err := m.Marshal()
+	if err != nil {
+		return err
+	}
+	e := &store.Entry{ID: m.ID, Channel: c.ch.Name(), Seq: rec.Seq, Type: rec.Env.Type.String(), Body: plain}
+	if err := c.sv.spool.Add(e); err != nil {
+		return err
+	}
+	// As receive: only a conflict says the commit kept nothing, and the
+	// winner's state runs the step; any other error leaves the entry for the
+	// next round's seen check.
+	if err := c.ch.Commit(ctx); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			c.sv.spool.Remove(e)
+		}
+		return err
+	}
+	if err := c.sv.spool.MarkCommitted(e); err != nil {
+		return err
+	}
+	c.commitKeys(ctx, rec)
+	if err := c.sv.runRoomStep(ctx, c.pe, m, rec.Seq); err != nil {
+		return err
+	}
+	// The step's answer went out under a commit of its own: the pull goes on
+	// from that state.
+	if err := c.load(ctx); err != nil {
+		return err
+	}
+	return c.sv.spool.Remove(e)
+}
+
+// replayRoomStep runs a room step whose claim landed and whose run a crash
+// or an error cut (replaySpool).
+func (sv *server) replayRoomStep(ctx context.Context, e *store.Entry, m *session.Message) error {
+	r, err := roster.Load(ctx, sv.p.backend)
+	if err != nil {
+		return err
+	}
+	pe := r.ByChannel(e.Channel)
+	if pe == nil {
+		fmt.Fprintf(sv.out, "dropped the %s %s from the spool: no peer on channel %s\n", m.Kind, m.ID, e.Channel)
+		return nil
+	}
+	return sv.runRoomStep(ctx, *pe, m, e.Seq)
+}
+
+// runRoomStep runs the step a claimed room channel message calls for and
+// sends its answer, when it has one, on the channel; a room-token that went
+// out finishes the add.
+func (sv *server) runRoomStep(ctx context.Context, pe roster.Peer, m *session.Message, seq int64) error {
+	ch, err := sv.p.store.Channel(ctx, pe.Channel)
+	if err != nil {
+		return err
+	}
+	reply, skip, err := sv.p.roomStep(ctx, pe, ch, m, sv.out)
 	if err != nil {
 		return err
 	}
 	if skip != "" {
-		fmt.Fprintf(c.sv.out, "skip %s #%d: %s\n", c.pe.Name, rec.Seq, skip)
+		fmt.Fprintf(sv.out, "skip %s #%d: %s\n", pe.Name, seq, skip)
 	}
 	if reply == nil {
-		return c.commit(ctx, rec)
+		return nil
 	}
-	_, err = s.Send(ctx, c.sv.p.outbox, c.rc, c.pe.Token, reply)
-	var putErr *session.PutError
-	if errors.As(err, &putErr) {
-		fmt.Fprintf(c.sv.out, "%s: the %s is committed but the relay did not take it (%v); it stays in the outbox\n", c.pe.Name, reply.Kind, putErr.Err)
-		err = nil
-	}
-	if err != nil {
+	if err := sv.p.sendMessage(ctx, pe, reply, sv.out); err != nil {
 		return err
 	}
-	c.commitKeys(ctx, rec)
 	if reply.Kind == kindRoomToken {
 		var tok roomToken
 		if json.Unmarshal(reply.Body, &tok) == nil {
-			if err := dropPendingAdd(ctx, c.sv.p.backend, tok.Room, c.pe.Channel); err != nil {
-				fmt.Fprintf(c.sv.out, "%s: the token went out; the add is still listed (%v)\n", c.pe.Name, err)
+			if err := dropPendingAdd(ctx, sv.p.backend, tok.Room, pe.Channel); err != nil {
+				fmt.Fprintf(sv.out, "%s: the token went out; the add is still listed (%v)\n", pe.Name, err)
 			}
 		}
 	}
@@ -172,7 +231,7 @@ func (c *channelServe) receiveRoom(ctx context.Context, s *session.Session, rec 
 }
 
 // roomStep runs one step of a join for a room channel message: the reply to
-// send, or a reason the message is skipped; an error leaves it unread.
+// send, or a reason the message is skipped; an error leaves it in the spool.
 func (p *party) roomStep(ctx context.Context, pe roster.Peer, ch *store.Channel, m *session.Message, out io.Writer) (*session.Message, string, error) {
 	if pe.State != roster.Confirmed {
 		return nil, fmt.Sprintf("a %s on a channel that is not confirmed", m.Kind), nil
@@ -647,7 +706,7 @@ func (sv *server) serveRooms(ctx context.Context) error {
 			fmt.Fprintf(sv.out, "%v\n", c.gone(ctx, stageRemoved))
 			continue
 		}
-		if res := c.flush(ctx); res.wait != nil {
+		if res := c.flush(ctx, false); res.wait != nil {
 			fmt.Fprintf(sv.out, "room %s: %d records wait in the room outbox: %v\n", ref.Name, sv.p.waiting(ref.ID), res.wait)
 		}
 		if cur, err := loadRooms(ctx, sv.p.backend); err == nil {

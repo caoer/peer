@@ -156,11 +156,15 @@ func (sv *server) start(ctx context.Context) error {
 }
 
 // replaySpool births the spool entries whose commit landed and drops the
-// rest (store.ReplaySpool). An entry that can never be born — its own
-// address, kind or id refuses — is dropped with its reason, so one such entry
-// cannot stop delivery on every channel.
+// rest (store.ReplaySpool); a room channel message's entry runs its step
+// instead (receiveRoom). An entry that can never be born — its own address,
+// kind or id refuses — is dropped with its reason, so one such entry cannot
+// stop delivery on every channel.
 func (sv *server) replaySpool(ctx context.Context) error {
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
+		if m, err := session.UnmarshalMessage(e.Body); err == nil && session.RoomKind(m.Kind) {
+			return sv.replayRoomStep(ctx, e, m)
+		}
 		plain := e.Body
 		sv.withAttachment(e)
 		_, err := sv.birth(e)
@@ -629,7 +633,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 		return nil
 	}
 	if session.RoomKind(m.Kind) {
-		return c.receiveRoom(ctx, s, rec, m)
+		return c.receiveRoom(ctx, rec, m)
 	}
 	plain, err := m.Marshal()
 	if err != nil {

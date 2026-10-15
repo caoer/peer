@@ -265,7 +265,7 @@ func runRoomLeave(ctx context.Context, dir, name string, out io.Writer) error {
 // flushBefore puts this host's waiting records for the room, so a leave or
 // close is the party's last record; anything still waiting refuses the act.
 func (c *roomConn) flushBefore(ctx context.Context, act string) error {
-	if res := c.flush(ctx); res.wait != nil {
+	if res := c.flush(ctx, true); res.wait != nil {
 		if n := c.p.waiting(c.ref.ID); n > 0 {
 			return fmt.Errorf("room %s: %d records wait in the room outbox (%v); peer serve puts them, then %s again", c.ref.Name, n, res.wait, act)
 		}

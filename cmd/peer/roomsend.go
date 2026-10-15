@@ -30,6 +30,13 @@ import (
 // Each host retries its own records, and the state's Commit keeps ctrs unique
 // across hosts; nothing of a waiting record lives in the shared state.
 //
+// On one host the room's outbox lock keeps each entry to one put: a send
+// holds it from the entry's Add to its put's answer, and every flush holds it
+// over its pass, so a serve round beside a running peer send never puts the
+// send's record too — a second seal of the same ctr, under a fresh content
+// key and so a second kh, that every receiver refuses as a step back (C9
+// finding 2).
+//
 // An entry is a store.Entry: ID the message id, Channel the room id, Seq the
 // record's ctr, Type its kind, Body the message JSON.
 const roomOutboxDir = "room-outbox"
@@ -76,13 +83,18 @@ func (c *roomConn) sendEntry(ctx context.Context, m *roomMessage, ctr uint64, bu
 		return 0, err
 	}
 	e := &store.Entry{ID: m.ID, Channel: c.ref.ID, Seq: int64(ctr), Type: m.Kind, Body: plain, Bump: bump}
+	unlock, err := c.p.roomOutbox.Lock(c.ref.ID, true)
+	if err != nil {
+		return 0, fmt.Errorf("room %s: ctr %d is committed and the room outbox did not take the record: %w", c.ref.Name, ctr, err)
+	}
+	defer unlock()
 	if err := c.p.roomOutbox.Add(e); err != nil {
 		return 0, fmt.Errorf("room %s: ctr %d is committed and the room outbox did not take the record: %w", c.ref.Name, ctr, err)
 	}
 	if err := c.p.roomOutbox.MarkCommitted(e); err != nil {
 		return 0, fmt.Errorf("room %s: ctr %d is committed and the room outbox did not take the record: %w", c.ref.Name, ctr, err)
 	}
-	res := c.flush(ctx)
+	res := c.flushLocked(ctx)
 	if seq, ok := res.put[m.ID]; ok {
 		return seq, nil
 	}
@@ -99,10 +111,29 @@ type flushResult struct {
 	wait    error            // what the rest wait on; nil when none wait
 }
 
-// flush puts this room's waiting records in ctr order, stopping at the first
-// that fails on something passing; one the relay can never take is dropped
-// with its reason and the next is tried.
-func (c *roomConn) flush(ctx context.Context) flushResult {
+// flush puts this room's waiting records under the room's outbox lock. wait
+// blocks on another process's pass, as a command does before its leave or
+// close; serve's round passes false, and a lock another process holds — a
+// peer send putting its record now — leaves the room's records to it and to
+// the next round.
+func (c *roomConn) flush(ctx context.Context, wait bool) flushResult {
+	res := flushResult{put: map[string]int64{}, dropped: map[string]error{}}
+	unlock, err := c.p.roomOutbox.Lock(c.ref.ID, wait)
+	if errors.Is(err, store.ErrBusy) {
+		return res
+	}
+	if err != nil {
+		res.wait = err
+		return res
+	}
+	defer unlock()
+	return c.flushLocked(ctx)
+}
+
+// flushLocked puts this room's waiting records in ctr order, the lock held,
+// stopping at the first that fails on something passing; one the relay can
+// never take is dropped with its reason and the next is tried.
+func (c *roomConn) flushLocked(ctx context.Context) flushResult {
 	res := flushResult{put: map[string]int64{}, dropped: map[string]error{}}
 	all, err := c.p.roomOutbox.Entries()
 	if err != nil {
