@@ -172,7 +172,7 @@ peer room link --rotate news
 
 - `create --feed` prints the feed link `https://…/peer/f/<id>#v1.…`; `link` prints it again. Treat the link like a key: whoever has it reads every post from then on.
 - A feed's members are added with `--read`.
-- `link --rotate` makes a new link and cuts every holder of the old one off. Do it before `close` too: closing a feed revokes its members, not its link.
+- `link --rotate` makes a new link and cuts every holder of the old one off. `close` cuts every holder too: it revokes the link with the members.
 
 You were sent a feed link:
 
