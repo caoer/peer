@@ -74,6 +74,9 @@ type server struct {
 	roomSpool *store.Journal
 	dir       string
 	out       io.Writer
+	// command is a command's server (commandServer): the room records its
+	// pulls pass stay in the room spool, committed, and serve births them.
+	command bool
 	// beat is the serve interval and page the roster page, nil without one
 	// (status.go).
 	beat time.Duration
@@ -139,6 +142,20 @@ func newServer(p *party, deliverTo string, out io.Writer) (*server, error) {
 	if err := sv.loadSeats(); err != nil {
 		return nil, err
 	}
+	return sv, nil
+}
+
+// commandServer is the server a command's room pull runs under — peer send,
+// room add, the membership commands. It does not know the delivery directory
+// a running serve was started with (--deliver), so the records its pull
+// passes are committed and left in the room spool: serve births them, at its
+// next round or start, where it delivers.
+func commandServer(p *party, out io.Writer) (*server, error) {
+	sv, err := newServer(p, "", out)
+	if err != nil {
+		return nil, err
+	}
+	sv.command = true
 	return sv, nil
 }
 

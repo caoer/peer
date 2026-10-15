@@ -448,8 +448,8 @@ type roomConn struct {
 	names map[string]string
 	out   io.Writer
 	// sv delivers each opened record of a v1 kind (roomdeliver.go): serve's
-	// own, or one a command's pull opens on first use — a pull that passes a
-	// record delivers it, whoever runs it.
+	// own, which births it, or the command's server a command's pull opens on
+	// first use, which commits it to the room spool for serve to birth.
 	sv *server
 	// pending is the spool entries the next Commit settles.
 	pending []*store.Entry
@@ -483,7 +483,7 @@ func (c *roomConn) say(seq int64, format string, args ...any) {
 // delivery waits (errWait) stops the pull before it, the state as committed.
 func (c *roomConn) pull(ctx context.Context) error {
 	if c.sv == nil {
-		sv, err := newServer(c.p, "", c.out)
+		sv, err := commandServer(c.p, c.out)
 		if err != nil {
 			return err
 		}

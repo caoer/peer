@@ -206,7 +206,7 @@ func (sv *server) runRoomStep(ctx context.Context, pe roster.Peer, m *session.Me
 	if err != nil {
 		return err
 	}
-	reply, skip, err := sv.p.roomStep(ctx, pe, ch, m, sv.out)
+	reply, skip, err := sv.roomStep(ctx, pe, ch, m)
 	if err != nil {
 		return err
 	}
@@ -232,7 +232,10 @@ func (sv *server) runRoomStep(ctx context.Context, pe roster.Peer, m *session.Me
 
 // roomStep runs one step of a join for a room channel message: the reply to
 // send, or a reason the message is skipped; an error leaves it in the spool.
-func (p *party) roomStep(ctx context.Context, pe roster.Peer, ch *store.Channel, m *session.Message, out io.Writer) (*session.Message, string, error) {
+// A step that pulls a room pulls it as serve does, delivering where serve
+// delivers.
+func (sv *server) roomStep(ctx context.Context, pe roster.Peer, ch *store.Channel, m *session.Message) (*session.Message, string, error) {
+	p, out := sv.p, sv.out
 	if pe.State != roster.Confirmed {
 		return nil, fmt.Sprintf("a %s on a channel that is not confirmed", m.Kind), nil
 	}
@@ -244,7 +247,7 @@ func (p *party) roomStep(ctx context.Context, pe roster.Peer, ch *store.Channel,
 	case kindRoomSeat:
 		return p.onRoomSeat(ctx, pe, ch, m, out)
 	case kindRoomJoin:
-		return p.onRoomJoin(ctx, pe, ch, m, out)
+		return p.onRoomJoin(ctx, sv, pe, ch, m)
 	case kindRoomToken:
 		return p.onRoomToken(ctx, pe, m, out)
 	case kindRoomAdmin:
@@ -461,7 +464,8 @@ func (p *party) onRoomSeat(ctx context.Context, pe roster.Peer, ch *store.Channe
 // card the channel pins and the minted idx, posts the roster record that
 // carries the entry (folded and committed before the put), and answers with
 // the token (rule 2: only once the roster landed).
-func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channel, m *session.Message, out io.Writer) (*session.Message, string, error) {
+func (p *party) onRoomJoin(ctx context.Context, sv *server, pe roster.Peer, ch *store.Channel, m *session.Message) (*session.Message, string, error) {
+	out := sv.out
 	var j roomJoin
 	if err := json.Unmarshal(m.Body, &j); err != nil {
 		return nil, fmt.Sprintf("room-join: %v", err), nil
@@ -471,7 +475,7 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 	} else if ref := l.byID(j.Room); ref != nil && ref.Stage == stageJoined && ref.add(pe.Channel) == nil {
 		// No add in flight over this channel: a member's new card — a read
 		// member's rotation, an identity change — for this admin to announce.
-		return p.onCardUpdate(ctx, pe, ch, *ref, j, out)
+		return p.onCardUpdate(ctx, sv, pe, ch, *ref, j)
 	}
 	ref, pa, skip, err := p.pendingFor(ctx, j.Room, pe.Channel, kindRoomJoin)
 	if err != nil || skip != "" {
@@ -501,7 +505,7 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 		if err != nil {
 			return nil, "", err
 		}
-		c, err := p.openRoom(ctx, *ref, out)
+		c, err := sv.openRoom(ctx, *ref)
 		if err != nil {
 			return nil, "", err
 		}
@@ -543,7 +547,8 @@ func (p *party) onRoomJoin(ctx context.Context, pe roster.Peer, ch *store.Channe
 // checks it against the party card the channel pins, and posts the roster
 // entry update that announces it: the pinned party card and the new room
 // card at the member's idx.
-func (p *party) onCardUpdate(ctx context.Context, pe roster.Peer, ch *store.Channel, ref roomRef, j roomJoin, out io.Writer) (*session.Message, string, error) {
+func (p *party) onCardUpdate(ctx context.Context, sv *server, pe roster.Peer, ch *store.Channel, ref roomRef, j roomJoin) (*session.Message, string, error) {
+	out := sv.out
 	root, signed := ch.Root(), ch.Card()
 	if root == nil || signed == nil {
 		return nil, fmt.Sprintf("room %s: no card pinned for %s", ref.Name, pe.Name), nil
@@ -556,7 +561,7 @@ func (p *party) onCardUpdate(ctx context.Context, pe roster.Peer, ch *store.Chan
 	if err != nil {
 		return nil, fmt.Sprintf("room %s: %s's room card: %v", ref.Name, pe.Name, err), nil
 	}
-	c, err := p.openRoom(ctx, ref, out)
+	c, err := sv.openRoom(ctx, ref)
 	if err != nil {
 		return nil, "", err
 	}
@@ -665,6 +670,16 @@ func (p *party) onRoomAdmin(ctx context.Context, pe roster.Peer, m *session.Mess
 	}
 	fmt.Fprintf(out, "room %s: %s handed you the admin token; you can add, remove, hand over and close\n", ref.Name, pe.Name)
 	return nil, "", nil
+}
+
+// openRoom opens a room for a step serve runs: its pulls deliver as serve's.
+func (sv *server) openRoom(ctx context.Context, ref roomRef) (*roomConn, error) {
+	c, err := sv.p.openRoom(ctx, ref, sv.out)
+	if err != nil {
+		return nil, err
+	}
+	c.sv = sv
+	return c, nil
 }
 
 // serveRooms serves every room this party holds a token in: the pull to

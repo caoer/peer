@@ -583,3 +583,20 @@ func TestRoomSendRefusesBlobsAndAmbiguousName(t *testing.T) {
 	id := createRoom(t, a, base, "bob")
 	mustRefuse(t, "both a peer and a room are named bob: name the room by its id, "+id, "send", "--dir", a, "--text", "x", "bob")
 }
+
+// A room pull a command runs commits the records it passes and leaves their
+// birth to serve: a record peer send's pull passes is born in the delivery
+// directory serve runs with, never in the default one.
+func TestRoomCommandPullBirthsInServeDeliver(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	tr := newTrio(t, base, srv, config{})
+	custom := filepath.Join(t.TempDir(), "agent-inbox")
+	mustOK(t, "serve", "--dir", tr.b, "--deliver", custom, "--once")
+	id, _ := roomSendOK(t, tr.a, "--text", "for bob's agent", "r1")
+	roomSendOK(t, tr.b, "--text", "reply", tr.bcRoom) // its pull passes A's record
+	mustOK(t, "serve", "--dir", tr.b, "--deliver", custom, "--once")
+	inCustom, inDefault := records(t, custom, deliver.Inbox)[id] != nil, records(t, deliverDirOf(tr.b), deliver.Inbox)[id] != nil
+	if !inCustom || inDefault {
+		t.Fatalf("record %s: in serve's --deliver directory %v, in the default one %v", id, inCustom, inDefault)
+	}
+}

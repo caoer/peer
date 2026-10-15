@@ -204,11 +204,16 @@ func (c *roomConn) settle() error {
 }
 
 // settleSpool births committed spool entries of room name, each removed
-// from the spool once born.
+// from the spool once born; a command's server marks them committed and
+// leaves them for serve (commandServer).
 func (sv *server) settleSpool(pending []*store.Entry, name string) error {
 	for _, e := range pending {
 		if err := sv.roomSpool.MarkCommitted(e); err != nil {
 			return err
+		}
+		if sv.command {
+			fmt.Fprintf(sv.out, "room %s #%d: %s is in the room spool; peer serve delivers it\n", name, e.Seq, e.ID)
+			continue
 		}
 		if sv.beforeBirth != nil {
 			if err := sv.beforeBirth(e); err != nil {
