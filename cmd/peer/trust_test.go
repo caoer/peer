@@ -6,6 +6,7 @@ package main
 // and naming the key the record came under (design §3.2).
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -88,5 +89,43 @@ func TestKeyChangeCardNotNamingTheRecordKeyDoesNotPark(t *testing.T) {
 	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
 	if strings.Contains(out, "waiting") || !strings.Contains(out, "does not name the key the record came under") {
 		t.Fatalf("a card not naming the record's key parked the channel or was not refused by name:\n%s", out)
+	}
+}
+
+// A card sent in the session in force, naming the key the session runs under
+// but signed by another root than the pinned one, is skipped by name and
+// consumed; the pin is unchanged and nothing is held.
+func TestInSessionCardFromAnotherRootIsSkipped(t *testing.T) {
+	ctx := context.Background()
+	_, rc, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	_, hch, _ := channelOf(t, p.hostDir, "ancan")
+	pinned := hch.Card().Body
+
+	gp, gch, gpe := channelOf(t, p.guestDir, "zt")
+	gk, err := gp.store.Keys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mallory, _ := keys.GenerateRoot()
+	c := card.New(gp.id, gk.PartyKeys, nil, nil, time.Now())
+	c.Party = keys.PartyID(mallory.Public())
+	forged, err := card.Sign(c, mallory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, _ := session.CardMessage(p.guestParty, p.hostParty, forged)
+	rcpt, err := session.New(gch, gk).Send(ctx, gp.outbox, rc, gpe.Token, cm)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	if !strings.Contains(out, "skip ancan #"+itoa(rcpt.Seq)+": card: signed by another root than the pinned one") || strings.Contains(out, "pinned\n") || strings.Contains(out, "waiting") {
+		t.Fatalf("an in-session card from another root was not skipped by name:\n%s", out)
+	}
+	_, hch, _ = channelOf(t, p.hostDir, "ancan")
+	if held, _ := hch.Held(); held != nil || !bytes.Equal(hch.Card().Body, pinned) || hch.Cursor() != rcpt.Seq {
+		t.Fatalf("held %v, pin changed %v, cursor %d not past #%d", held != nil, !bytes.Equal(hch.Card().Body, pinned), hch.Cursor(), rcpt.Seq)
 	}
 }
