@@ -40,8 +40,9 @@ const (
 
 // stageFollowing: the party reads a feed by its link alone — no seat, no
 // roster, no room state; the entry holds the link and the cursor (Feed).
-// stageCut: the feed's owner made a new link and the relay revoked the one
-// this party held; a follow of the new link reads on from the cursor.
+// stageCut: the feed's owner made a new link or closed the feed, and the
+// relay revoked the one this party held; a follow of a new link reads on
+// from the cursor.
 const (
 	stageFollowing roomStage = "following"
 	stageCut       roomStage = "cut"

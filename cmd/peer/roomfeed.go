@@ -200,6 +200,38 @@ func (c *roomConn) finishLinkRevokes(ctx context.Context) {
 	}
 }
 
+// closeLink is close's end of a feed's link: the current link's idx is
+// queued for its revoke as a rotation queues the old one, then every queued
+// revoke runs; one the relay did not answer stays queued for serve and the
+// next close, and refuses the close.
+func (c *roomConn) closeLink(ctx context.Context) error {
+	for try := 1; ; try++ {
+		l := c.st.Link()
+		if l == nil || slices.Contains(l.Revoke, l.Idx) {
+			break
+		}
+		l.Revoke = append(l.Revoke, l.Idx)
+		if err := c.st.SetLink(*l); err != nil {
+			return err
+		}
+		err := c.st.Commit(ctx)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, store.ErrConflict) || try >= sendTries {
+			return fmt.Errorf("the link's revoke (read idx %d) is not queued: %w", l.Idx, err)
+		}
+		if err := c.reload(ctx); err != nil {
+			return err
+		}
+	}
+	c.finishLinkRevokes(ctx)
+	if l := c.st.Link(); l != nil && len(l.Revoke) > 0 {
+		return fmt.Errorf("the revoke of the link (read idx %v) did not land", l.Revoke)
+	}
+	return nil
+}
+
 // runRoomFollow reads a feed from its link alone: on a peer directory with
 // no party it makes one (peer init), keeps the link and a cursor in the
 // rooms record, and pulls the feed to head, delivering its records as room
@@ -322,7 +354,7 @@ func (c *feedConn) pull(ctx context.Context) (int, error) {
 				}
 				return n, err
 			}
-			return n, fmt.Errorf("feed %s: %w: its owner made a new link and this one is revoked; peer room follow <the new link>", c.ref.Name, errGone)
+			return n, fmt.Errorf("feed %s: %w: its owner made a new link or closed the feed, and this one is revoked; peer room follow <the new link>", c.ref.Name, errGone)
 		}
 		if err != nil {
 			return n, fmt.Errorf("feed %s: pull: %w", c.ref.Name, err)

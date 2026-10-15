@@ -254,7 +254,7 @@ func runRoomStatus(ctx context.Context, dir string) ([]string, error) {
 			out = append(out, fmt.Sprintf("room %s (%s): following its feed by a link  cursor #%d", ref.Name, ref.ID, cursor))
 			continue
 		case stageCut:
-			out = append(out, fmt.Sprintf("room %s (%s): cut — its owner made a new link; peer room follow <the new link>", ref.Name, ref.ID))
+			out = append(out, fmt.Sprintf("room %s (%s): cut — its owner made a new link or closed the feed; peer room follow <the new link>", ref.Name, ref.ID))
 			continue
 		}
 		st, err := room.Load(ctx, p.backend, ref.ID)

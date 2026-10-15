@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -232,6 +233,62 @@ func TestRoomFeedLinkRotation(t *testing.T) {
 	}
 	if again := linkOf(t, a, "f1"); again != next[0] {
 		t.Fatal("room link without --rotate printed another link")
+	}
+}
+
+// close ends a feed for its link holder too. The link's revoke rides the
+// queue a rotation uses: when the relay does not answer it the close
+// refuses with the idx still queued and the link still reading, the owner's
+// serve retries it, and the close run again completes. The old link's pull
+// then answers revoked, a fresh follow is refused, and the holder's next
+// serve round says so and its rooms entry leaves following for cut.
+func TestRoomFeedCloseRevokesLink(t *testing.T) {
+	ctx := context.Background()
+	_, base, front := startPathFront(t, http.MethodDelete, "/members/1")
+	a := newDir(t, config{})
+	id := createRoom(t, a, base, "f1", "--feed")
+	roomSendOK(t, a, "--text", "before", "f1")
+	link := linkOf(t, a, "f1")
+	holder := filepath.Join(t.TempDir(), "peer")
+	if n, out := follow(t, holder, link); n != "1" {
+		t.Fatalf("follow delivered %s, want 1:\n%s", n, out)
+	}
+	if _, _, ast := roomOf(t, a, "f1"); ast.Link().Idx != 1 {
+		t.Fatalf("the link's read idx is %d, want 1", ast.Link().Idx)
+	}
+	f, _ := invite.ParseFeed(link)
+	rc := relay.New(f.Relay, nil)
+
+	front.arm(fail503)
+	mustRefuse(t, "the revoke of the link (read idx [1]) did not land", "room", "close", "--dir", a, "f1")
+	if _, _, ast := roomOf(t, a, "f1"); !slices.Equal(ast.Link().Revoke, []uint16{1}) {
+		t.Fatalf("the failed link revoke is not queued: %v", ast.Link().Revoke)
+	}
+	if _, err := rc.PullRoom(ctx, id, f.Token, -1); err != nil {
+		t.Fatalf("the link before its revoke landed: %v", err)
+	}
+	if out := mustOK(t, "serve", "--dir", a, "--once"); !strings.Contains(out, "the old link (read idx [1]) is revoked") {
+		t.Fatalf("the owner's serve did not retry the link's revoke:\n%s", out)
+	}
+	if out := mustOK(t, "room", "close", "--dir", a, "f1"); !strings.Contains(out, "closed room f1") {
+		t.Fatalf("the close run again:\n%s", out)
+	}
+
+	if _, err := rc.PullRoom(ctx, id, f.Token, -1); !errors.Is(err, relay.ErrRevoked) {
+		t.Fatalf("the link pulls after the close: %v, want revoked", err)
+	}
+	mustRefuse(t, "revoked", "room", "follow", "--dir", filepath.Join(t.TempDir(), "peer"), link)
+	if ref := refOf(t, holder, f.Room[:8]); ref.Stage != stageFollowing {
+		t.Fatalf("the holder's rooms entry before its round: %q", ref.Stage)
+	}
+	if out := mustOK(t, "serve", "--dir", holder, "--once"); !strings.Contains(out, "closed the feed, and this one is revoked") {
+		t.Fatalf("the holder's serve after the close:\n%s", out)
+	}
+	if ref := refOf(t, holder, f.Room[:8]); ref.Stage != stageCut || ref.Token != "" {
+		t.Fatalf("the holder's rooms entry after its round: stage %q, token %q; want cut, no token", ref.Stage, ref.Token)
+	}
+	if out := mustOK(t, "status", "--dir", holder); !strings.Contains(out, "cut — its owner made a new link or closed the feed") {
+		t.Fatalf("the holder's status:\n%s", out)
 	}
 }
 

@@ -377,8 +377,8 @@ func runRoomHandover(ctx context.Context, dir, name, peerName string, out io.Wri
 }
 
 // runRoomClose ends the room for everyone: one removal record naming every
-// other live idx with bump, their revokes, the admin's own leave record and
-// its own revoke; the local state is dropped.
+// other live idx with bump, their revokes, a feed's link revoked, the
+// admin's own leave record and its own revoke; the local state is dropped.
 func runRoomClose(ctx context.Context, dir, name string, out io.Writer) error {
 	c, err := openJoined(ctx, dir, name, out)
 	if err != nil {
@@ -412,6 +412,9 @@ func runRoomClose(ctx context.Context, dir, name string, out io.Writer) error {
 	}
 	if left := c.finishRemovals(ctx); len(left) > 0 {
 		return fmt.Errorf("room %s: the revoke of idx %v did not land; run peer room close %s again", c.ref.Name, left, c.ref.Name)
+	}
+	if err := c.closeLink(ctx); err != nil {
+		return fmt.Errorf("room %s: %v; run peer room close %s again", c.ref.Name, err, c.ref.Name)
 	}
 	if c.st.Member(c.st.Idx()) != nil {
 		seq, _, err := c.postMembership(ctx, room.KindLeave, []byte("{}"))

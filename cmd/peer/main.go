@@ -77,7 +77,8 @@ commands:
   serve     pull every channel and room, decrypt, deliver into inbox/ or quarantine/;
             a doc or file's content lands in quarantine/<id>/<name>;
             rotate the signed prekey and restock one-time prekeys;
-            between rounds, hold the relay's push socket per channel
+            between rounds, hold the relay's push socket per channel and
+            per room
             [--dir D] [--deliver DIR] [--once] [--every 30s]
   status    print every peer from the local store, and its roster page row;
             one line per room: idx, members, cursor, dropped, reported
@@ -102,7 +103,8 @@ commands:
             revoke), leave (your leave record, then your revoke; the last
             admin hands over or closes), hand the room to a member (the
             handover record, its admin token over the channel), close it
-            (everyone removed and revoked, the state dropped), or rotate
+            (everyone removed and revoked, a feed's link with them, the
+            state dropped), or rotate
             your seal key now (serve rotates it daily). A --feed room has
             one writer, you: members read, and its link lets anyone read
             it — link prints it, link --rotate makes a new one and cuts
