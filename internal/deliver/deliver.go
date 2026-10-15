@@ -20,6 +20,12 @@ import (
 	"time"
 )
 
+// KindRoster is a room's membership notice (wire contract v2 § Kinds): one
+// record per roster or leave record the fold accepted, born in the inbox of
+// every seat the room reaches — the rooms column is its acceptance, so an
+// agent's accepts list does not quarantine it.
+const KindRoster = "roster"
+
 // Place is where a record is born under the delivery directory.
 type Place string
 
@@ -39,7 +45,7 @@ func Route(kind string, accepts []string) Place {
 	if kind == "doc" || kind == "file" {
 		return Quarantine
 	}
-	if accepts == nil {
+	if kind == KindRoster || accepts == nil {
 		return Inbox
 	}
 	for _, k := range accepts {
@@ -51,13 +57,17 @@ func Route(kind string, accepts []string) Place {
 }
 
 // Record is an inbox or quarantine record: frontmatter from, to, kind,
-// verified, at — exactly those — and the envelope body. From and To are
-// protocol addresses, <party key>/<agent id>, nothing local: a petname is
-// the reader's to resolve.
+// verified, at — exactly those — and the envelope body; a record that came
+// through a room carries group, the room id, as its sixth key (plan v2
+// decision 3). From and To are protocol addresses, <party key>/<agent id>,
+// nothing local: a petname is the reader's to resolve, and so is a room's
+// local name — the record carries the id.
 type Record struct {
 	From, To, Kind string
 	At             time.Time
 	Body           []byte
+	// Group is the room id; "" for a channel message, which has no group key.
+	Group string
 }
 
 // The record grammar: what a field can be and still sit on its frontmatter
@@ -70,6 +80,7 @@ var (
 	kindRE   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 	vendorRE = regexp.MustCompile(`^vnd\.ed25519:[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{1,64}$`)
 	idRE     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	groupRE  = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // ErrRecord is a record whose own fields cannot be written. No retry fixes
@@ -98,7 +109,7 @@ func ValidVendorKind(kind string) bool { return vendorRE.MatchString(kind) }
 
 // Bytes is the record as written; a field that cannot sit on its
 // frontmatter line refuses with ErrRecord. A kind holding the party id's
-// colon is written as a quoted scalar.
+// colon is written as a quoted scalar; a group is a room id, 32 lowercase hex.
 func (r Record) Bytes() ([]byte, error) {
 	if !ValidAddr(r.From) {
 		return nil, fmt.Errorf("%w: from %q is not a protocol address", ErrRecord, r.From)
@@ -109,12 +120,19 @@ func (r Record) Bytes() ([]byte, error) {
 	if !kindRE.MatchString(r.Kind) && !ValidVendorKind(r.Kind) {
 		return nil, fmt.Errorf("%w: kind %q cannot sit on a frontmatter line", ErrRecord, r.Kind)
 	}
+	if r.Group != "" && !groupRE.MatchString(r.Group) {
+		return nil, fmt.Errorf("%w: group %q is not a room id", ErrRecord, r.Group)
+	}
 	kind := r.Kind
 	if strings.ContainsRune(kind, ':') {
 		kind = `"` + kind + `"`
 	}
-	b := fmt.Appendf(nil, "---\nfrom: %s\nto: %s\nkind: %s\nverified: true\nat: %s\n---\n",
+	b := fmt.Appendf(nil, "---\nfrom: %s\nto: %s\nkind: %s\nverified: true\nat: %s\n",
 		r.From, r.To, kind, r.At.UTC().Format(time.RFC3339Nano))
+	if r.Group != "" {
+		b = fmt.Appendf(b, "group: %s\n", r.Group)
+	}
+	b = append(b, "---\n"...)
 	return append(b, r.Body...), nil
 }
 

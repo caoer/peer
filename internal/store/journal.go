@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -34,6 +35,9 @@ type Entry struct {
 	Body []byte `json:"body"`
 	// Committed is set by MarkCommitted once the Commit this entry waited on landed.
 	Committed bool `json:"committed"`
+	// Bump is a room outbox entry whose put bumps the membership version: a
+	// removal record, which bumps however often it is retried.
+	Bump bool `json:"bump,omitempty"`
 
 	path string
 }
@@ -91,6 +95,37 @@ func (j *Journal) Entries() ([]*Entry, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// ErrBusy is a lock another process on this machine holds.
+var ErrBusy = errors.New("store: another process holds the journal's lock")
+
+// Lock takes the machine's exclusive lock on key's entries — a flock on a
+// sibling key.lock file, so two processes on one host (peer send and peer
+// serve) never put one entry twice — and returns its release. wait blocks
+// until the holder releases; without it a held lock is ErrBusy. A process
+// that dies drops its lock. The lock is per open file, so a nested Lock of
+// the same key from one process waits on itself.
+func (j *Journal) Lock(key string, wait bool) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(j.dir, key+".lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	how := syscall.LOCK_EX
+	if !wait {
+		how |= syscall.LOCK_NB
+	}
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrBusy
+		}
+		return nil, err
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // write lands e atomically: a temp file, synced, renamed over e.path.

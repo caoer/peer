@@ -101,6 +101,57 @@ func TestParseRefuses(t *testing.T) {
 	}
 }
 
+// The rooms column: names, ids and *, spaces between; empty or absent is
+// none; InRoom picks the rows naming a room in the map's order.
+func TestParseRooms(t *testing.T) {
+	id := strings.Repeat("0f", 16)
+	m, err := Parse([]byte("| label | to | accepts | rooms |\n|---|---|---|---|\n" +
+		"| leader | [[" + sess + "/rosters/leader-peer-v1]] | text task | ops " + id + " ops |\n" +
+		"| cli | [[" + sess + "/rosters/worker-cli]] | text | * |\n" +
+		"| zt | human [[" + sess + "/rosters/advisor-demo]] | text | |\n" +
+		"| hook | service https://example.net/peer/hook | text | |\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := m.Row("leader"); !reflect.DeepEqual(r.Rooms, []string{"ops", id}) {
+		t.Fatalf("leader's rooms: %v", r.Rooms)
+	}
+	if r, _ := m.Row("zt"); r.Rooms != nil {
+		t.Fatalf("an empty rooms cell: %v", r.Rooms)
+	}
+	labels := func(rows []Row) (out []string) {
+		for _, r := range rows {
+			out = append(out, r.Label)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name, id string
+		want     []string
+	}{
+		{"ops", "", []string{"leader", "cli"}},
+		{"0f0f0f0f", id, []string{"leader", "cli"}},
+		{"chat", strings.Repeat("1", 32), []string{"cli"}},
+	} {
+		if got := labels(m.InRoom(c.name, c.id)); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("InRoom(%q, %q) = %v, want %v", c.name, c.id, got, c.want)
+		}
+	}
+	// A map without the column is a map where no row takes a room.
+	m, err = Parse([]byte("| label | to | accepts |\n|---|---|---|\n| cli | [[" + sess + "/rosters/worker-cli]] | text |\n"))
+	if err != nil || m.InRoom("ops", id) != nil {
+		t.Fatalf("no rooms column: %v, %v", err, m.InRoom("ops", id))
+	}
+	for _, c := range []struct{ name, text, reason string }{
+		{"bad room", "| label | to | accepts | rooms |\n|---|---|---|---|\n| cli | [[" + sess + "/rosters/worker-cli]] | text | ops/x |\n", `room "ops/x" is not a room name`},
+		{"service room", "| label | to | accepts | rooms |\n|---|---|---|---|\n| hook | service https://example.net/peer/hook | text | * |\n", "a service row takes no rooms"},
+	} {
+		if _, err := Parse([]byte(c.text)); !errors.Is(err, ErrMap) || !strings.Contains(err.Error(), c.reason) {
+			t.Errorf("%s: %v, want ErrMap naming %q", c.name, err, c.reason)
+		}
+	}
+}
+
 func TestLoad(t *testing.T) {
 	if _, err := Load("testdata/absent.md"); err == nil || !strings.Contains(err.Error(), "seat map testdata/absent.md") {
 		t.Errorf("absent map: %v", err)

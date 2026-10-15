@@ -62,6 +62,26 @@ func TestRecordBytes(t *testing.T) {
 	}
 }
 
+// A room record carries group, the room id, as its sixth key, after at; a
+// group that is not a room id refuses.
+func TestRecordBytesGroup(t *testing.T) {
+	at := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	group := strings.Repeat("ab", 16)
+	b, err := Record{From: ancan, To: zt, Kind: "text", At: at, Body: []byte("hi all\n"), Group: group}.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "---\nfrom: " + ancan + "\nto: " + zt + "\nkind: text\nverified: true\nat: 2026-10-15T09:00:00Z\ngroup: " + group + "\n---\nhi all\n"
+	if string(b) != want {
+		t.Fatalf("record:\n%s\nwant:\n%s", b, want)
+	}
+	for _, bad := range []string{"AB" + group[2:], group[:31], group + "\nkind: ack", "r1"} {
+		if _, err := (Record{From: ancan, To: zt, Kind: "text", At: at, Group: bad}).Bytes(); !errors.Is(err, ErrRecord) {
+			t.Errorf("group %q: %v, want ErrRecord", bad, err)
+		}
+	}
+}
+
 // The documented vendor kind — vnd.<party id>.<name>, so it holds the party
 // id's colon — is a record the writer can write, as a quoted scalar.
 func TestRecordBytesVendorKind(t *testing.T) {
@@ -115,5 +135,15 @@ func TestWriteOnce(t *testing.T) {
 	}
 	if _, born, err := Write(dir, Quarantine, "m2", r); err != nil || !born {
 		t.Fatalf("quarantine write: born=%v err=%v", born, err)
+	}
+}
+
+// A roster notice lands in the inbox whatever the seat's accepts says: a
+// list without roster, and an empty list that takes no other kind.
+func TestRouteRosterWhateverAccepts(t *testing.T) {
+	for _, accepts := range [][]string{{"text", "task"}, {}, nil} {
+		if got := Route(KindRoster, accepts); got != Inbox {
+			t.Errorf("Route(%q, %v) = %s, want %s", KindRoster, accepts, got, Inbox)
+		}
 	}
 }

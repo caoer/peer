@@ -22,6 +22,8 @@ import (
 // state, put, clear. A commit another host beat drops the ciphertext and
 // re-encrypts from the fresh state; a put that fails after the commit
 // leaves the message in the outbox, where the next send or serve puts it.
+// A room's name sends into the room instead (runRoomSend): to every member,
+// or to the members --to names.
 func cmdSend(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("send", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -30,14 +32,25 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 	fromFlag := fl.String("from", "", "the sending agent's id on your card (default none: the party itself)")
 	textFlag := fl.String("text", "", "the body (default --file, else stdin)")
 	fileFlag := fl.String("file", "", "doc and file kinds: the file to attach; other kinds: read the body from this file")
+	var toFlag listFlag
+	fl.Var(&toFlag, "to", "a room send: the members it goes to, each a peer name or party id with an optional /agent; a comma list or the flag again (default every member)")
 	if err := fl.Parse(args); err != nil {
 		return 2
 	}
 	if fl.NArg() != 1 || fl.Arg(0) == "" {
-		fmt.Fprintln(stderr, "usage: peer send [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]")
+		fmt.Fprintln(stderr, "usage: peer send [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]\n       peer send [--dir D] [--kind K] [--from AGENT] [--text T | --file F] [--to MEMBER[/AGENT],...] <room>")
 		return 2
 	}
+	toRoom, err := isRoomTarget(context.Background(), *dirFlag, fl.Arg(0), len(toFlag) > 0)
+	if err != nil {
+		fmt.Fprintf(stderr, "peer send: %v\n", err)
+		return 1
+	}
 	if *kindFlag == session.KindDoc || *kindFlag == session.KindFile {
+		if toRoom {
+			fmt.Fprintf(stderr, "peer send: a %s goes to a peer: a room carries no blob in this version\n", *kindFlag)
+			return 2
+		}
 		if *fileFlag == "" || *textFlag != "" {
 			fmt.Fprintf(stderr, "peer send: a %s message is a file: --file F, and no --text\n", *kindFlag)
 			return 2
@@ -67,6 +80,11 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		body = b
+	}
+	if toRoom {
+		return printSent(stdout, stderr, func() (*sendResult, error) {
+			return runRoomSend(context.Background(), stderr, *dirFlag, fl.Arg(0), toFlag, *fromFlag, *kindFlag, body)
+		})
 	}
 	return printSent(stdout, stderr, func() (*sendResult, error) {
 		return runSend(context.Background(), stderr, *dirFlag, fl.Arg(0), *fromFlag, *kindFlag, body)
@@ -101,6 +119,9 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 	name, agent := splitAddr(target)
 	if kind == session.KindCard {
 		return nil, errors.New("a card goes out with peer card publish, not peer send")
+	}
+	if session.RoomKind(kind) {
+		return nil, fmt.Errorf("a %s goes out with peer room add and serve, not peer send", kind)
 	}
 	if !session.ValidKind(kind) {
 		return nil, fmt.Errorf("%w %q: a vendor kind is vnd.<party id>.<name>", session.ErrKind, kind)

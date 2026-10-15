@@ -46,13 +46,15 @@ var serviceClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// servicePost is the POST body: the record's five keys and its body.
+// servicePost is the POST body: the record's five keys, group — the room id
+// — for a record that came through a room, and its body.
 type servicePost struct {
 	From     string `json:"from"`
 	To       string `json:"to"`
 	Kind     string `json:"kind"`
 	Verified bool   `json:"verified"`
 	At       string `json:"at"`
+	Group    string `json:"group,omitempty"`
 	Body     string `json:"body"`
 }
 
@@ -61,6 +63,7 @@ type servicePost struct {
 type serviceEntry struct {
 	URL      string          `json:"url"`
 	Message  json.RawMessage `json:"message"`
+	Group    string          `json:"group,omitempty"`
 	Failures int             `json:"failures"`
 	Last     string          `json:"last"`
 }
@@ -75,27 +78,28 @@ func (sv *server) serviceRow(m *session.Message) (seats.Row, bool) {
 // — a doc or file as its descriptor and content line, the content staying
 // on this host; any other kind is never posted and becomes a local
 // quarantine record. A failed POST is queued, not returned: the cursor moves
-// on and the queue retries it.
-func (sv *server) toService(row seats.Row, m *session.Message, raw []byte) error {
+// on and the queue retries it. group is the room id of a room record, "" for
+// a channel message.
+func (sv *server) toService(row seats.Row, m *session.Message, raw []byte, group string) error {
 	if !slices.Contains(row.Accepts, m.Kind) {
-		return sv.quarantineLocal(m, fmt.Sprintf("not posted to %s: %s is not a kind the row accepts", row.URL, m.Kind))
+		return sv.quarantineLocal(m, group, fmt.Sprintf("not posted to %s: %s is not a kind the row accepts", row.URL, m.Kind))
 	}
-	err := postService(row.URL, m)
+	err := postService(row.URL, m, group)
 	if err == nil {
-		return sv.posted(row.URL, m)
+		return sv.posted(row.URL, m, group)
 	}
-	return sv.serviceFailed(&serviceEntry{URL: row.URL, Message: raw}, m, err)
+	return sv.serviceFailed(&serviceEntry{URL: row.URL, Message: raw, Group: group}, m, err)
 }
 
 // posted reports m delivered to u. A doc or file whose content serve did not
 // fetch is also born as a local quarantine record: the body posted names
 // peer fetch <id> as its retry, and peer fetch reads the descriptor there.
-func (sv *server) posted(u string, m *session.Message) error {
+func (sv *server) posted(u string, m *session.Message, group string) error {
 	fmt.Fprintf(sv.out, "delivered %s %s → %s\n", m.Kind, m.ID, u)
 	if !isAttachment(m.Kind) || contentFetched(m.Body) {
 		return nil
 	}
-	return sv.quarantineLocal(m, fmt.Sprintf("content not fetched; the record was posted to %s", u))
+	return sv.quarantineLocal(m, group, fmt.Sprintf("content not fetched; the record was posted to %s", u))
 }
 
 // retryServices tries every queued message once, in id order. A URL whose
@@ -128,14 +132,14 @@ func (sv *server) retryServices() {
 		if failed[e.URL] {
 			continue
 		}
-		if err := postService(e.URL, m); err != nil {
+		if err := postService(e.URL, m, e.Group); err != nil {
 			failed[e.URL] = true
 			if err := sv.serviceFailed(&e, m, err); err != nil {
 				fmt.Fprintf(sv.out, "service queue %s: %v\n", m.ID, err)
 			}
 			continue
 		}
-		if err := sv.posted(e.URL, m); err != nil {
+		if err := sv.posted(e.URL, m, e.Group); err != nil {
 			// The entry stays: the next round posts it again and births its record.
 			fmt.Fprintf(sv.out, "service queue %s: %v\n", m.ID, err)
 			continue
@@ -156,7 +160,7 @@ func (sv *server) serviceFailed(e *serviceEntry, m *session.Message, cause error
 		fmt.Fprintf(sv.out, "%s %s → %s: %v; retry %d of %d next round\n", m.Kind, m.ID, e.URL, cause, e.Failures, retries)
 		return writeServiceEntry(path, e)
 	}
-	if err := sv.quarantineLocal(m, fmt.Sprintf("not delivered to %s: %s", e.URL, e.Last)); err != nil {
+	if err := sv.quarantineLocal(m, e.Group, fmt.Sprintf("not delivered to %s: %s", e.URL, e.Last)); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -174,10 +178,10 @@ func (sv *server) serviceRetries() int {
 
 // quarantineLocal births m in the local delivery directory's quarantine:
 // its body first — a doc or file's descriptor where peer fetch reads it —
-// then a blank line and the reason.
-func (sv *server) quarantineLocal(m *session.Message, reason string) error {
+// then a blank line and the reason; group as the record's sixth key.
+func (sv *server) quarantineLocal(m *session.Message, group, reason string) error {
 	body := fmt.Appendf(nil, "%s\n\n%s\n", bytes.TrimSuffix(m.Body, []byte("\n")), reason)
-	path, _, err := deliver.Write(sv.dir, deliver.Quarantine, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: body})
+	path, _, err := deliver.Write(sv.dir, deliver.Quarantine, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: body, Group: group})
 	if err != nil {
 		return err
 	}
@@ -186,14 +190,14 @@ func (sv *server) quarantineLocal(m *session.Message, reason string) error {
 }
 
 // postService is one POST of m's record to u.
-func postService(u string, m *session.Message) error {
+func postService(u string, m *session.Message, group string) error {
 	pu, err := url.Parse(u)
 	if err != nil || pu.Scheme != "https" {
 		return fmt.Errorf("%q is not an https URL", u)
 	}
 	b, err := json.Marshal(servicePost{
 		From: m.From, To: m.To, Kind: m.Kind, Verified: true,
-		At: m.At.UTC().Format(time.RFC3339Nano), Body: string(m.Body),
+		At: m.At.UTC().Format(time.RFC3339Nano), Group: group, Body: string(m.Body),
 	})
 	if err != nil {
 		return err

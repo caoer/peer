@@ -35,18 +35,22 @@ func (s *Server) NoPush(off bool) {
 	s.noPush = off
 }
 
-// CloseSockets closes every open socket with 1001, as a deploy restarting
-// the Object does.
+// CloseSockets closes every open socket, channel and room, with 1001, as a
+// deploy restarting the Object does.
 func (s *Server) CloseSockets() {
 	s.mu.Lock()
-	var open []*sock
+	var open []*websocket.Conn
 	for k := range s.push.socks {
-		open = append(open, k)
+		open = append(open, k.conn)
 		delete(s.push.socks, k)
 	}
+	for k := range s.rooms.socks {
+		open = append(open, k.conn)
+		delete(s.rooms.socks, k)
+	}
 	s.mu.Unlock()
-	for _, k := range open {
-		k.conn.Close(websocket.StatusGoingAway, "deploy")
+	for _, c := range open {
+		c.Close(websocket.StatusGoingAway, "deploy")
 	}
 }
 
@@ -63,7 +67,8 @@ func (s *Server) Sockets(id, dir string) int {
 	return n
 }
 
-// DropPushes loses the next n pushes: the rows are stored, no frame goes out.
+// DropPushes loses the next n pushes, channel or room: the rows are stored,
+// no frame goes out.
 func (s *Server) DropPushes(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -54,6 +54,8 @@ type Server struct {
 	// noPush and push are the WebSocket push (push.go).
 	noPush bool
 	push   push
+	// rooms is the room state (room.go).
+	rooms rooms
 }
 
 // New makes a relay whose owner login is login.
@@ -145,6 +147,9 @@ func fail(w http.ResponseWriter, e *relay.Error) {
 
 // ServeHTTP serves the contract from memory.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.serveRoom(w, r) {
+		return
+	}
 	if s.upgrade(w, r) {
 		return
 	}

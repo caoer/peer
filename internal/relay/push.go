@@ -52,7 +52,12 @@ func (c *Client) Subscribe(ctx context.Context, id, token string) (*Socket, erro
 	if err := checkIDs(id, token); err != nil {
 		return nil, err
 	}
-	conn, resp, err := websocket.Dial(ctx, c.base+"/c/"+id+"/envelopes", &websocket.DialOptions{
+	return c.dial(ctx, "/c/"+id+"/envelopes", token)
+}
+
+// dial opens a push socket on path with token; Subscribe's refusals.
+func (c *Client) dial(ctx context.Context, path, token string) (*Socket, error) {
+	conn, resp, err := websocket.Dial(ctx, c.base+path, &websocket.DialOptions{
 		HTTPClient:      c.http,
 		HTTPHeader:      http.Header{"Authorization": {"Bearer " + token}},
 		CompressionMode: websocket.CompressionDisabled,
@@ -101,33 +106,42 @@ func (s *Socket) keepalive(ctx context.Context) {
 // caller reconnects. A frame without a seq breaks the contract
 // (ErrAnswer): nothing in it can be placed.
 func (s *Socket) Next(ctx context.Context) (Record, error) {
+	b, err := s.next(ctx)
+	switch websocket.CloseStatus(err) {
+	case closeBadToken:
+		return Record{}, ErrBadToken
+	case closeNoSuchChannel:
+		return Record{}, ErrNoSuchChannel
+	}
+	if err != nil {
+		return Record{}, err
+	}
+	var r wireRow
+	if err := json.Unmarshal(b, &r); err != nil {
+		return Record{}, fmt.Errorf("%w: frame: %v", ErrAnswer, err)
+	}
+	if r.Seq == nil || *r.Seq < 0 {
+		return Record{}, fmt.Errorf("%w: frame without a seq", ErrAnswer)
+	}
+	return r.record(), nil
+}
+
+// next returns the next text frame that is not a pong. A read that sees
+// nothing for idleAfter fails; a close comes back as the read's error.
+func (s *Socket) next(ctx context.Context) ([]byte, error) {
 	for {
 		rctx, cancel := context.WithTimeout(ctx, idleAfter)
 		typ, b, err := s.conn.Read(rctx)
 		cancel()
-		switch websocket.CloseStatus(err) {
-		case closeBadToken:
-			return Record{}, ErrBadToken
-		case closeNoSuchChannel:
-			return Record{}, ErrNoSuchChannel
-		}
 		if err != nil {
-			return Record{}, err
+			return nil, err
 		}
 		if typ != websocket.MessageText {
-			return Record{}, fmt.Errorf("%w: a binary frame", ErrAnswer)
+			return nil, fmt.Errorf("%w: a binary frame", ErrAnswer)
 		}
-		if string(b) == "pong" {
-			continue
+		if string(b) != "pong" {
+			return b, nil
 		}
-		var r wireRow
-		if err := json.Unmarshal(b, &r); err != nil {
-			return Record{}, fmt.Errorf("%w: frame: %v", ErrAnswer, err)
-		}
-		if r.Seq == nil || *r.Seq < 0 {
-			return Record{}, fmt.Errorf("%w: frame without a seq", ErrAnswer)
-		}
-		return r.record(), nil
 	}
 }
 

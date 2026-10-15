@@ -368,7 +368,12 @@ func (c *Client) Landing(ctx context.Context, id string) (string, error) {
 	if !ValidChannelID(id) {
 		return "", fmt.Errorf("relay: bad channel id %q", id)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/i/"+id, nil)
+	return c.landing(ctx, "/i/"+id)
+}
+
+// landing fetches a landing text at path, at most maxLanding bytes.
+func (c *Client) landing(ctx context.Context, path string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
 		return "", err
 	}

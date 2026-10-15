@@ -34,8 +34,21 @@ func (s *syncBuffer) String() string {
 // the test ends; reconnects back off in milliseconds.
 func runServe(t *testing.T, dir string, every time.Duration) *syncBuffer {
 	t.Helper()
+	fastBackoff(t)
+	return serveLoop(t, dir, every)
+}
+
+// fastBackoff makes reconnects back off in milliseconds until the test ends;
+// set once before any loop starts, as the loops read it.
+func fastBackoff(t *testing.T) {
 	oldMin, oldMax := backoffMin, backoffMax
 	backoffMin, backoffMax = 10*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() { backoffMin, backoffMax = oldMin, oldMax })
+}
+
+// serveLoop runs serve's loop on dir until the test ends.
+func serveLoop(t *testing.T, dir string, every time.Duration) *syncBuffer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	out := &syncBuffer{}
 	sv, err := openServer(dir, "", out)
@@ -52,7 +65,6 @@ func runServe(t *testing.T, dir string, every time.Duration) *syncBuffer {
 		if code := <-done; code != 0 {
 			t.Errorf("serve loop exit %d", code)
 		}
-		backoffMin, backoffMax = oldMin, oldMax
 		t.Logf("serve output:\n%s", out)
 	})
 	return out
@@ -88,24 +100,41 @@ func deliveredOnce(t *testing.T, out *syncBuffer, hostDir string, ids ...string)
 	}
 }
 
-// settle waits for the socket to open, then sends a warm-up message and
-// waits for its delivery: events are taken in order, so the open's pull has
-// answered by then.
-func settle(t *testing.T, out *syncBuffer, p *pair) string {
+// waitPulls waits until the relay has answered n pulls of the host's rows.
+func waitPulls(t *testing.T, srv *relaytest.Server, p *pair, n int) {
 	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for srv.Pulls(p.channel, "g2h") < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("the relay answered %d pulls, want %d", srv.Pulls(p.channel, "g2h"), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// settle runs serve on the host until its socket is open and the open's pull
+// has answered — nothing waits on the relay, so the first round pulls once
+// and the open once more — then sends a warm-up, which only its frame can
+// deliver, and waits for that. It returns serve's output, the warm-up's id
+// and the pulls answered so far. The "delivered" line alone is no sign the
+// open's pull is done: a warm-up put before that pull is read by it, and
+// the pull's last, empty, GET comes after the line.
+func settle(t *testing.T, srv *relaytest.Server, p *pair) (*syncBuffer, string, int) {
+	t.Helper()
+	pulls := srv.Pulls(p.channel, "g2h") + 2
+	out := runServe(t, p.hostDir, time.Hour)
 	waitFor(t, out, "ancan: push socket open", 1)
+	waitPulls(t, srv, p, pulls)
 	id, _ := sendOK(t, p.guestDir, "--text", "warm-up", "zt/advisor")
 	waitFor(t, out, "delivered text "+id, 1)
-	return id
+	return out, id, srv.Pulls(p.channel, "g2h")
 }
 
 // A pushed frame is delivered once, by the frame: no pull runs for it.
 func TestPushDeliversAFrameOnce(t *testing.T) {
 	srv, _, base := relaytest.Start(t, login)
 	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
-	out := runServe(t, p.hostDir, time.Hour)
-	id0 := settle(t, out, p)
-	pulls := srv.Pulls(p.channel, "g2h")
+	out, id0, pulls := settle(t, srv, p)
 
 	id1, _ := sendOK(t, p.guestDir, "--text", "pushed one", "zt/advisor")
 	waitFor(t, out, "delivered text "+id1, 1)
@@ -159,10 +188,9 @@ func TestPushPullsAfterEveryNFrames(t *testing.T) {
 	cfg := hostCfg()
 	cfg.Push.PullEvery = 3
 	p := handshake(t, newDir(t, cfg), newDir(t, config{}), base)
-	out := runServe(t, p.hostDir, time.Hour)
 	// The warm-up is the cycle's first frame.
-	ids := []string{settle(t, out, p)}
-	pulls := srv.Pulls(p.channel, "g2h")
+	out, id0, pulls := settle(t, srv, p)
+	ids := []string{id0}
 
 	send := func(text string) {
 		id, _ := sendOK(t, p.guestDir, "--text", text, "zt/advisor")
@@ -174,7 +202,10 @@ func TestPushPullsAfterEveryNFrames(t *testing.T) {
 		t.Fatalf("%d pulls after 2 frames with push.pullEvery 3, want 0", n)
 	}
 	send("the third frame")
-	// The next cycle's first frame is taken after the third frame's pull.
+	// The third frame's pull runs after its "delivered" line: a fourth put
+	// before that pull is read by it, at two GETs, and its frame is then a
+	// duplicate. The next cycle's first frame is sent once the pull answered.
+	waitPulls(t, srv, p, pulls+1)
 	send("the fourth frame")
 	if n := srv.Pulls(p.channel, "g2h") - pulls; n != 1 {
 		t.Fatalf("%d pulls after 4 frames with push.pullEvery 3, want 1", n)

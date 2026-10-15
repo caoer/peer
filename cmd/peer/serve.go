@@ -70,8 +70,13 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 type server struct {
 	p     *party
 	spool *store.Journal
-	dir   string
-	out   io.Writer
+	// roomSpool is the room records' spool (roomdeliver.go).
+	roomSpool *store.Journal
+	dir       string
+	out       io.Writer
+	// command is a command's server (commandServer): the room records its
+	// pulls pass stay in the room spool, committed, and serve births them.
+	command bool
 	// beat is the serve interval and page the roster page, nil without one
 	// (status.go).
 	beat time.Duration
@@ -114,20 +119,43 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newServer(p, deliverTo, out)
+}
+
+// newServer is the party's serve: its spools and delivery directory.
+func newServer(p *party, deliverTo string, out io.Writer) (*server, error) {
 	if deliverTo == "" {
 		deliverTo = p.cfg.Deliver
 	}
 	if deliverTo == "" {
-		deliverTo = filepath.Join(dir, deliverDir)
+		deliverTo = filepath.Join(p.dir, deliverDir)
 	}
-	spool, err := store.OpenJournal(filepath.Join(dir, spoolDir))
+	spool, err := store.OpenJournal(filepath.Join(p.dir, spoolDir))
 	if err != nil {
 		return nil, err
 	}
-	sv := &server{p: p, spool: spool, dir: deliverTo, out: out, unanswered: map[string][]relay.Prekey{}}
+	roomSpool, err := store.OpenJournal(filepath.Join(p.dir, roomSpoolDir))
+	if err != nil {
+		return nil, err
+	}
+	sv := &server{p: p, spool: spool, roomSpool: roomSpool, dir: deliverTo, out: out, unanswered: map[string][]relay.Prekey{}}
 	if err := sv.loadSeats(); err != nil {
 		return nil, err
 	}
+	return sv, nil
+}
+
+// commandServer is the server a command's room pull runs under — peer send,
+// room add, the membership commands. It does not know the delivery directory
+// a running serve was started with (--deliver), so the records its pull
+// passes are committed and left in the room spool: serve births them, at its
+// next round or start, where it delivers.
+func commandServer(p *party, out io.Writer) (*server, error) {
+	sv, err := newServer(p, "", out)
+	if err != nil {
+		return nil, err
+	}
+	sv.command = true
 	return sv, nil
 }
 
@@ -138,15 +166,22 @@ var errSpool = errors.New("spool entry does not open")
 // start finishes the spool births a crash cut, before the first round.
 func (sv *server) start(ctx context.Context) error {
 	sv.p.timelineRound(sv.out)
-	return sv.replaySpool(ctx)
+	if err := sv.replaySpool(ctx); err != nil {
+		return err
+	}
+	return sv.replayRoomSpool(ctx)
 }
 
 // replaySpool births the spool entries whose commit landed and drops the
-// rest (store.ReplaySpool). An entry that can never be born — its own
-// address, kind or id refuses — is dropped with its reason, so one such entry
-// cannot stop delivery on every channel.
+// rest (store.ReplaySpool); a room channel message's entry runs its step
+// instead (receiveRoom). An entry that can never be born — its own address,
+// kind or id refuses — is dropped with its reason, so one such entry cannot
+// stop delivery on every channel.
 func (sv *server) replaySpool(ctx context.Context) error {
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
+		if m, err := session.UnmarshalMessage(e.Body); err == nil && session.RoomKind(m.Kind) {
+			return sv.replayRoomStep(ctx, e, m)
+		}
 		plain := e.Body
 		sv.withAttachment(e)
 		_, err := sv.birth(e)
@@ -181,6 +216,9 @@ func (sv *server) round(ctx context.Context) error {
 	if err := sv.replaySpool(ctx); err != nil {
 		fmt.Fprintf(sv.out, "spool: %v\n", err)
 	}
+	if err := sv.replayRoomSpool(ctx); err != nil {
+		fmt.Fprintf(sv.out, "room spool: %v\n", err)
+	}
 	if err := sv.p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(sv.out, "outbox: %v\n", err)
 	}
@@ -199,6 +237,9 @@ func (sv *server) round(ctx context.Context) error {
 		if err := sv.serveChannel(ctx, pe); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", pe.Name, err))
 		}
+	}
+	if err := sv.serveRooms(ctx); err != nil {
+		errs = append(errs, err)
 	}
 	sv.writeRoster(ctx)
 	return errors.Join(errs...)
@@ -575,7 +616,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	if err == nil {
 		err = c.checkAddress(m)
 	}
-	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard {
+	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard && !session.RoomKind(m.Kind) {
 		err = c.sv.uccBorder(m)
 	}
 	// A record built under an identity key the pinned card does not list is
@@ -607,6 +648,9 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 		}
 		c.sv.p.writeTimeline(ctx, c.pe.Name, c.ch.Name(), timeline.In, rec.Seq, m)
 		return nil
+	}
+	if session.RoomKind(m.Kind) {
+		return c.receiveRoom(ctx, rec, m)
 	}
 	plain, err := m.Marshal()
 	if err != nil {
@@ -863,7 +907,7 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 	dir, place := sv.dir, deliver.Route(m.Kind, sv.p.accepts(agent))
 	if sv.seats != nil {
 		if row, ok := sv.serviceRow(m); ok {
-			return "", sv.toService(row, m, e.Body)
+			return "", sv.toService(row, m, e.Body, "")
 		}
 		if dir, place, err = sv.uccPlace(m); err != nil {
 			return "", err

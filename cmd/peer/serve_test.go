@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,29 +69,36 @@ type pair struct {
 
 func handshake(t *testing.T, hostDir, guestDir, base string) *pair {
 	t.Helper()
+	return handshakeNamed(t, hostDir, guestDir, base, "ancan", "zt")
+}
+
+// handshakeNamed is handshake with the petnames chosen: the host calls the
+// guest guestName, the guest calls the host hostName.
+func handshakeNamed(t *testing.T, hostDir, guestDir, base, guestName, hostName string) *pair {
+	t.Helper()
 	p := &pair{hostDir: hostDir, guestDir: guestDir, hostRoot: rootOf(t, hostDir), guestRoot: rootOf(t, guestDir)}
 	p.hostParty, p.guestParty = keys.PartyID(p.hostRoot.Public()), keys.PartyID(p.guestRoot.Public())
-	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, "ancan")
+	out := mustOK(t, "invite", "--dir", hostDir, "--relay", base, "--login", login, guestName)
 	link, _, _ := strings.Cut(out, "\n")
 	l, err := invite.Parse(link, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.channel = l.Channel
-	out = mustOK(t, "accept", "--dir", guestDir, "--name", "zt", link)
+	out = mustOK(t, "accept", "--dir", guestDir, "--name", hostName, link)
 	code := codeRE.FindStringSubmatch(out)
 	if code == nil {
 		t.Fatalf("accept printed no code:\n%s", out)
 	}
-	mustOK(t, "confirm", "--dir", hostDir, "--code", code[1], "ancan")
+	mustOK(t, "confirm", "--dir", hostDir, "--code", code[1], guestName)
 	// The guest's serve takes the host's details card and answers with its
 	// own; the host's serve takes that one.
 	out = mustOK(t, "serve", "--dir", guestDir, "--once")
-	if !strings.Contains(out, "confirmed zt: their card with details is pinned, yours went out") {
+	if !strings.Contains(out, "confirmed "+hostName+": their card with details is pinned, yours went out") {
 		t.Fatalf("guest serve:\n%s", out)
 	}
 	out = mustOK(t, "serve", "--dir", hostDir, "--once")
-	if !strings.Contains(out, "card from ancan pinned") {
+	if !strings.Contains(out, "card from "+guestName+" pinned") {
 		t.Fatalf("host serve:\n%s", out)
 	}
 	return p
@@ -538,9 +546,12 @@ func TestServeCrashAfterCommitReplaysOnce(t *testing.T) {
 }
 
 // serveChild is the second process: one serve round on PEER_SERVE_DIR that
-// stops before its first commit until the parent says go.
+// stops before its first commit until the parent says go. With
+// PEER_SERVE_ROUNDS=n the host stays up for n rounds, printing "up" and
+// starting each round on a line from the parent.
 func serveChild() int {
 	ctx := context.Background()
+	in := bufio.NewReader(os.Stdin)
 	sv, err := openServer(os.Getenv("PEER_SERVE_DIR"), "", os.Stdout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -553,18 +564,35 @@ func serveChild() int {
 		}
 		paused = true
 		fmt.Println("ready")
-		_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		_, err := in.ReadString('\n')
 		return err
 	}
 	if err := sv.start(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := sv.round(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+	rounds, gated := 1, false
+	if n := os.Getenv("PEER_SERVE_ROUNDS"); n != "" {
+		if rounds, err = strconv.Atoi(n); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		gated = true
 	}
-	fmt.Println("done")
+	for i := 0; i < rounds; i++ {
+		if gated {
+			fmt.Println("up")
+			if _, err := in.ReadString('\n'); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		}
+		if err := sv.round(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Println("done")
+	}
 	return 0
 }
 
@@ -575,10 +603,10 @@ type serveProc struct {
 	delivered, conflicts int
 }
 
-func startServeChild(t *testing.T, dir string) *serveProc {
+func startServeChild(t *testing.T, dir string, env ...string) *serveProc {
 	t.Helper()
 	cmd := exec.Command(os.Args[0])
-	cmd.Env = append(os.Environ(), "PEER_SERVE_CHILD=1", "PEER_SERVE_DIR="+dir)
+	cmd.Env = append(append(os.Environ(), env...), "PEER_SERVE_CHILD=1", "PEER_SERVE_DIR="+dir)
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -615,6 +643,26 @@ func (c *serveProc) readUntil(t *testing.T, want string) {
 	}
 }
 
+// secondHost is a second host of the party at dir: init's files and the
+// config; its own spool, outbox and delivery directory; the state shared.
+func secondHost(t *testing.T, dir string) string {
+	t.Helper()
+	host := filepath.Join(t.TempDir(), "peer")
+	if err := os.MkdirAll(host, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{rootFile, identityFile, partyKeysFile, configFile} {
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(host, n), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return host
+}
+
 // Two OS processes serve the same channel on one shared state — the file
 // backend and the pages backend — holding the same version when they
 // commit: exactly one inbox birth per message, none lost, every spool
@@ -638,21 +686,7 @@ func TestTwoHostsServeOneState(t *testing.T) {
 				id, _ := sendOK(t, p.guestDir, "--text", fmt.Sprintf("message %d", i), "zt/advisor")
 				ids = append(ids, id)
 			}
-			// A second host of the party: init's files and the config; its own
-			// spool, outbox and delivery directory; the state shared.
-			hostB := filepath.Join(t.TempDir(), "peer")
-			if err := os.MkdirAll(hostB, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			for _, n := range []string{rootFile, identityFile, partyKeysFile, configFile} {
-				b, err := os.ReadFile(filepath.Join(p.hostDir, n))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(hostB, n), b, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
+			hostB := secondHost(t, p.hostDir)
 			a, b := startServeChild(t, p.hostDir), startServeChild(t, hostB)
 			// Both decrypted and spooled the first message from the same version.
 			a.readUntil(t, "ready")
@@ -702,6 +736,93 @@ func TestTwoHostsServeOneState(t *testing.T) {
 				if !hch.Seen(id) {
 					t.Errorf("%s not in the shared seen set", id)
 				}
+			}
+		})
+	}
+}
+
+// The milestone-1 demo in one test: party A serves on two hosts sharing one
+// state, party B on one, and one message goes each way while all three
+// serve. Each message is born exactly once on its receiving side — on A once
+// across both hosts, whose commits race — and both A hosts stay up through
+// the exchange and serve a round after it.
+func TestThreeHostsServeBothWays(t *testing.T) {
+	for _, kind := range []string{"file", "pages"} {
+		t.Run(kind, func(t *testing.T) {
+			_, _, base := relaytest.Start(t, login)
+			cfg := hostCfg()
+			switch kind {
+			case "file":
+				cfg.State.Dir = filepath.Join(t.TempDir(), "shared-state")
+			case "pages":
+				ps := pagestest.New("state-0123456789abcdef", "zt:token")
+				t.Cleanup(ps.Close)
+				cfg.State = stateConfig{Page: ps.URL, Slug: ps.Slug, Login: ps.Bearer}
+			}
+			p := handshake(t, newDir(t, cfg), newDir(t, config{}), base)
+			a2 := secondHost(t, p.hostDir)
+			hosts := []*serveProc{
+				startServeChild(t, p.hostDir, "PEER_SERVE_ROUNDS=2"),
+				startServeChild(t, a2, "PEER_SERVE_ROUNDS=2"),
+			}
+			say := func(line string) {
+				for _, c := range hosts {
+					if _, err := io.WriteString(c.stdin, line+"\n"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			until := func(want string) {
+				for _, c := range hosts {
+					c.readUntil(t, want)
+				}
+			}
+			until("up")
+
+			// One message each way while A's hosts serve: B → A from B's one
+			// host, A → B from A's second host.
+			toA, _ := sendOK(t, p.guestDir, "--text", "hello from B", "zt/advisor")
+			toB, _ := sendOK(t, a2, "--text", "hello from A", "ancan")
+
+			// A's round: both hosts decrypt B's message from the same version
+			// and commit together.
+			say("round")
+			until("ready")
+			say("go")
+			until("done")
+
+			// B's host takes A's message.
+			out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
+			if n := strings.Count(out, "delivered text "+toB+" → "); n != 1 {
+				t.Errorf("B's serve delivered %s %d times, want once:\n%s", toB, n, out)
+			}
+
+			// A's hosts serve on after the exchange: a round each, then a clean exit.
+			until("up")
+			say("round")
+			until("done")
+			for _, c := range hosts {
+				if err := c.cmd.Wait(); err != nil {
+					t.Errorf("an A host went down: %v", err)
+				}
+			}
+
+			bornA := map[string]int{}
+			for _, d := range []string{p.hostDir, a2} {
+				for id := range records(t, deliverDirOf(d), deliver.Inbox) {
+					bornA[id]++
+				}
+			}
+			if bornA[toA] != 1 || len(bornA) != 1 || hosts[0].delivered+hosts[1].delivered != 1 {
+				t.Errorf("on A: %s born %d times across both hosts (%d distinct records, hosts delivered %d+%d), want exactly once",
+					toA, bornA[toA], len(bornA), hosts[0].delivered, hosts[1].delivered)
+			}
+			bornB := records(t, deliverDirOf(p.guestDir), deliver.Inbox)
+			if _, ok := bornB[toB]; !ok || len(bornB) != 1 {
+				t.Errorf("on B: %s present %v among %d records, want born exactly once", toB, ok, len(bornB))
+			}
+			if hosts[0].conflicts+hosts[1].conflicts < 1 {
+				t.Errorf("no commit conflicted: A's hosts did not race")
 			}
 		})
 	}

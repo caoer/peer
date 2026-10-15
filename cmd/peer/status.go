@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/room"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/status"
 )
@@ -205,7 +206,72 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	printStatus(stdout, rows, time.Now())
+	lines, err := runRoomStatus(context.Background(), *dirFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "peer status: %v\n", err)
+		return 1
+	}
+	for _, l := range lines {
+		fmt.Fprintln(stdout, l)
+	}
 	return 0
+}
+
+// runRoomStatus is one line per room in the rooms record: a joined room's
+// idx, member count, cursor, the records the fold dropped and the receiver
+// reported (the room state's counts), and this host's records waiting in
+// the room outbox; a room still joining, its stage.
+func runRoomStatus(ctx context.Context, dir string) ([]string, error) {
+	dir, err := peerDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	p, err := openParty(dir)
+	if err != nil {
+		return nil, err
+	}
+	l, err := loadRooms(ctx, p.backend)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, ref := range l.Rooms {
+		switch ref.Stage {
+		case stageInvited:
+			out = append(out, fmt.Sprintf("room %s (%s): invited, waiting for the adder's seat", ref.Name, ref.ID))
+			continue
+		case stageSeated:
+			out = append(out, fmt.Sprintf("room %s (%s): seated at idx %d, waiting for the room token", ref.Name, ref.ID, ref.Idx))
+			continue
+		case stageLeft, stageRemoved, stageClosed:
+			out = append(out, fmt.Sprintf("room %s (%s): %s", ref.Name, ref.ID, ref.Stage))
+			continue
+		case stageFollowing:
+			cursor := int64(-1)
+			if ref.Feed != nil {
+				cursor = ref.Feed.Cursor
+			}
+			out = append(out, fmt.Sprintf("room %s (%s): following its feed by a link  cursor #%d", ref.Name, ref.ID, cursor))
+			continue
+		case stageCut:
+			out = append(out, fmt.Sprintf("room %s (%s): cut — its owner made a new link or closed the feed; peer room follow <the new link>", ref.Name, ref.ID))
+			continue
+		}
+		st, err := room.Load(ctx, p.backend, ref.ID)
+		if err != nil {
+			return nil, fmt.Errorf("room %s: %w", ref.Name, err)
+		}
+		role := ""
+		if ref.Read {
+			role = " (read)"
+		}
+		line := fmt.Sprintf("room %s (%s)  idx %d%s  %d members  cursor #%d  dropped %d  reported %d", ref.Name, ref.ID, st.Idx(), role, len(st.Members()), st.Cursor(), st.Dropped(), st.Reported())
+		if n := p.waiting(ref.ID); n > 0 {
+			line += fmt.Sprintf("  %d waiting in the room outbox", n)
+		}
+		out = append(out, line)
+	}
+	return out, nil
 }
 
 func runStatus(ctx context.Context, dir string, now time.Time) ([]statusJSON, error) {
