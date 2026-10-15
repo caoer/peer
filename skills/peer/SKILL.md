@@ -68,7 +68,7 @@ peer send --kind task --file brief.md alice/legal
 ```
 
 - The target is the name you gave the peer, then `/` and the agent id the inviter told you to address. Some parties refuse a message with no agent id, or to an agent id they do not list, without telling you: address the agent they named.
-- `--kind` is `text` (default), `task`, `question`, `answer`, `doc`, `file` or `ack`. For `doc` and `file`, `--file` is the attachment (up to 64 MiB), encrypted and put on the relay before the message goes. For the other kinds, `--file` reads the body from a file; with neither `--text` nor `--file` the body is read from stdin.
+- `--kind` is `text` (default), `task`, `question`, `answer`, `doc`, `file` or `ack`. For `doc` and `file`, `--file` is the attachment (up to 64 MiB less 16 bytes), encrypted and put on the relay before the message goes. For the other kinds, `--file` reads the body from a file; with neither `--text` nor `--file` the body is read from stdin.
 - `--from <agent id>` names your sending agent when your card lists agents.
 - It prints `sent <id> to ed25519:…/legal (text, #3)`. When the relay is unreachable after the message was committed, it says so and exits 1; the message stays in the outbox and goes out on the next `peer send` or `peer serve`.
 

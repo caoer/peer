@@ -192,7 +192,9 @@ Base `/peer`; `Authorization: Bearer <token>`; JSON bodies; errors `{error, code
 | `POST /peer/c/:id/prekeys/take` | side token | → one of the other side's keys `{id, pub}`, or `{}` |
 | `POST /peer/c/:id/blobs` | side token | raw bytes → `{blob, size}` |
 | `GET /peer/c/:id/blobs/:blob` | side token | → the bytes, `application/octet-stream` |
-| `GET /peer/i/:id` | none | the invite landing text |
+| `GET`, `HEAD /peer/i/:id` | none | the invite landing text |
+
+A relay deployed on its own also answers `GET /` with its route list.
 
 **Directions and numbering.** `dir` is `h2g` or `g2h`, from the token: what the host puts is `h2g`, the guest's `g2h`. `seq` counts per direction from 0; `h2g` #0 is the host's card. A number is never reused. A side reads only the other direction. `after` omitted means `-1` (everything), so the first pull is `after=-1`.
 
@@ -206,13 +208,13 @@ Base `/peer`; `Authorization: Bearer <token>`; JSON bodies; errors `{error, code
 - Requests are limited per client IP: 100 per 10 seconds across `/peer`.
 - **Retention**: an envelope or blob is kept 30 days from its put and then dropped. Nothing is dropped on a read: every machine of a party reads the same channel, and no token can delete what the other side has not read.
 
-**Codes.** `bad_token` 401 (also a wrong or missing owner login on create) · `token_used` 409 · `no_such_channel` 404 · `too_large` 413 · `bad_request` 400 (bad JSON, `type`, base64, `after` or prekey shape; an empty blob) · `rate_limited` 429 · `method_not_allowed` 405 · `no_such_route` 404 · `too_many_sockets` 429 · `no_such_blob` 404.
+**Codes.** `bad_token` 401 (also a wrong or missing owner login on create) · `token_used` 409 · `no_such_channel` 404 · `too_large` 413 · `bad_request` 400 (bad JSON, `type`, base64, `after` or prekey shape; an empty blob) · `rate_limited` 429 · `method_not_allowed` 405 · `no_such_route` 404 · `too_many_sockets` 429 · `no_such_blob` 404 · `internal_error` 500 (the relay failed on the request; retry).
 
 **Push (WebSocket).**
 
 - The upgrade is the pull route with `Upgrade: websocket`, authenticated exactly as the pull. Refusals before the upgrade are HTTP answers: `bad_token` 401, `no_such_channel` 404, `rate_limited` 429 (the upgrade counts as one request), `too_many_sockets` 429.
 - At most 16 open sockets per side per channel; the 17th upgrade on a side is refused; a closed socket frees its place.
-- Relay → client: one text frame per envelope the *other* side puts while the socket is open, `{seq, type, body, at}`, byte for byte the row a pull answers, in `seq` order, sent after the row is stored.
+- Relay → client: one text frame per envelope the *other* side puts while the socket is open, `{seq, type, body, at}`, the same JSON object a pull answers for that row (the frame is compact, a pull answer indented: compare parsed values, never bytes), in `seq` order, sent after the row is stored.
 - The client pulls from its cursor until `[]` after every connect and reconnect — push never replaces the catch-up. A frame with `seq` at or below the cursor is a duplicate; one above cursor + 1 is a gap, answered by a pull.
 - Client → relay: the text frame `ping` is answered `pong` (send one about every 30 seconds; a socket silent for about 100 seconds is dropped). Any other client frame carries nothing.
 - Close `4401` (`bad_token`) or `4404` (`no_such_channel`): stop reconnecting. Any other close: reconnect with backoff, then pull.
@@ -288,7 +290,7 @@ A new label is a new value: two implementations agree on a proof or a code only 
 
 ## Not in v1
 
-Channels are between two parties only; groups are not built. A card is not published at a well-known URL. The guest's identity key is not hidden from the relay during the first exchange. There is no signature a third party could check: the session proves the sender to the receiver only, and either side could forge a transcript. The relay has no route that revokes a token or deletes a channel, and no per-channel cap beyond the per-IP rate and the 1 MiB envelope.
+Channels are between two parties only; groups are not built. A card is not published at a well-known URL. The guest's identity key is not hidden from the relay during the first exchange. There is no signature a third party could check: the session proves the sender to the receiver only, and either side could forge a transcript. The relay has no route that revokes a token or deletes a channel, and no per-channel cap beyond the per-IP rate, the 1 MiB envelope, the 64 MiB blob and the 200 prekeys held per side.
 
 ## The CLI
 
