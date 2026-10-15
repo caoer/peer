@@ -702,7 +702,14 @@ func (sv *server) serveRooms(ctx context.Context) error {
 			continue
 		}
 		if c.st.Removed(c.st.Idx()) {
-			// An admin's removal record folded; the revoke follows it.
+			// An admin's removal record folded, or this party's own leave
+			// record whose DELETE …/self did not land: the revoke runs here
+			// with the token this host still holds, before the room is marked
+			// gone — a seat whose token is forgotten stays live to retention.
+			if err := c.revokeSelf(ctx); err != nil {
+				fmt.Fprintf(sv.out, "room %s: you are out of the room and %v; the next round tries the revoke again\n", ref.Name, err)
+				continue
+			}
 			fmt.Fprintf(sv.out, "%v\n", c.gone(ctx, stageRemoved))
 			continue
 		}
