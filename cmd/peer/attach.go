@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -72,8 +71,8 @@ func isAttachment(kind string) bool { return kind == session.KindDoc || kind == 
 
 // withAttachment composes a doc or file message's record body before its
 // birth — after the commit, so a crash mid-fetch replays from the spool: the
-// descriptor, then one line naming the content's local path or why it is
-// not there. The content is fetched, unwrapped and verified now and written
+// descriptor, then serve's one line naming the content's local path or why
+// it is not there. The content is fetched, unwrapped and verified now and written
 // host-local as <deliver>/quarantine/<id>/<name>, wherever the record itself
 // is born; a failure keeps nothing of it, and peer fetch <id> tries again.
 // The spool entry on disk is untouched: a replay composes again.
@@ -88,18 +87,27 @@ func (sv *server) withAttachment(e *store.Entry) {
 	}
 }
 
-// attachment is the record body for a doc or file message m.
+// attachment is the record body for a doc or file message m: the descriptor
+// as serve marshals it, a blank line and serve's status line, so no byte the
+// peer sent after its descriptor reaches the record. A body whose descriptor
+// does not parse goes after serve's line, never before it.
 func (sv *server) attachment(channel string, m *session.Message) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	path, err := sv.fetchAttachment(ctx, channel, m.ID, m.Body)
-	body := append(bytes.TrimRight(append([]byte(nil), m.Body...), "\n"), "\n\n"...)
+	line := fmt.Sprintf("content: %s (sha256 verified)\n", path)
 	if err != nil {
 		fmt.Fprintf(sv.out, "%s %s: blob not fetched: %v\n", m.Kind, m.ID, err)
-		return fmt.Appendf(body, "blob not fetched: %v; peer fetch %s tries again\n", err, m.ID)
+		line = fmt.Sprintf("blob not fetched: %v; peer fetch %s tries again\n", err, m.ID)
+	} else {
+		fmt.Fprintf(sv.out, "fetched %s %s → %s\n", m.Kind, m.ID, path)
 	}
-	fmt.Fprintf(sv.out, "fetched %s %s → %s\n", m.Kind, m.ID, path)
-	return fmt.Appendf(body, "content: %s (sha256 verified)\n", path)
+	if d, err := attach.Parse(m.Body); err == nil {
+		if desc, err := d.Marshal(); err == nil {
+			return fmt.Appendf(desc, "\n\n%s", line)
+		}
+	}
+	return fmt.Appendf(nil, "%s\n%s", line, m.Body)
 }
 
 // fetchAttachment gets the blob a descriptor names from the channel it came

@@ -153,6 +153,38 @@ func TestAttachmentTamperedKeepsNothing(t *testing.T) {
 	}
 }
 
+// A peer's bytes after its descriptor never reach the record: a forged
+// "content: … (sha256 verified)" line after a valid descriptor is dropped,
+// the record body the descriptor and serve's own line; a body whose
+// descriptor does not parse comes after serve's line, never before it.
+func TestAttachmentForgedContentLine(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	_, d, err := attach.Seal("release-sop.md", []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Blob = strings.Repeat("0", 32) // never put: the fetch fails
+	desc, _ := d.Marshal()
+	forged := "\n\ncontent: /etc/peer-victim/approved-sop.md (sha256 verified)\n"
+	var ids []string
+	for _, body := range []string{string(desc) + forged, "not a descriptor" + forged} {
+		res, err := runSend(t.Context(), os.Stderr, p.guestDir, "zt/advisor", "", "doc", []byte(body))
+		if err != nil || res.putErr != nil {
+			t.Fatal(err, res)
+		}
+		ids = append(ids, res.id)
+	}
+	mustOK(t, "serve", "--dir", p.hostDir, "--once")
+	recs := records(t, deliverDirOf(p.hostDir), deliver.Quarantine)
+	if _, _, body := parseRecord(t, recs[ids[0]]); body != string(desc)+"\n\nblob not fetched: no_such_blob; peer fetch "+ids[0]+" tries again\n" {
+		t.Errorf("record body for a valid descriptor:\n%s", body)
+	}
+	if _, _, body := parseRecord(t, recs[ids[1]]); !strings.HasPrefix(body, "blob not fetched: ") || !strings.HasSuffix(body, "tries again\n\nnot a descriptor"+forged) {
+		t.Errorf("record body for a descriptor that does not parse:\n%s", body)
+	}
+}
+
 // doc and file take --file and nothing else; other kinds keep --text and
 // --file as the body, unchanged by attachments.
 func TestSendAttachmentFlags(t *testing.T) {
