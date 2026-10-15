@@ -94,6 +94,10 @@ type server struct {
 	// push holds the channels' push sockets under a running serve (push.go);
 	// nil under --once.
 	push *pusher
+	// unanswered is, by channel id, the one-time prekeys of a deposit that
+	// failed without the relay's refusal (restock): the relay may hold them,
+	// so the channel's next restock puts the same keys again.
+	unanswered map[string][]relay.Prekey
 }
 
 // errParked is a channel that waits on the human: a card naming a new
@@ -120,7 +124,7 @@ func openServer(dir, deliverTo string, out io.Writer) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	sv := &server{p: p, spool: spool, dir: deliverTo, out: out}
+	sv := &server{p: p, spool: spool, dir: deliverTo, out: out, unanswered: map[string][]relay.Prekey{}}
 	if err := sv.loadSeats(); err != nil {
 		return nil, err
 	}
@@ -382,27 +386,41 @@ func (sv *server) ownCard(ctx context.Context) (*card.Signed, uint32, bool) {
 // is believed to hold for this side falls below keys.oneTimeMin: up to
 // prekeysPerChannel again, the private halves committed before the public
 // halves go out (as invite and accept do), and the relay's count answer
-// recorded. A deposit the relay refuses takes its keys back out of the
-// record, so a relay that is down does not fill it with spares.
+// recorded. A deposit the relay refuses (refusedDeposit) stored none of the
+// keys and takes them back out of the record. Any other failure — a
+// transport error, a timeout, a 5xx — may come after the relay stored them:
+// their private halves stay, the count stays as it was, and the channel's
+// next restock puts the same keys again (the relay ignores an id it was given
+// before). So every key the relay hands out has its private half here, and a
+// relay that keeps failing does not fill the record with new keys.
 func (c *channelServe) restock(ctx context.Context) error {
 	min := c.sv.p.cfg.oneTimeMin()
 	if c.ch.Deposited() >= min {
 		return nil
 	}
-	n := prekeysPerChannel - c.ch.Deposited()
-	pks, err := session.NewPrekeys(ctx, c.k, n)
-	if err != nil {
-		return err
-	}
-	if err := c.k.Commit(ctx); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			// Another host committed the keys — its round restocks too.
-			c.k, err = c.sv.p.keys(ctx)
+	pks := c.retryDeposit(ctx)
+	retry := pks != nil
+	if !retry {
+		var err error
+		if pks, err = session.NewPrekeys(ctx, c.k, prekeysPerChannel-c.ch.Deposited()); err != nil {
+			return err
 		}
-		return err
+		if err := c.k.Commit(ctx); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				// Another host committed the keys — its round restocks too.
+				c.k, err = c.sv.p.keys(ctx)
+			}
+			return err
+		}
 	}
 	count, err := c.rc.PutPrekeys(ctx, c.pe.Channel, c.pe.Token, pks)
 	if err != nil {
+		// A refusal of keys put again says nothing of the put that went
+		// unanswered before it: those keys stay too.
+		if retry || !refusedDeposit(err) {
+			c.sv.unanswered[c.pe.Channel] = pks
+			return fmt.Errorf("restock: %w; the relay may hold the %d keys, so they stay in the record and the next restock puts them again", err, len(pks))
+		}
 		for _, pk := range pks {
 			c.k.RemovePreKey(ctx, pk.ID)
 		}
@@ -411,6 +429,7 @@ func (c *channelServe) restock(ctx context.Context) error {
 		}
 		return fmt.Errorf("restock: %w", err)
 	}
+	delete(c.sv.unanswered, c.pe.Channel)
 	for try := 1; ; try++ {
 		c.ch.SetDeposited(count)
 		err := c.ch.Commit(ctx)
@@ -426,6 +445,32 @@ func (c *channelServe) restock(ctx context.Context) error {
 	}
 	fmt.Fprintf(c.sv.out, "%s: deposited %d one-time prekeys; the relay holds %d\n", c.pe.Name, len(pks), count)
 	return nil
+}
+
+// retryDeposit is the channel's keys from a deposit that went unanswered,
+// those the record still holds as they were put — a key spent since, or
+// replaced by an identity rotation, is not put again; nil when none remain.
+func (c *channelServe) retryDeposit(ctx context.Context) []relay.Prekey {
+	var out []relay.Prekey
+	for _, pk := range c.sv.unanswered[c.pe.Channel] {
+		r, _ := c.k.LoadPreKey(ctx, pk.ID)
+		if r != nil && bytes.Equal(r.KeyPair().PublicKey().Serialize(), pk.Pub) {
+			out = append(out, pk)
+		}
+	}
+	if out == nil {
+		delete(c.sv.unanswered, c.pe.Channel)
+	}
+	return out
+}
+
+// refusedDeposit reports whether a prekey deposit failed on the relay's own
+// refusal: a 4xx answer carrying a contract code, after which the relay holds
+// none of the keys — it refuses before it stores, or rolls the store back
+// (too_large).
+func refusedDeposit(err error) bool {
+	var re *relay.Error
+	return errors.As(err, &re) && re.Code != "" && re.Status/100 == 4
 }
 
 // commit writes the channel under CAS, then the party keys when a PreKey

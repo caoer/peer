@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -765,6 +770,125 @@ func TestRestockOneTimePrekeys(t *testing.T) {
 	}
 	if out := mustOK(t, "serve", "--dir", p.hostDir, "--once"); !strings.Contains(out, "delivered text "+m.ID) {
 		t.Fatalf("a session from a restocked key:\n%s", out)
+	}
+}
+
+// prekeyAnswers fronts the fake relay and answers the next prekey deposit as
+// told: lost stores the keys and answers 502, as a gateway that lost the
+// relay's answer does; refuse answers too_large and stores nothing.
+type prekeyAnswers struct {
+	proxy        http.Handler
+	lost, refuse atomic.Bool
+}
+
+func (f *prekeyAnswers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/prekeys") {
+		switch {
+		case f.lost.CompareAndSwap(true, false):
+			f.proxy.ServeHTTP(httptest.NewRecorder(), r)
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(`{"error":"gateway (test)","code":"down"}`))
+			return
+		case f.refuse.CompareAndSwap(true, false):
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			w.Write([]byte(`{"error":"a side holds at most 200 prekeys (test)","code":"too_large"}`))
+			return
+		}
+	}
+	f.proxy.ServeHTTP(w, r)
+}
+
+// A deposit the relay refuses stored nothing, and its keys leave the record.
+// A deposit the relay stored and whose answer was lost keeps the private
+// halves, and the next restock puts the same keys again instead of new ones:
+// every key the relay hands out opens on this side.
+func TestRestockKeepsKeysTheRelayMayHold(t *testing.T) {
+	ctx := context.Background()
+	srv, _, base := relaytest.Start(t, login)
+	target, err := url.Parse(strings.TrimSuffix(base, "/peer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := &prekeyAnswers{proxy: httputil.NewSingleHostReverseProxy(target)}
+	proxy := httptest.NewServer(fr)
+	t.Cleanup(proxy.Close)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), proxy.URL+"/peer")
+
+	// The host's count says the relay is low: every round restocks.
+	hp, hch, _ := channelOf(t, p.hostDir, "ancan")
+	hch.SetDeposited(0)
+	if err := hch.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	held := srv.Prekeys(p.channel, "h2g")
+	var out bytes.Buffer
+	sv, err := openServer(p.hostDir, "", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sv.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	nextID := func() uint32 {
+		t.Helper()
+		k, err := hp.keys(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k.PartyKeys.NextPrekeyID
+	}
+
+	first := nextID()
+	fr.refuse.Store(true)
+	if err := sv.round(ctx); err == nil || !strings.Contains(err.Error(), "too_large") {
+		t.Fatalf("round with the deposit refused: %v", err)
+	}
+	k, err := hp.keys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := first; id < first+prekeysPerChannel; id++ {
+		if r, _ := k.LoadPreKey(ctx, id); r != nil {
+			t.Errorf("prekey %d of the refused deposit stays in the record", id)
+		}
+	}
+
+	lost := nextID()
+	fr.lost.Store(true)
+	if err := sv.round(ctx); err == nil || !strings.Contains(err.Error(), "restock:") {
+		t.Fatalf("round with the deposit answer lost: %v", err)
+	}
+	if n := srv.Prekeys(p.channel, "h2g"); n != held+prekeysPerChannel {
+		t.Fatalf("the relay holds %d host prekeys, want %d", n, held+prekeysPerChannel)
+	}
+	if k, err = hp.keys(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _, gpe := channelOf(t, p.guestDir, "zt")
+	rc := relay.New(gpe.Relay, nil)
+	for {
+		pk, ok, err := rc.TakePrekey(ctx, p.channel, gpe.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		if r, _ := k.LoadPreKey(ctx, pk.ID); r == nil {
+			t.Errorf("the relay hands out prekey %d and the host's keys record has no private half", pk.ID)
+		}
+	}
+
+	// The relay answers again: the restock puts the same keys, not new ones,
+	// and records the count the relay answers.
+	if err := sv.round(ctx); err != nil {
+		t.Fatalf("round with the relay answering: %v\n%s", err, out.String())
+	}
+	if next := nextID(); next != lost+prekeysPerChannel {
+		t.Fatalf("next prekey id %d, want %d: the restock after the lost answer made new keys", next, lost+prekeysPerChannel)
+	}
+	if _, hch, _ := channelOf(t, p.hostDir, "ancan"); hch.Deposited() != srv.Prekeys(p.channel, "h2g") {
+		t.Fatalf("the host counts %d deposited, the relay holds %d", hch.Deposited(), srv.Prekeys(p.channel, "h2g"))
 	}
 }
 
