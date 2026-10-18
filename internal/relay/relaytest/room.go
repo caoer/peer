@@ -32,11 +32,13 @@ type RoomRow struct {
 const (
 	socketsPerIdx = 16
 	pageBytes     = 4 << 20 // ~4 MiB of body text per pull answer
+	retentionMs   = 30 * 24 * 60 * 60 * 1000
 )
 
 var errTooManySockets = &relay.Error{Status: 429, Code: "too_many_sockets"}
 
 type room struct {
+	created    int64
 	add        string
 	membership int64
 	members    []*roomMember        // by idx
@@ -165,7 +167,7 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		rand.Read(b)
 		id := hex.EncodeToString(b)
 		t := token()
-		s.rooms.byID[id] = &room{add: add, members: []*roomMember{{role: relay.RoleWrite}},
+		s.rooms.byID[id] = &room{created: time.Now().UnixMilli(), add: add, members: []*roomMember{{role: relay.RoleWrite}},
 			tokens: map[string]roomToken{t: {idx: 0, admin: true}}}
 		ok(map[string]any{"id": id, "adminToken": t, "membership": 0})
 		return nil
@@ -210,7 +212,9 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 		route = "put"
 	case rest == "records" && r.Method == http.MethodGet:
 		route = "pull"
-	case rest == "members" || strings.HasPrefix(rest, "members/") || rest == "admin" || rest == "records":
+	case rest == "state" && r.Method == http.MethodGet:
+		route = "state"
+	case rest == "members" || strings.HasPrefix(rest, "members/") || rest == "admin" || rest == "records" || rest == "state":
 		fail(w, relay.ErrMethodNotAllowed)
 		return nil
 	default:
@@ -271,7 +275,7 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 			fail(w, relay.ErrTooLarge)
 			return nil
 		}
-	case "pull":
+	case "pull", "state":
 		if q, set := r.URL.Query()["after"]; set {
 			n, err := strconv.ParseInt(q[0], 10, 64)
 			if err != nil || n < -1 {
@@ -408,21 +412,50 @@ func (s *Server) roomRoute(w http.ResponseWriter, r *http.Request, p string) []*
 			}
 		}
 	case "pull":
-		page, size := []RoomRow{}, 0
-		for _, row := range rm.rows {
-			if row.Idx == tok.idx || row.Seq < me.from || row.Seq <= after {
-				continue
-			}
-			if len(page) == s.PageSize || (len(page) > 0 && size+len(row.Body) > pageBytes) {
-				break
-			}
-			page = append(page, row)
-			size += len(row.Body)
-		}
 		s.countPull(id, roomPullKey(tok.idx))
-		ok(map[string]any{"membership": rm.membership, "records": page})
+		ok(map[string]any{"membership": rm.membership, "records": s.roomPage(rm, me.from, after, tok.idx)})
+	case "state":
+		// Nothing expires here, so the alarm as it concerns the caller —
+		// when the relay next drops one of its records — is its oldest's.
+		var (
+			count                int
+			first, oldest, alarm any // nil when the view holds no record
+		)
+		for _, row := range rm.rows {
+			if row.Seq >= me.from {
+				if count == 0 {
+					first, oldest, alarm = row.Seq, row.At, row.At+retentionMs+1
+				}
+				count++
+			}
+		}
+		ok(map[string]any{
+			"room": map[string]any{"created": rm.created, "add": rm.add, "membership": rm.membership,
+				"next": len(rm.rows), "retention": retentionMs, "alarm": alarm},
+			"you": map[string]any{"idx": tok.idx, "role": me.role, "from": me.from, "admin": tok.admin,
+				"sockets": s.roomSockets(id, tok.idx)},
+			"log":     map[string]any{"count": count, "first": first, "oldest": oldest},
+			"records": s.roomPage(rm, me.from, after, -1),
+		})
 	}
 	return nil
+}
+
+// roomPage is one page of rm's log: seq > after and >= from, without skip's
+// records (-1 skips none), at most PageSize records and ~4 MiB of body.
+func (s *Server) roomPage(rm *room, from, after int64, skip int) []RoomRow {
+	page, size := []RoomRow{}, 0
+	for _, row := range rm.rows {
+		if row.Idx == skip || row.Seq < from || row.Seq <= after {
+			continue
+		}
+		if len(page) == s.PageSize || (len(page) > 0 && size+len(row.Body) > pageBytes) {
+			break
+		}
+		page = append(page, row)
+		size += len(row.Body)
+	}
+	return page
 }
 
 // roomUpgrade takes a WebSocket upgrade on a room's records route and

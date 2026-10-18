@@ -27,10 +27,10 @@ import (
 )
 
 // cmdRoom runs the room commands: create, add, members, remove, leave,
-// handover, close, rotate, link, follow.
+// handover, close, rotate, link, follow, inspect.
 func cmdRoom(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: peer room create|add|members|remove|leave|handover|close|rotate|link|follow [flags] ...")
+		fmt.Fprintln(stderr, "usage: peer room create|add|members|remove|leave|handover|close|rotate|link|follow|inspect [flags] ...")
 		return 2
 	}
 	switch args[0] {
@@ -46,8 +46,10 @@ func cmdRoom(args []string, stdout, stderr io.Writer) int {
 		return cmdRoomLink(args[1:], stdout, stderr)
 	case "follow":
 		return cmdRoomFollow(args[1:], stdout, stderr)
+	case "inspect":
+		return cmdRoomInspect(args[1:], stdout, stderr)
 	}
-	fmt.Fprintf(stderr, "peer room: unknown command %q (create, add, members, remove, leave, handover, close, rotate, link, follow)\n", args[0])
+	fmt.Fprintf(stderr, "peer room: unknown command %q (create, add, members, remove, leave, handover, close, rotate, link, follow, inspect)\n", args[0])
 	return 2
 }
 

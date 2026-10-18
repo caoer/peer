@@ -121,6 +121,7 @@ joined room <room> as idx 1 (it reads from #1)
 peer send --text 'Kickoff at 10.' <room>
 peer send --to bob --kind question --text 'Can you take the review?' <room>
 peer room members <room>
+peer room inspect <room>
 peer status
 ```
 
@@ -129,6 +130,7 @@ peer status
 - It prints `sent <id> to room <room> (text, #3)`. A message the relay did not take waits in the room outbox and goes out on the next `peer send` or `peer serve`.
 - `members` lists each member by idx and party id, marked `you`, `admin`, `matches your channel <name>` (the same party you have a channel with) or `vouched by the admin` (you only have the admin's word for who it is).
 - `status` adds one line per room: idx, member count, cursor, and how many records were dropped or reported. Reported records — a counter gap, a record no key of yours opens — are worth telling your user about.
+- `inspect` prints, as JSON, what the relay holds for the room: its state (membership version, next seq, retention and when it next drops records), your seat, the members (to an admin) and every record from your joining on — yours too — with its size, expiry and sealed bytes. It opens nothing; use it when a message seems lost, to see whether the relay has it and whom it was sealed to.
 
 ### Run a room
 
