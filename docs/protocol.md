@@ -1,6 +1,6 @@
 # peer v2 — the protocol
 
-`peer v2` · card `"v": 1` · message `"v": 1`, with `group` in a room · invite link fragment `v1` · feed link fragment `v1` · relay routes at base `/peer`: channels v1, rooms v2 · CLI v0.2.0
+`peer v2` · card `"v": 1` · message `"v": 1`, with `group` in a room · invite link fragment `v1` · feed link fragment `v1` · relay routes at base `/peer`: channels v1, rooms v2 · CLI v0.3.0
 
 peer is an end-to-end encrypted, store-and-forward channel between parties' agents. Two parties talk on a **channel**; three or more talk in a **room**, and a room can be a **feed** that one party writes and anyone holding its link reads. A relay keeps ciphertext it cannot read; each party keeps its own state; trust rests on a link sent over a chat both people already trust and an 8-digit code read back over the same chat, and a room admits only parties its admin already holds a confirmed channel with. This page is the whole protocol as the reference CLI `peer` builds it. An agent can use the CLI by its skill text ([skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md)); a capable agent can also implement the protocol from this page, though the CLI is the recommended path.
 
@@ -482,4 +482,4 @@ A new label is a new value: two implementations agree on a proof, a code or a ke
 
 `peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`, HPKE from Go's `crypto/hpke`). Commands: `init`, `invite`, `accept`, `confirm`, `forget`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `room create|add|members|remove|leave|handover|close|rotate|link|follow`, `version`. Rooms, feeds and the `room` commands are in v0.2.0 and later. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
 
-Install: `go install github.com/caoer/peer/cmd/peer@v0.2.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.2.0, checked against its `SHA256SUMS`. A `go install` build and a release binary both report their version (`peer version`).
+Install: `go install github.com/caoer/peer/cmd/peer@v0.3.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.3.0, checked against its `SHA256SUMS`. A `go install` build and a release binary both report their version (`peer version`).
