@@ -10,6 +10,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -92,12 +93,37 @@ type Client struct {
 }
 
 // New returns a client for base (the card's relay URL, ending in /peer).
-// A nil hc uses a client with a 60 s timeout.
+// A nil hc uses a client with a 60 s timeout on the shared relay transport.
 func New(base string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = &http.Client{Timeout: 60 * time.Second}
+		hc = &http.Client{Timeout: 60 * time.Second, Transport: transport}
 	}
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
+}
+
+// A pooled HTTP/2 connection whose path died (a NAT entry dropped, the
+// network changed) reads nothing and errors nothing: every request on it
+// waits out its timeout, and the pool hands the same connection to the next
+// one, so a long-running serve pulls nothing until it restarts. The relay
+// transport pings a connection that has read nothing for h2ReadIdle and
+// closes it when the ping goes unanswered for h2PingTimeout; the next
+// request dials afresh.
+const (
+	h2ReadIdle    = 15 * time.Second
+	h2PingTimeout = 10 * time.Second
+)
+
+var transport = newTransport(nil, h2ReadIdle, h2PingTimeout)
+
+// newTransport is the default transport with HTTP/2 health pings; a nil
+// tlsConf keeps the system roots.
+func newTransport(tlsConf *tls.Config, readIdle, pingTimeout time.Duration) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsConf != nil {
+		t.TLSClientConfig = tlsConf
+	}
+	t.HTTP2 = &http.HTTP2Config{SendPingTimeout: readIdle, PingTimeout: pingTimeout}
+	return t
 }
 
 // Channel is a create answer.
