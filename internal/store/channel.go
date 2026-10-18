@@ -70,6 +70,9 @@ type channelRecord struct {
 	// Announced is the id of the signed prekey the card this party last sent
 	// on the channel carried; a rotation makes it stale, and serve resends.
 	Announced uint32 `json:"announced,omitempty"`
+	// Gone marks a tombstone (Drop): the party forgot the peer, and the
+	// channel's sessions, pin and secret are not kept.
+	Gone bool `json:"gone,omitempty"`
 }
 
 type seenID struct {
@@ -142,6 +145,28 @@ func (c *Channel) Commit(ctx context.Context) error {
 	c.version = v
 	return nil
 }
+
+// Drop replaces the record with a tombstone at the next version: the party
+// forgot the peer (peer forget), so the sessions, the pinned root and card,
+// the invite secret and the seen ids go. Channel ids are never reused, so
+// nothing loads the tombstone again. Another host's version refuses with
+// ErrConflict.
+func (c *Channel) Drop(ctx context.Context) error {
+	data, err := json.Marshal(channelRecord{V: recordVersion, Cursor: c.rec.Cursor, Gone: true})
+	if err != nil {
+		return err
+	}
+	v, err := c.s.backend.Store(ctx, ChannelKey(c.name), data, c.version)
+	if err != nil {
+		return err
+	}
+	c.version = v
+	c.rec = channelRecord{V: recordVersion, Sessions: map[string][]byte{}, Identities: map[string][]byte{}, Cursor: c.rec.Cursor, Gone: true}
+	return nil
+}
+
+// Gone reports whether the record is a tombstone (Drop).
+func (c *Channel) Gone() bool { return c.rec.Gone }
 
 // Cursor is the relay seq of the last envelope pulled, -1 before the first.
 func (c *Channel) Cursor() int64 { return c.rec.Cursor }

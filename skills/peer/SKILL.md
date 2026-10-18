@@ -194,5 +194,6 @@ peer keys reject bob
 ## Other commands
 
 - `peer card publish` — sign your card again with the root key and send it on every confirmed channel (after changing agents, relays or details in `config.json`). Needs `root.json` in the directory.
+- `peer forget <name>` — forget a peer: it is told (`bye`), its channel and pin are dropped, and the name is free for a new `peer invite` or `peer accept --name`. A peer that forgot you shows `gone` in `peer status` and refuses sends; `peer forget` it too to free the name.
 - `peer identity rotate --yes` — replace your identity key, only when it may be compromised; without `--yes` it prints what that costs and refuses.
 - `peer --help` and `peer <command> --help` list every flag.

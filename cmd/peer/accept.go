@@ -95,8 +95,8 @@ func runAccept(ctx context.Context, dir, name, rawLink string) (*acceptResult, e
 		}
 		name, guest = cur.Name, cur.Token
 	}
-	if cur := r.ByName(name); cur != nil && cur.State == roster.Confirmed {
-		return nil, fmt.Errorf("%s is a confirmed peer already; pick another name with --name", name)
+	if err := nameTaken(r, name, " with --name"); err != nil {
+		return nil, err
 	}
 	k, err := p.keys(ctx)
 	if err != nil {

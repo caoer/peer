@@ -52,6 +52,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSend(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "forget":
+		return cmdForget(args[1:], stdout, stderr)
 	case "status":
 		return cmdStatus(args[1:], stdout, stderr)
 	case "fetch":
@@ -97,6 +99,11 @@ commands:
             between rounds, hold the relay's push socket per channel and
             per room
             [--dir D] [--deliver DIR] [--once] [--every 30s]
+  forget    forget a peer: a bye on its channel, then its roster entry and
+            channel state dropped, so the name is free for a new invite;
+            your adds and handovers over that channel are withdrawn, your
+            seats in rooms are kept (a room you read through it: leave first)
+            [--dir D] <name>
   status    print every peer from the local store, and its roster page row;
             one line per room: idx, members, cursor, dropped, reported
             [--dir D] [--json]
