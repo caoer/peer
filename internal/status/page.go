@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/caoer/peer/internal/httpx"
 )
 
 // RowSchema is the K7 schema id of a roster page record.
@@ -85,7 +87,7 @@ type Page struct {
 // owner login "<user>:<token>"; a nil client is one with Timeout.
 func NewPage(base, slug, bearer string, client *http.Client) *Page {
 	if client == nil {
-		client = &http.Client{Timeout: Timeout}
+		client = &http.Client{Timeout: Timeout, Transport: httpx.Transport}
 	}
 	return &Page{base: strings.TrimRight(base, "/"), slug: slug, bearer: bearer, client: client, versions: map[string]int64{}}
 }

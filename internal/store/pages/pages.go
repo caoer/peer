@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caoer/peer/internal/httpx"
 	"github.com/caoer/peer/internal/store"
 )
 
@@ -53,7 +54,7 @@ const Timeout = 60 * time.Second
 // Bearer; a nil client is one with Timeout.
 func New(base, slug, bearer string, client *http.Client) *Backend {
 	if client == nil {
-		client = &http.Client{Timeout: Timeout}
+		client = &http.Client{Timeout: Timeout, Transport: httpx.Transport}
 	}
 	return &Backend{base: strings.TrimRight(base, "/"), slug: slug, bearer: bearer, client: client}
 }

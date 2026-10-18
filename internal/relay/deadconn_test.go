@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/caoer/peer/internal/httpx"
 )
 
 // silentProxy forwards TCP to target until silence: from then on every
@@ -98,7 +100,7 @@ func TestDeadConnectionRedials(t *testing.T) {
 
 	p := newSilentProxy(t, srv.Listener.Addr().String())
 	tlsConf := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	tr := newTransport(tlsConf, 100*time.Millisecond, 200*time.Millisecond)
+	tr := httpx.NewTransport(tlsConf, 100*time.Millisecond, 200*time.Millisecond)
 	defer tr.CloseIdleConnections()
 	c := New("https://"+p.ln.Addr().String()+"/peer", &http.Client{Transport: tr})
 	id := "0123456789abcdef0123456789abcdef"
