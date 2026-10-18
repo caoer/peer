@@ -616,7 +616,7 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 	if err == nil {
 		err = c.checkAddress(m)
 	}
-	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard && !session.RoomKind(m.Kind) {
+	if err == nil && c.sv.seats != nil && m.Kind != session.KindCard && m.Kind != session.KindBye && !session.RoomKind(m.Kind) {
 		err = c.sv.uccBorder(m)
 	}
 	// A record built under an identity key the pinned card does not list is
@@ -648,6 +648,9 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 		}
 		c.sv.p.writeTimeline(ctx, c.pe.Name, c.ch.Name(), timeline.In, rec.Seq, m)
 		return nil
+	}
+	if m.Kind == session.KindBye {
+		return c.receiveBye(ctx, rec, m)
 	}
 	if session.RoomKind(m.Kind) {
 		return c.receiveRoom(ctx, rec, m)
@@ -926,4 +929,24 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 	}
 	fmt.Fprintf(sv.out, "%s %s %s → %s\n", verb, m.Kind, m.ID, path)
 	return path, nil
+}
+
+// receiveBye marks the peer gone: it forgot the channel (peer forget), so
+// nothing more is sent or pulled on it, and the name stays taken until this
+// party forgets it too. The roster goes first: a cut between leaves the
+// channel gone with its cursor short of the bye, which nothing pulls again.
+func (c *channelServe) receiveBye(ctx context.Context, rec relay.Record, m *session.Message) error {
+	err := roster.Update(ctx, c.sv.p.backend, func(r *roster.Roster) error {
+		if pe := r.ByChannel(c.ch.Name()); pe != nil {
+			pe.State = roster.Gone
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	c.pe.State = roster.Gone
+	fmt.Fprintf(c.sv.out, "%s forgot this channel (#%d): nothing more goes to it; peer forget %s frees the name\n", c.pe.Name, rec.Seq, c.pe.Name)
+	c.sv.p.writeTimeline(ctx, c.pe.Name, c.ch.Name(), timeline.In, rec.Seq, m)
+	return c.commit(ctx, rec)
 }

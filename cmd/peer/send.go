@@ -123,6 +123,9 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 	if session.RoomKind(kind) {
 		return nil, fmt.Errorf("a %s goes out with peer room add and serve, not peer send", kind)
 	}
+	if kind == session.KindBye {
+		return nil, errors.New("a bye goes out with peer forget, not peer send")
+	}
 	if !session.ValidKind(kind) {
 		return nil, fmt.Errorf("%w %q: a vendor kind is vnd.<party id>.<name>", session.ErrKind, kind)
 	}
@@ -203,6 +206,9 @@ func sendTarget(ctx context.Context, dir, name string) (*party, *roster.Peer, *s
 	pe := r.ByName(name)
 	if pe == nil {
 		return nil, nil, nil, fmt.Errorf("no peer named %s", name)
+	}
+	if pe.State == roster.Gone {
+		return nil, nil, nil, fmt.Errorf("%s forgot this channel: nothing reaches it; peer forget %s frees the name", name, name)
 	}
 	ch, err := p.store.Channel(ctx, pe.Channel)
 	if err != nil {

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/caoer/peer/internal/envelope"
+	"github.com/caoer/peer/internal/httpx"
 )
 
 // Contract limits.
@@ -92,10 +93,10 @@ type Client struct {
 }
 
 // New returns a client for base (the card's relay URL, ending in /peer).
-// A nil hc uses a client with a 60 s timeout.
+// A nil hc uses a client with a 60 s timeout on the shared relay transport.
 func New(base string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = &http.Client{Timeout: 60 * time.Second}
+		hc = &http.Client{Timeout: 60 * time.Second, Transport: httpx.Transport}
 	}
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
 }

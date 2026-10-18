@@ -42,6 +42,9 @@ const (
 	KindFile     = "file"
 	KindCard     = "card"
 	KindAck      = "ack"
+	// KindBye tells the peer this party forgot the channel (peer forget);
+	// the session's own business, never delivered to an agent.
+	KindBye = "bye"
 	// KindRoster is a room's membership notice, born from a roster or leave
 	// record the fold accepted (deliver.KindRoster); it never travels on a
 	// channel.
@@ -61,7 +64,7 @@ const (
 
 var kinds = map[string]bool{
 	KindText: true, KindTask: true, KindQuestion: true, KindAnswer: true,
-	KindDoc: true, KindFile: true, KindCard: true, KindAck: true, KindRoster: true,
+	KindDoc: true, KindFile: true, KindCard: true, KindAck: true, KindBye: true, KindRoster: true,
 	KindRoomInvite: true, KindRoomAccept: true, KindRoomSeat: true, KindRoomJoin: true, KindRoomToken: true,
 	KindRoomAdmin: true,
 }

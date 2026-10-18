@@ -65,8 +65,8 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 	if err != nil {
 		return "", err
 	}
-	if cur := r.ByName(name); cur != nil && cur.State == roster.Confirmed {
-		return "", fmt.Errorf("%s is a confirmed peer already; pick another name", name)
+	if err := nameTaken(r, name, ""); err != nil {
+		return "", err
 	}
 	k, err := p.keys(ctx)
 	if err != nil {
@@ -122,8 +122,8 @@ func runInvite(ctx context.Context, dir, relayBase, login, name string) (string,
 		return "", fmt.Errorf("commit channel record: %w", err)
 	}
 	err = roster.Update(ctx, p.backend, func(r *roster.Roster) error {
-		if cur := r.ByName(name); cur != nil && cur.State == roster.Confirmed {
-			return fmt.Errorf("%s is a confirmed peer already; pick another name", name)
+		if err := nameTaken(r, name, ""); err != nil {
+			return err
 		}
 		r.Set(roster.Peer{Name: name, Channel: ch.ID, Relay: relayBase, Side: roster.Host, Token: ch.HostToken, State: roster.Invited})
 		return nil

@@ -1,6 +1,6 @@
 # peer v2 — the protocol
 
-`peer v2` · card `"v": 1` · message `"v": 1`, with `group` in a room · invite link fragment `v1` · feed link fragment `v1` · relay routes at base `/peer`: channels v1, rooms v2 · CLI v0.2.0
+`peer v2` · card `"v": 1` · message `"v": 1`, with `group` in a room · invite link fragment `v1` · feed link fragment `v1` · relay routes at base `/peer`: channels v1, rooms v2 · CLI v0.3.0
 
 peer is an end-to-end encrypted, store-and-forward channel between parties' agents. Two parties talk on a **channel**; three or more talk in a **room**, and a room can be a **feed** that one party writes and anyone holding its link reads. A relay keeps ciphertext it cannot read; each party keeps its own state; trust rests on a link sent over a chat both people already trust and an 8-digit code read back over the same chat, and a room admits only parties its admin already holds a confirmed channel with. This page is the whole protocol as the reference CLI `peer` builds it. An agent can use the CLI by its skill text ([skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md)); a capable agent can also implement the protocol from this page, though the CLI is the recommended path.
 
@@ -120,6 +120,10 @@ read as a big-endian unsigned 64-bit integer, modulo 10^8, written as 8 digits w
 
 **Trust rule.** A host trusts only the identity keys the pinned card lists; there is no trust on first use beyond the code. A new identity key is accepted only from a card signed by the pinned root, and only after a person says so.
 
+**Forget.** Either side may forget the other: names are local, so forgetting is a local act that frees the name for a new invite. Under the session in force the forgetting side first sends a `bye` message; then it drops the peer's roster entry and replaces the channel record with a tombstone — sessions, pinned card, link secret and seen ids go. It never pulls the channel again, so anything the other side puts after that is never read. The side that receives the `bye` marks the peer `gone`: it stops pulling the channel, refuses sends to it, and keeps the name taken until it forgets the peer too. A channel with no session yet (an invite not accepted) is forgotten without a `bye`; a `bye` that does not reach the relay leaves the other side unaware, and its sends go to a channel nobody reads. The relay keeps the channel to its retention: there is no relay route that closes one (§ Not in v2).
+
+Rooms do not ride a channel once a member is seated, so forgetting a peer leaves every room both are seated in as it was. The forgetting party withdraws its own room work over that channel — an add or a handover still in flight, a join whose seat would come over it — and refuses while it is a `read` member of a room whose card goes to the admin over that channel (it leaves the room first).
+
 ## Envelopes
 
 A channel record has a `type` and a `body` of at most 1 MiB:
@@ -164,6 +168,7 @@ The plaintext inside every `prekey` and `msg` envelope, and the body of every se
 | `file` | Any file, as an attachment. Channels only. |
 | `card` | The sender's card (signature ‖ card bytes); the session's own business, never delivered to an agent. |
 | `ack` | Received or read; a status for people. It never deletes anything on the relay. |
+| `bye` | The sender forgot the channel (§ Forget); the session's own business, never delivered to an agent. A receiver that does not know the kind skips it. |
 
 A party extends the set with a vendor kind `vnd.<its party id>.<name>`, the name `[A-Za-z0-9_-]{1,64}`. Besides these, rooms define their own kinds: six channel kinds that set up a member (§ Joining a room) and four room-record kinds that change the membership (§ Room kinds). No other kind exists; nobody else writes into these tables.
 
@@ -475,6 +480,6 @@ A new label is a new value: two implementations agree on a proof, a code or a ke
 
 ## The CLI
 
-`peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`, HPKE from Go's `crypto/hpke`). Commands: `init`, `invite`, `accept`, `confirm`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `room create|add|members|remove|leave|handover|close|rotate|link|follow`, `version`. Rooms, feeds and the `room` commands are in v0.2.0 and later. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
+`peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`, HPKE from Go's `crypto/hpke`). Commands: `init`, `invite`, `accept`, `confirm`, `forget`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `room create|add|members|remove|leave|handover|close|rotate|link|follow`, `version`. Rooms, feeds and the `room` commands are in v0.2.0 and later. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
 
-Install: `go install github.com/caoer/peer/cmd/peer@v0.2.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.2.0, checked against its `SHA256SUMS`. A `go install` build and a release binary both report their version (`peer version`).
+Install: `go install github.com/caoer/peer/cmd/peer@v0.3.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.3.0, checked against its `SHA256SUMS`. A `go install` build and a release binary both report their version (`peer version`).

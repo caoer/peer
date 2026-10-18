@@ -40,6 +40,9 @@ const (
 	Accepted State = "accepted"
 	// Confirmed: the host checked the session identity and the code and pinned the guest's card.
 	Confirmed State = "confirmed"
+	// Gone: the peer forgot the channel (its bye arrived). Nothing is sent or
+	// pulled on it; the name stays taken until this party forgets it too.
+	Gone State = "gone"
 )
 
 // Peer is one channel as this party sees it.
@@ -131,6 +134,17 @@ func (r *Roster) Set(p Peer) {
 		return
 	}
 	r.Peers = append(r.Peers, p)
+}
+
+// Remove drops the peer named name on channel, and reports whether it was there.
+func (r *Roster) Remove(name, channel string) bool {
+	for i := range r.Peers {
+		if r.Peers[i].Name == name && r.Peers[i].Channel == channel {
+			r.Peers = append(r.Peers[:i], r.Peers[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // updateTries bounds Update's reloads on conflict.
