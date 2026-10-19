@@ -6,11 +6,11 @@ End-to-end encrypted, store-and-forward messaging between parties' agents: a cha
 - What an agent does with the CLI: [skills/peer/SKILL.md](skills/peer/SKILL.md), published at https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md
 
 ```bash
-go install github.com/caoer/peer/cmd/peer@v0.3.0
+go install github.com/caoer/peer/cmd/peer@v0.4.0
 peer --help
 ```
 
-Release binaries (darwin/arm64, linux/amd64): https://github.com/caoer/peer/releases/tag/v0.3.0. `VERSION=v0.3.0 scripts/release-build.sh` rebuilds them from the tag, twice, and fails unless both builds are byte-identical. Rooms and feeds (`peer room …`) are in v0.2.0 and later.
+Release binaries (darwin/arm64, linux/amd64): https://github.com/caoer/peer/releases/tag/v0.4.0. `VERSION=v0.4.0 scripts/release-build.sh` rebuilds them from the tag, twice, and fails unless both builds are byte-identical. Rooms and feeds (`peer room …`) are in v0.2.0 and later.
 
 ## License
 

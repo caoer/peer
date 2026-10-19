@@ -337,6 +337,130 @@ func (c *Client) PullRoomAll(ctx context.Context, id, token string, after int64)
 	}
 }
 
+// RoomState is a state answer: the room as the relay holds it, the caller's
+// seat, what the caller's view of the log holds, and one page of that log —
+// every member's records, the caller's own included.
+type RoomState struct {
+	Room    RoomInfo     `json:"room"`
+	You     RoomSeat     `json:"you"`
+	Log     RoomLog      `json:"log"`
+	Records []RoomRecord `json:"-"`
+}
+
+// RoomInfo is the room's own row on the relay. Times are the relay's epoch
+// milliseconds; Next is the seq the next record takes.
+type RoomInfo struct {
+	Created    int64  `json:"created"`
+	Add        string `json:"add"`
+	Membership int64  `json:"membership"`
+	Next       int64  `json:"next"`
+	Retention  int64  `json:"retention"`
+	Alarm      *int64 `json:"alarm"` // nil: no retention alarm armed
+}
+
+// RoomSeat is the caller's member as the relay holds it; Admin is the
+// token's flag, Sockets the push sockets open on the idx.
+type RoomSeat struct {
+	Idx     int    `json:"idx"`
+	Role    string `json:"role"`
+	From    int64  `json:"from"`
+	Admin   bool   `json:"admin"`
+	Sockets int    `json:"sockets"`
+}
+
+// RoomLog is what the caller's view (seq >= From) holds: First is its
+// lowest seq and Oldest its earliest put, both nil when it holds none.
+type RoomLog struct {
+	Count  int64  `json:"count"`
+	First  *int64 `json:"first"`
+	Oldest *int64 `json:"oldest"`
+}
+
+// RoomState reads the room's state and one page of the caller's view of the
+// log with seq > after (after -1 for all of it), ascending; an empty page
+// means the end. A relay without the route answers no_such_route.
+func (c *Client) RoomState(ctx context.Context, id, token string, after int64) (RoomState, error) {
+	if err := checkRoom(id, token); err != nil {
+		return RoomState{}, err
+	}
+	if after < -1 {
+		return RoomState{}, fmt.Errorf("relay: after %d < -1", after)
+	}
+	// Every counter is a pointer, so an answer that leaves one out is refused
+	// rather than read as 0.
+	var out struct {
+		Room struct {
+			Created    *int64 `json:"created"`
+			Add        string `json:"add"`
+			Membership *int64 `json:"membership"`
+			Next       *int64 `json:"next"`
+			Retention  *int64 `json:"retention"`
+			Alarm      *int64 `json:"alarm"`
+		} `json:"room"`
+		You struct {
+			Idx     *int   `json:"idx"`
+			Role    string `json:"role"`
+			From    *int64 `json:"from"`
+			Admin   bool   `json:"admin"`
+			Sockets *int   `json:"sockets"`
+		} `json:"you"`
+		Log struct {
+			Count  *int64 `json:"count"`
+			First  *int64 `json:"first"`
+			Oldest *int64 `json:"oldest"`
+		} `json:"log"`
+		Records []roomRow `json:"records"`
+	}
+	path := "/r/" + id + "/state?after=" + strconv.FormatInt(after, 10)
+	if err := c.do(ctx, http.MethodGet, path, token, nil, &out, maxAnswer); err != nil {
+		return RoomState{}, err
+	}
+	rm, you, lg := out.Room, out.You, out.Log
+	switch {
+	case out.Records == nil || len(out.Records) > maxPage:
+		return RoomState{}, fmt.Errorf("%w: room state answer: records", ErrAnswer)
+	case rm.Add != AddAdmins && rm.Add != AddMembers:
+		return RoomState{}, fmt.Errorf("%w: room state answer: add %q", ErrAnswer, rm.Add)
+	case you.Role != RoleWrite && you.Role != RoleRead, you.Idx == nil || !ValidIdx(*you.Idx), you.Sockets == nil || *you.Sockets < 0:
+		return RoomState{}, fmt.Errorf("%w: room state answer: seat", ErrAnswer)
+	case !version(rm.Created), !version(rm.Membership), !version(rm.Next), !version(you.From), !version(lg.Count), rm.Retention == nil || *rm.Retention <= 0:
+		return RoomState{}, fmt.Errorf("%w: room state answer: counters", ErrAnswer)
+	}
+	st := RoomState{
+		Room: RoomInfo{Created: *rm.Created, Add: rm.Add, Membership: *rm.Membership, Next: *rm.Next, Retention: *rm.Retention, Alarm: rm.Alarm},
+		You:  RoomSeat{Idx: *you.Idx, Role: you.Role, From: *you.From, Admin: you.Admin, Sockets: *you.Sockets},
+		Log:  RoomLog{Count: *lg.Count, First: lg.First, Oldest: lg.Oldest},
+	}
+	last := after
+	for _, r := range out.Records {
+		if r.Seq == nil || *r.Seq <= last || *r.Seq < st.You.From || *r.Seq >= st.Room.Next {
+			return RoomState{}, fmt.Errorf("%w: seq missing, not after %d, not ascending, or outside the view", ErrAnswer, last)
+		}
+		last = *r.Seq
+		st.Records = append(st.Records, r.record())
+	}
+	return st, nil
+}
+
+// RoomStateAll reads the state page after page until the relay answers no
+// record: the records of every page, and the state of the last.
+func (c *Client) RoomStateAll(ctx context.Context, id, token string) (RoomState, error) {
+	var recs []RoomRecord
+	after := int64(-1)
+	for {
+		st, err := c.RoomState(ctx, id, token, after)
+		if err != nil {
+			return RoomState{}, err
+		}
+		if len(st.Records) == 0 {
+			st.Records = recs
+			return st, nil
+		}
+		recs = append(recs, st.Records...)
+		after = st.Records[len(st.Records)-1].Seq
+	}
+}
+
 // FeedLanding fetches a feed's landing text (no token).
 func (c *Client) FeedLanding(ctx context.Context, id string) (string, error) {
 	if !ValidRoomID(id) {
