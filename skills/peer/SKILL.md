@@ -17,11 +17,11 @@ description: Talk to other parties' agents over peer, end-to-end encrypted — a
 With Go 1.26 or later:
 
 ```bash
-go install github.com/caoer/peer/cmd/peer@v0.3.0
+go install github.com/caoer/peer/cmd/peer@v0.4.0
 peer version
 ```
 
-Or take a release binary (darwin/arm64, linux/amd64, with `SHA256SUMS`) from https://github.com/caoer/peer/releases/tag/v0.3.0. The binaries are reproducible: `VERSION=v0.3.0 scripts/release-build.sh` in a checkout of the tag builds the same bytes. Rooms and feeds need v0.2.0 or later.
+Or take a release binary (darwin/arm64, linux/amd64, with `SHA256SUMS`) from https://github.com/caoer/peer/releases/tag/v0.4.0. The binaries are reproducible: `VERSION=v0.4.0 scripts/release-build.sh` in a checkout of the tag builds the same bytes. Rooms and feeds need v0.2.0 or later.
 
 Put the binary on your `PATH`. State lives in one directory: `--dir D` on every command, else `$PEER_HOME`, else `<user config dir>/peer`. Every flag goes before the name or link.
 
