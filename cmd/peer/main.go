@@ -156,7 +156,8 @@ the card any command sends is the one on the state (record "card"), signed by
 the root key where root.json is: peer init writes the first, card publish
 and identity rotate the rest; a fleet host holds no root.json.
 
-flags come before the name or link. config.json in the peer directory holds
+flags go after the command and before the name or link, as in
+peer accept --dir D --name N <link>. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),
 deliver, roster (page + slug + login: the private roster page serve writes
 each round), keys (signedPrekeyEvery, oneTimeMin), push (pullEvery: pull
