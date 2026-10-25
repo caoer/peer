@@ -17,7 +17,7 @@ when:
 # settings:) is the mechanism.
 clone:
   - name: clone
-    image: docker.io/woodpeckerci/plugin-git:2.9.2
+    image: docker.io/woodpeckerci/plugin-git:2.11.0
     environment:
       PLUGIN_PARTIAL: "false"
       PLUGIN_TAGS: "false"
@@ -31,7 +31,7 @@ steps:
   - name: go-test
     # The exact toolchain go.mod names; GOTOOLCHAIN=local fails loud instead of
     # downloading another one when the two drift apart.
-    image: golang:1.26.5-bookworm
+    image: golang:1.27.3-trixie
     environment:
       GOTOOLCHAIN: local
     commands:
