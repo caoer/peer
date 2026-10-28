@@ -6,7 +6,7 @@
 #
 # Secrets (README, "Adopt"):
 #   forge_sync_token     this repository's ledger token; events push, tag, manual;
-#                        limited to REGISTRY/caoer115/forge-sync@sha256:20a6805b10966acf489c1f4e3643d2482ffc069ce61c89081cf806de4a47e65a
+#                        limited to REGISTRY/caoer115/forge-sync@sha256:6a5b12020db747e9cd38ad99544642abe3af6731b13eb8414895b859397f0be7
 #   forgejo_clone_token  a forge read token; events push, tag, manual
 #
 # The mirror step is a plugin step: no commands, entrypoint or environment.
@@ -40,7 +40,7 @@ clone:
 
 steps:
   - name: mirror
-    image: ${CI_FORGE_URL#*://}/caoer115/forge-sync@sha256:20a6805b10966acf489c1f4e3643d2482ffc069ce61c89081cf806de4a47e65a
+    image: ${CI_FORGE_URL#*://}/caoer115/forge-sync@sha256:6a5b12020db747e9cd38ad99544642abe3af6731b13eb8414895b859397f0be7
     settings:
       ledger_url: https://page.sui.pics/h/forge-sync-ledger-89c6aff2cb1f0873
       token:
