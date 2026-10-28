@@ -1,0 +1,49 @@
+# forge-sync: mirror this repository on every push, tag and manual run.
+#
+# Copy to .woodpecker/mirror.yml. Set ledger_url to the ledger page's lane.
+# The image is pinned by digest; when it changes, move the digest here and in
+# the forge_sync_token secret's --image together.
+#
+# Secrets (README, "Adopt"):
+#   forge_sync_token     this repository's ledger token; events push, tag, manual;
+#                        limited to REGISTRY/caoer115/forge-sync@sha256:20a6805b10966acf489c1f4e3643d2482ffc069ce61c89081cf806de4a47e65a
+#   forgejo_clone_token  a forge read token; events push, tag, manual
+#
+# The mirror step is a plugin step: no commands, entrypoint or environment.
+# CI releases an image-limited secret only to such a step of the named image,
+# whose entrypoint does nothing but sync. A step that runs commands never holds
+# the ledger token.
+#
+# A manual run with the variable FORGE_SYNC_OVERRIDE=<ref>:<expected-remote-sha>
+# pushes that ref past commits the remote alone holds, with lease.
+
+labels:
+  backend: docker # never the host-local backend: the tokens stay in a container
+
+when:
+  - event: [push, tag, manual]
+
+clone:
+  - name: clone
+    image: docker.io/woodpeckerci/plugin-git:2.11.0
+    environment:
+      PLUGIN_PARTIAL: "false" # every object local: the compare walks history
+      PLUGIN_DEPTH: "0"
+      PLUGIN_TAGS: "false" # forge-sync fetches every branch and tag itself
+      PLUGIN_LFS: "false" # and LFS objects, only when it pushes them
+      # The server's clone credential expires within the hour; a fixed read token
+      # survives a late-queued run.
+      CI_NETRC_MACHINE: git.0xdao.app
+      CI_NETRC_USERNAME: token
+      CI_NETRC_PASSWORD:
+        from_secret: forgejo_clone_token
+
+steps:
+  - name: mirror
+    image: ${CI_FORGE_URL#*://}/caoer115/forge-sync@sha256:20a6805b10966acf489c1f4e3643d2482ffc069ce61c89081cf806de4a47e65a
+    settings:
+      ledger_url: https://page.sui.pics/h/forge-sync-ledger-89c6aff2cb1f0873
+      token:
+        from_secret: forge_sync_token
+      forge_token:
+        from_secret: forgejo_clone_token
