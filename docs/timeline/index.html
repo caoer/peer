@@ -1,23 +1,37 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self'; script-src 'sha256-xME0d4rx0lUdM5hjZviGTBHv+0kglab/mcN0KsYD1zw='; style-src 'sha256-ZzH0OUL4Z5V5V7QypiG428XyG+SZgBp18IJfuUi+wmo='; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>peer · channel timeline</title>
 <!--
-  A channel's decrypted message timeline (peer design §8, the collaboration
-  page). peer serve and peer send write one peer-timeline@1 record per message
-  under tl.<channel>.<in|out>.<seq>; this page lists them and shows them by
-  their at stamp, newest last. Publish it private, with the data store on:
+  A channel's message timeline (peer design §8, the collaboration page). peer
+  serve and peer send write one peer-timeline@1 record per message under
+  tl.<channel>.<in|out>.<seq>; this page lists them by their at stamp, newest
+  last, and decrypts the encrypted ones in this browser (docs/protocol.md,
+  Message encryption extension e2e v1). Publish it private, with the data store
+  on:
 
     page-publish index.html --private --data on --no-bundle --title 'peer timeline <name>'
 
-  then name the slug in the peer's config.json "timelines" entry.
+  then name the slug in the peer's config.json "timelines" entry. A page that
+  runs the forward handler is published as a directory holding only this file,
+  handler.js and handler.json, so that the new version keeps the handler.
+
   #c=<channel id> limits the list to one channel; without it every tl. record
   on the page is listed. Every string from a record reaches the DOM through
   textContent.
+
+  To audit this page, read this file: it is all the code the page runs. The
+  policy above admits only the one script and the one style below, by hash
+  (internal/e2e/page_test.go recomputes both), and network traffic to this site
+  only. The script's one request is the listing from /d/. Decryption is HPKE and
+  AES-GCM through the browser's crypto.subtle, with no other library. The secret
+  key is read once from its field and held as a non-extractable key in this
+  script's closure; nothing stores it or sends it.
 -->
 <style>
-  :root { color-scheme: light dark; --muted: #8a8f98; --line: #8a8f9833; --in: #2f7d4f; --out: #3a63b8; }
+  :root { color-scheme: light dark; --muted: #8a8f98; --line: #8a8f9833; --in: #2f7d4f; --out: #3a63b8; --warn: #b4531f; }
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
   header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
   h1 { font-size: 1.25rem; margin: 0; }
@@ -31,13 +45,57 @@
   .kind { font-family: ui-monospace, monospace; }
   .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .25rem; }
   .file { font-family: ui-monospace, monospace; font-size: .9rem; }
+  .locked { color: var(--muted); font-family: ui-monospace, monospace; font-size: .9rem; }
+  .failed { color: var(--warn); font-family: ui-monospace, monospace; font-size: .9rem; }
+  .opened { border-left: 3px solid var(--in); padding-left: .6rem; }
   button { font: inherit; }
+  #keys { border: 1px solid var(--line); border-radius: .4rem; padding: .75rem 1rem; margin-top: 1rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  label { font-size: .9rem; }
+  #secret { flex: 1 1 18rem; min-width: 0; font: .9rem ui-monospace, monospace; padding: .25rem .4rem; }
+  #keystate, #keynote { font-size: .9rem; margin: .5rem 0 0; overflow-wrap: anywhere; }
+  #keystate { color: var(--muted); }
+  #keynote { color: var(--warn); }
+  #keynote:empty { display: none; }
+  #generated { margin-top: .75rem; font-size: .9rem; }
+  #generated p { margin: .4rem 0; }
+  #generated code { display: block; overflow-wrap: anywhere; user-select: all; }
+  #guide { margin-top: 1rem; font-size: .9rem; }
+  #guide li { border: 0; padding: .2rem 0; }
+  #guide ol { margin: .5rem 0; padding-left: 1.25rem; list-style: decimal; }
 </style>
 <header>
   <h1>Channel timeline</h1>
   <span id="state">loading…</span>
   <button id="reload" type="button">Reload</button>
 </header>
+<section id="keys" aria-label="Decryption key">
+  <div class="row">
+    <label for="secret">Secret key</label>
+    <input id="secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="x25519-secret:…" disabled>
+    <button id="unlock" type="button" disabled>Decrypt here</button>
+    <button id="forget" type="button" hidden>Forget key</button>
+    <button id="generate" type="button" disabled>Generate my key</button>
+  </div>
+  <p id="keystate" role="status"></p>
+  <p id="keynote" role="alert"></p>
+  <div id="generated" hidden>
+    <p>Public key. Hand this string to your party's admin, who publishes it with <kbd>peer e2e publish &lt;public key&gt;</kbd>:</p>
+    <code id="gen-public"></code>
+    <p>Secret key. Save it yourself now. This page keeps no copy, generating again replaces it, and nobody can recover it:</p>
+    <code id="gen-secret"></code>
+  </div>
+</section>
+<details id="guide">
+  <summary>How encrypted messages work on this page</summary>
+  <ol>
+    <li>A locked message was encrypted to the public keys on its line. Only the matching secret key opens it. The site, the agents and the hosts that carry it hold ciphertext.</li>
+    <li>To read one, paste your <kbd>x25519-secret:…</kbd> string above and press <em>Decrypt here</em>. Decryption runs in this tab. The key stays in this tab's memory until you press <em>Forget key</em> or close or reload the tab, and you enter it again after that.</li>
+    <li>To receive encrypted messages, press <em>Generate my key</em> once, save the secret string somewhere only you can read, and hand the public string to your party's admin. The key is made in this tab and is not sent anywhere.</li>
+    <li>Do not paste a secret key into anything else, and do not give it to an agent: an agent's model provider sees what the agent sees.</li>
+    <li>You do not have to trust this page. Use View Source to read it: it is one file with no outside code. Its security policy lets the page reach only this site, and its one request is the list of messages. The site could serve a different file on a later load, so compare the file's sha256 with the one quoted in the Peer Protocol document, or decrypt with <kbd>peer e2e decrypt</kbd> on your own machine.</li>
+  </ol>
+</details>
 <ol id="list"></ol>
 <script>
 "use strict";
@@ -50,6 +108,162 @@
   const CHANNEL_RE = /^[a-z0-9]{1,100}$/;
   const SCHEMA = "peer-timeline@1";
   const MAX_PAGES = 200;
+
+  // peer-e2e-v1, as docs/protocol.md fixes it.
+  const SUITE = "peer-e2e-v1";
+  const SUITE_RE = /^[A-Za-z0-9._-]{1,64}$/;
+  const PUBLIC_PREFIX = "x25519:";
+  const SECRET_PREFIX = "x25519-secret:";
+  const NO_X25519 = "cannot decrypt here: X25519 missing (Chrome 133+, Firefox 130+, Safari 17+)";
+  const WRONG_KEY = "does not open with this key";
+  const UNREADABLE = "unreadable encrypted record";
+  const lockedText = (keys) => "locked — encrypted to " + keys.join(", ");
+
+  const utf8 = (s) => new TextEncoder().encode(s);
+  const LABEL = utf8("peer e2e v1");
+  const EMPTY = new Uint8Array(0);
+  const X25519 = { name: "X25519" };
+  // The PKCS#8 wrapper of a raw 32-byte X25519 secret.
+  const PKCS8_PREFIX = new Uint8Array([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20]);
+
+  function concat(...parts) {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out;
+  }
+  const u16 = (n) => new Uint8Array([n >> 8, n & 255]);
+
+  // HPKE (RFC 9180) mode Base: DHKEM(X25519, HKDF-SHA256) 0x0020, HKDF-SHA256
+  // 0x0001, AES-256-GCM 0x0002. Only the receiving half.
+  const HPKE_V1 = utf8("HPKE-v1");
+  const KEM_ID = concat(utf8("KEM"), u16(0x0020));
+  const SUITE_ID = concat(utf8("HPKE"), u16(0x0020), u16(0x0001), u16(0x0002));
+
+  async function hmac(keyBytes, data) {
+    const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return new Uint8Array(await crypto.subtle.sign("HMAC", key, data));
+  }
+
+  // HKDF-Extract. An absent salt is 32 zero bytes (RFC 5869), which is also the
+  // only form crypto.subtle accepts: it refuses a zero-length HMAC key.
+  function labeledExtract(id, salt, label, ikm) {
+    return hmac(salt.length ? salt : new Uint8Array(32), concat(HPKE_V1, id, utf8(label), ikm));
+  }
+
+  // HKDF-Expand. Every output here is at most one 32-byte block.
+  async function labeledExpand(id, prk, label, info, length) {
+    const block = await hmac(prk, concat(u16(length), HPKE_V1, id, utf8(label), info, new Uint8Array([1])));
+    return block.subarray(0, length);
+  }
+
+  async function aesOpen(rawKey, iv, aad, data) {
+    const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad, tagLength: 128 }, key, data));
+  }
+
+  // Opens one stanza and returns the content key K. Throws when it does not open.
+  async function openStanza(enc, ct, me) {
+    const pkE = await crypto.subtle.importKey("raw", enc, X25519, false, []);
+    const dh = new Uint8Array(await crypto.subtle.deriveBits({ name: "X25519", public: pkE }, me.key, 256));
+    const prk = await labeledExtract(KEM_ID, EMPTY, "eae_prk", dh);
+    const shared = await labeledExpand(KEM_ID, prk, "shared_secret", concat(enc, me.pubRaw), 32);
+
+    const info = concat(LABEL, me.pubRaw);
+    const pskIdHash = await labeledExtract(SUITE_ID, EMPTY, "psk_id_hash", EMPTY);
+    const infoHash = await labeledExtract(SUITE_ID, EMPTY, "info_hash", info);
+    const context = concat(new Uint8Array([0]), pskIdHash, infoHash);
+    const secret = await labeledExtract(SUITE_ID, shared, "secret", EMPTY);
+    const key = await labeledExpand(SUITE_ID, secret, "key", context, 32);
+    const nonce = await labeledExpand(SUITE_ID, secret, "base_nonce", context, 12);
+    return aesOpen(key, nonce, EMPTY, ct);
+  }
+
+  // Standard base64 with padding; refuses non-canonical trailing bits. Returns
+  // null on anything else, and on a length other than size when size is given.
+  function b64(s, size) {
+    if (typeof s !== "string" || s.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return null;
+    let bin;
+    try { bin = atob(s); } catch (e) { return null; }
+    if (btoa(bin) !== s) return null;
+    const out = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return size === undefined || out.length === size ? out : null;
+  }
+
+  // The 32 bytes of "<prefix><43 base64url, no padding>", or null.
+  function keyBytes(s, prefix) {
+    if (typeof s !== "string" || !s.startsWith(prefix)) return null;
+    const rest = s.slice(prefix.length);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(rest)) return null;
+    return b64(rest.replace(/-/g, "+").replace(/_/g, "/") + "=", 32);
+  }
+
+  // The envelope object when a body is one, else null. The same test as
+  // Detect in internal/e2e: JSON whitespace only, exact member names.
+  function envelope(body) {
+    if (typeof body !== "string") return null;
+    const b = body.replace(/^[ \t\r\n]+/, "");
+    if (!b.startsWith('{"e2e":')) return null;
+    let o;
+    try { o = JSON.parse(b); } catch (e) { return null; }
+    if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+    return o.e2e === 1 && typeof o.suite === "string" && SUITE_RE.test(o.suite) ? o : null;
+  }
+
+  // The stanza keys of an envelope this page can read, or null when it cannot.
+  function recipients(env) {
+    if (env.suite !== SUITE || !Array.isArray(env.to) || !env.to.length || typeof env.body !== "string") return null;
+    const keys = env.to.map((s) => s && s.key);
+    return keys.every((k) => typeof k === "string") ? keys : null;
+  }
+
+  // null when the envelope has no stanza for this key, else {plain} or {failure}.
+  async function openEnvelope(env, me) {
+    const stanza = env.to.find((s) => s.key === me.pub);
+    if (!stanza) return null;
+    const enc = b64(stanza.enc, 32), ct = b64(stanza.ct, 48), body = b64(env.body);
+    if (!enc || !ct || !body) return { failure: UNREADABLE };
+    try {
+      const k = await openStanza(enc, ct, me);
+      const plain = await aesOpen(k, new Uint8Array(12), LABEL, body);
+      return { plain: new TextDecoder().decode(plain) };
+    } catch (e) {
+      return { failure: WRONG_KEY };
+    }
+  }
+
+  // The key in use, with what it has opened: {key, pub, pubRaw, results}. It
+  // lives only here. The field is emptied as soon as it is read.
+  let held = null;
+  let noX25519 = false;
+
+  // The held form of a secret string, or null when it is not one. The key is
+  // imported once as extractable to read its public half, then again as
+  // non-extractable, which is the only copy kept.
+  async function loadSecret(text) {
+    const raw = keyBytes(text, SECRET_PREFIX);
+    if (!raw) return null;
+    const der = concat(PKCS8_PREFIX, raw);
+    raw.fill(0);
+    try {
+      const probe = await crypto.subtle.importKey("pkcs8", der, X25519, true, ["deriveBits"]);
+      const pub = PUBLIC_PREFIX + (await crypto.subtle.exportKey("jwk", probe)).x;
+      const key = await crypto.subtle.importKey("pkcs8", der, X25519, false, ["deriveBits"]);
+      return { key, pub, pubRaw: keyBytes(pub, PUBLIC_PREFIX), results: new Map() };
+    } catch (e) {
+      return null;
+    } finally {
+      der.fill(0);
+    }
+  }
+
+  async function openAll(records, me) {
+    for (const r of records) {
+      const env = envelope(r.body);
+      if (!env || !recipients(env) || me.results.has(r.body)) continue;
+      me.results.set(r.body, await openEnvelope(env, me));
+    }
+  }
 
   function prefix() {
     const c = new URLSearchParams(location.hash.slice(1)).get("c");
@@ -84,8 +298,19 @@
     return e;
   }
 
+  function encryptedBody(r, env) {
+    const keys = env && recipients(env);
+    if (!keys) return el("div", "body failed", UNREADABLE);
+    const result = held && held.results.get(r.body);
+    if (!result) return el("div", "body locked", lockedText(keys));
+    if (result.failure) return el("div", "body failed", result.failure);
+    return el("div", "body opened", result.plain);
+  }
+
   function bodyOf(r) {
     const b = r.body;
+    const env = envelope(b);
+    if (env || r.e2e === true) return encryptedBody(r, env);
     if (typeof b === "string") return el("div", "body", b);
     if (b && b.event === "card") return el("div", "body", "card exchanged");
     if (b && typeof b.name === "string") {
@@ -95,11 +320,23 @@
     return el("div", "body", JSON.stringify(b));
   }
 
+  function showKeyState() {
+    const list = $("list");
+    const opened = list.querySelectorAll(".opened").length;
+    const closed = list.querySelectorAll(".locked, .failed").length;
+    let text = "No key entered. Encrypted messages stay locked.";
+    if (noX25519) text = NO_X25519;
+    else if (held) text = "Key held in this tab's memory only: " + held.pub + " · opened " + opened + " of " + (opened + closed) + " encrypted";
+    $("keystate").textContent = text;
+    $("forget").hidden = !held;
+  }
+
   function render(records) {
     const list = $("list");
     list.replaceChildren();
     for (const r of records) {
       const li = el("li");
+      li.dataset.id = String(r.id);
       const meta = el("div", "meta");
       const dir = r.dir === "out" ? "out" : "in";
       meta.append(
@@ -111,6 +348,16 @@
       li.append(meta, bodyOf(r));
       list.append(li);
     }
+    showKeyState();
+  }
+
+  // The records on screen, shown again when the key changes.
+  let shown = [];
+
+  async function show(records) {
+    if (held) await openAll(records, held);
+    shown = records;
+    render(records);
   }
 
   async function load() {
@@ -126,16 +373,67 @@
         records.push(v.data);
       }
       records.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || String(a.id).localeCompare(String(b.id)));
-      render(records);
+      await show(records);
       $("state").textContent = records.length + (records.length === 1 ? " message" : " messages") + " · " + new Date().toLocaleTimeString();
     } catch (e) {
       $("state").textContent = "could not list: " + e.message;
     }
   }
 
+  async function unlock() {
+    const input = $("secret");
+    const text = input.value.trim();
+    input.value = "";
+    $("keynote").textContent = "";
+    const key = await loadSecret(text);
+    if (!key) {
+      $("keynote").textContent = "That is not a secret key: it starts x25519-secret: and has 43 more characters.";
+      return;
+    }
+    held = key;
+    await show(shown);
+  }
+
+  function forget() {
+    held = null;
+    $("keynote").textContent = "";
+    render(shown);
+  }
+
+  async function generate() {
+    try {
+      const pair = await crypto.subtle.generateKey(X25519, true, ["deriveBits"]);
+      const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+      $("gen-public").textContent = PUBLIC_PREFIX + jwk.x;
+      $("gen-secret").textContent = SECRET_PREFIX + jwk.d;
+      $("generated").hidden = false;
+    } catch (e) {
+      $("keynote").textContent = "could not generate a key: " + e.message;
+    }
+  }
+
+  // The controls start disabled, so a browser without X25519 never gets a field
+  // that accepts a key and then fails.
+  async function enableKeys() {
+    try {
+      await crypto.subtle.generateKey(X25519, false, ["deriveBits"]);
+    } catch (e) {
+      noX25519 = true;
+      showKeyState();
+      return;
+    }
+    for (const id of ["secret", "unlock", "generate"]) $(id).disabled = false;
+  }
+
   $("reload").addEventListener("click", load);
+  $("unlock").addEventListener("click", unlock);
+  $("forget").addEventListener("click", forget);
+  $("generate").addEventListener("click", generate);
+  $("secret").addEventListener("keydown", (ev) => { if (ev.key === "Enter") unlock(); });
   window.addEventListener("hashchange", load);
   setInterval(load, 30000);
+  showKeyState();
+  enableKeys();
   load();
 })();
 </script>
