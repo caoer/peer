@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-g91B7vh8Ya8VS+8VN9did+UqAIz5d/YDyrRhRhVZy+c='; style-src 'sha256-3D3AlTq3X13b8h2qJTzdp8kq4tqFfHEty5UQK/A8ItI='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-0bzdSNCikX71R2d7N5qNi98v8zhBiZ1uTbM9KZzXGl8='; style-src 'sha256-3D3AlTq3X13b8h2qJTzdp8kq4tqFfHEty5UQK/A8ItI='; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f6f2">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1f1e1c">
@@ -19,13 +19,15 @@
   message live. It stores no message. Every string from a record reaches the
   DOM through textContent.
 
-  What a row shows. Each record is one row, grouped by day: which side sent it
-  (我方 for a record with dir out, 对方 for dir in — never by comparing ids),
-  the sending agent, the kind when it is not text, the counterpart party id,
-  and the time; then the body, or its state when it is encrypted (opened here,
-  locked, or unreadable); then a 详情 disclosure with the record's fields in
-  two groups — what every host in the path sees, and the encrypted part only a
-  key holder can open. Tokens: DESIGN.md beside this file.
+  What a row shows. Each record is one row, grouped by day: who sent it — the
+  sender's party name when the host sent one (from_name), else which side
+  (我方 for a record with dir out, 对方 for dir in — never by comparing ids)
+  with the counterpart party id shortened — the sending agent, the kind when
+  it is not text, and the time; then the body, or its state when it is
+  encrypted (opened here, locked, or unreadable); then a 详情 disclosure with
+  the record's fields in two groups — what every host in the path sees, the
+  counterpart's full party id among them, and the encrypted part only a key
+  holder can open. Tokens: DESIGN.md beside this file.
 
   The key. On the first open of a party's link this page generates an X25519
   pair with crypto.subtle, the secret half non-extractable, and keeps it in
@@ -209,6 +211,7 @@
     kind: "类型",
     from: "发出方",
     to: "接收方",
+    party: "对方主体",
     at: "时间",
     cut: "截断",
     cutNote: "正文被截到 60,000 字节",
@@ -571,6 +574,10 @@
     const i = s.indexOf("/");
     return i < 0 ? { party: s, agent: "" } : { party: s.slice(0, i), agent: s.slice(i + 1) };
   }
+  // The other party of a record: the recipient of a sent one, the sender of a received one.
+  const counterpart = (r) => address(r.dir === "out" ? r.to : r.from);
+  // The sender's party name as the host sent it, "" when it sent none.
+  const senderName = (r) => typeof r.from_name === "string" ? r.from_name : "";
   const shortId = (id) => id.length > 20 ? id.slice(0, 12) + "…" + id.slice(-4) : id;
   const kindWord = (k) => k in KIND ? KIND[k] : typeof k === "string" && k.startsWith("vnd.") ? T.vendor : String(k);
 
@@ -617,6 +624,7 @@
     add(plain, T.kind, word && word !== String(r.kind) ? word + " · " + String(r.kind) : String(r.kind));
     add(plain, T.from, String(r.from), true);
     add(plain, T.to, typeof r.to === "string" ? r.to : T.none, true);
+    add(plain, T.party, counterpart(r).party || T.none, true);
     add(plain, T.at, String(r.at), true);
     if (r.truncated === true) add(plain, T.cut, T.cutNote);
     if (r.body && typeof r.body.sha256 === "string") add(plain, "sha256", r.body.sha256, true);
@@ -647,12 +655,14 @@
     const li = el("li", out ? "msg own" : "msg");
     li.dataset.id = r.id;
     const sender = address(r.from);
-    const other = address(out ? r.to : r.from);
+    const name = senderName(r);
     const head = el("div", "head");
-    head.append(el("span", "who", (out ? T.ours : T.theirs) + (sender.agent ? " · " + sender.agent : "")));
+    head.append(el("span", "who", (name || (out ? T.ours : T.theirs)) + (sender.agent ? " · " + sender.agent : "")));
     const word = kindWord(r.kind);
     if (word) head.append(el("span", "kind", word));
-    if (other.party) {
+    // A host that sends no name leaves the side word to tell the parties apart, so the counterpart's id stays in the head.
+    const other = counterpart(r);
+    if (!name && other.party) {
       const id = el("span", "id", shortId(other.party));
       id.title = other.party;
       head.append(id);

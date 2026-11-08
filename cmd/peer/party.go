@@ -48,8 +48,9 @@ type config struct {
 	Agents  []card.Agent    `json:"agents,omitempty"`
 	Details json.RawMessage `json:"details,omitempty"`
 	// Name is the party's name as its own people write it: the forward's
-	// copy of a sent message names its sender so (forward.go). Absent, that
-	// copy names the party by its id.
+	// copy and the feed's record of a sent message name its sender so
+	// (forward.go, feedrecord.go). Absent, the copy names the party by its
+	// id and the reader page by its side.
 	Name string `json:"name,omitempty"`
 	// State is where the session state lives, shared by every host of the
 	// party that serves (design §3.2): a directory for the file backend, or

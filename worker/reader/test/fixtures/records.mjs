@@ -42,34 +42,41 @@ const bodies = {
 const encrypted = new Set(["vector", "two-keys", "indented", "tampered", "bad-enc", "other-key", "other-suite", "no-stanzas"]);
 
 // The viewer's party and its counterpart; the page's link names `me`. An
-// address is <party id>/<agent>: our advisor talks to their legal.
+// address is <party id>/<agent>: our advisor talks to their legal. The names
+// are what the host sends as from_name: the counterpart's roster name on a
+// received record, our own config name on a sent one.
 const partyId = () => "ed25519:" + randomBytes(32).toString("base64url");
 export const me = partyId();
 export const peer = partyId();
 const ours = me + "/advisor", theirs = peer + "/legal";
+export const names = { ours: "安灿", theirs: "zt" };
 
-const record = (id, i, fields) => ({
+// A record as a host that names the sender feeds it; named false is a host
+// that sends no from_name, as a v0.5.0 host does.
+const record = (id, i, fields, named = true) => ({
   id,
   dir: i % 2 ? "out" : "in",
   kind: "text",
   from: i % 2 ? ours : theirs,
   to: i % 2 ? theirs : ours,
   at: `2026-11-08T12:00:${String(i).padStart(2, "0")}Z`,
+  ...(named ? { from_name: i % 2 ? names.ours : names.theirs } : {}),
   ...fields,
 });
 
 // The peer-timeline@1 data the party's one source replays to a viewer: the
-// text bodies above, then one received file (its body is the descriptor).
+// text bodies above, then one received file (its body is the descriptor),
+// from a host that sends no name.
 export const file = { name: "合同草案.pdf", size: 183421, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", mime: "application/pdf" };
 export const records = [
   ...Object.entries(bodies).map(([id, body], i) => record(id, i, { body, ...(encrypted.has(id) ? { e2e: true } : {}) })),
-  record("file", 10, { kind: "file", body: file }),
+  record("file", 10, { kind: "file", body: file }, false),
 ];
 
 // Two records a source sends while the page is open: a plain one, and one
-// whose body the Object cut at 60,000 bytes.
+// whose body the Object cut at 60,000 bytes, from a host that sends no name.
 export const live = record("live", 20, { body: "a message sent while the page was open" });
-export const truncated = record("cut", 21, { body: "a long message, cut by the Object at 60,000 bytes…", truncated: true });
+export const truncated = record("cut", 21, { body: "a long message, cut by the Object at 60,000 bytes…", truncated: true }, false);
 
 // The frames the Object relays to one viewer on its connect: every record the
 // party's source holds, addressed to that viewer, then the card's current

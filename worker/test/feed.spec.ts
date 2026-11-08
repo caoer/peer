@@ -158,7 +158,8 @@ describe("sources and viewers", () => {
 		await s.next((m) => "replay" in m);
 		await s.next((m) => "replay" in m);
 
-		const rec = { id: "m1", dir: "in", kind: "text", from: "b", to: "a", at: "2026-11-08T15:00:00Z", body: "你好" };
+		// from_name rides inside rec (docs/protocol.md § Reader feed and forward) and reaches every viewer as the source sent it.
+		const rec = { id: "m1", dir: "in", kind: "text", from: "b", to: "a", at: "2026-11-08T15:00:00Z", body: "你好", from_name: "乙方" };
 		s.send({ rec, n: 7 });
 		expect(await s.next((m) => "ack" in m)).toEqual({ ack: 7 });
 		expect(await v1.next((m) => "rec" in m)).toEqual({ rec });
@@ -195,7 +196,7 @@ describe("sources and viewers", () => {
 		await s1.none();
 
 		const id = r1.replay.viewer;
-		const old = { rec: { id: "m0", dir: "out", kind: "text", from: "a", to: "b", at: "2026-11-07T00:00:00Z", body: "old" }, to: id };
+		const old = { rec: { id: "m0", dir: "out", kind: "text", from: "a", to: "b", at: "2026-11-07T00:00:00Z", body: "old", from_name: "甲方" }, to: id };
 		s1.send(old);
 		const done = { replay_done: id, readers: [KEY] };
 		s1.send(done);

@@ -89,7 +89,7 @@ Dark follows `prefers-color-scheme` through the same variable names, designed fr
 ## Layout
 
 - One column, `max-width: 44rem`, margins 16 px on a phone and 32 px on desktop. Order: title and connection state → the key panel → the day-grouped list, oldest to newest, scrolled to the newest once the replay lands → the guide, collapsed.
-- A message row: a head line (sender · kind · counterpart id … time), the body, a 「详情」 disclosure. Rows are separated by a `divider` hairline; a sent row sits on `row-own` with no border. 12 px inside a row, 16 px between rows, 24 px above a day label.
+- A message row: a head line (the sender's party name and agent · kind … time; from a host that sends no name, the side word 我方 or 对方 with the counterpart's shortened id in the name's place), the body, a 「详情」 disclosure. Rows are separated by a `divider` hairline; a sent row sits on `row-own` with no border. 12 px inside a row, 16 px between rows, 24 px above a day label.
 - Under `(pointer: coarse)` every control and summary grows to 44 px; the input stays 16 px so iOS does not zoom.
 
 ## Elevation & Depth
@@ -104,7 +104,7 @@ Dark follows `prefers-color-scheme` through the same variable names, designed fr
 ## Components
 
 - Message row states: plain · 已在本机解密 (`status-ok` word under the body) · 已锁定 (`fg-muted` line in place of the body) · 这把钥匙打不开 / 无法读取的加密消息 (`status-err` line in place of the body) · 已截断 (`status-warn` word in the head). A file row shows name 600, size and type; a card exchange is a `fg-muted` event line.
-- 「详情」 opens two groups: 明文部分 (编号, 类型, 发出方, 接收方, 时间 — what every host in the path sees) and, for an encrypted message, 加密部分 (加密方式, 收件钥匙 with 本浏览器的钥匙 marked, 密文 with its size and bytes).
+- 「详情」 opens two groups: 明文部分 (编号, 类型, 发出方, 接收方, 对方主体 — the counterpart's full party id — 时间; what every host in the path sees) and, for an encrypted message, 加密部分 (加密方式, 收件钥匙 with 本浏览器的钥匙 marked, 密文 with its size and bytes).
 - The key panel: one state line, one note line (`status-warn`), the advanced import as a native `<details>`.
 - Motion: none. A new message is appended in place; the list follows the newest only when the reader was already at the end.
 

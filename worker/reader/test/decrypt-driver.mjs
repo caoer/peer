@@ -18,7 +18,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { file, live, me, other, peer, records, replay, truncated, vector } from "./fixtures/records.mjs";
+import { file, live, me, names, other, peer, records, replay, truncated, vector } from "./fixtures/records.mjs";
 
 const candidates = [
   process.env.CCC_CHROME,
@@ -352,12 +352,15 @@ async function run() {
   print("locked", row);
   expectRows(row, locked, "locked");
   check(!Object.values(row).includes(vector.plaintext), "locked: the plaintext is not on the page");
-  // The row as a person reads it: side and agent from dir, the counterpart's id, the time, 详情.
-  check(await inRow("plain", ".who") === "对方 · legal", "a received record reads 对方 · <their agent>");
-  check(await inRow("vector", ".who") === "我方 · advisor", "a sent record reads 我方 · <our agent>");
+  // The row as a person reads it: the sender's party name and agent, the time, 详情; a record from a
+  // host that sent no name reads by side from dir, with the counterpart's id.
+  check(await inRow("plain", ".who") === names.theirs + " · legal", "a received record heads with the sender's party name and agent");
+  check(await inRow("vector", ".who") === names.ours + " · advisor", "a sent record heads with our party name and agent");
   check(await inRow("vector", "", "className") === "msg own" && await inRow("plain", "", "className") === "msg", "a sent row carries the own surface");
-  check(await inRow("plain", ".id") === shortId(peer) && await inRow("plain", ".id", "title") === peer, "the counterpart party id is shortened with the full id as title");
-  check(await inRow("vector", ".id") === shortId(peer), "a sent row names the counterpart, not us");
+  check(await inRow("plain", ".id") === null && await inRow("vector", ".id") === null, "a named record carries no party id in its head");
+  check((await inRow("plain", "details")).includes("对方主体" + peer) && (await inRow("vector", "details")).includes("对方主体" + peer), "详情 lists the counterpart's full party id");
+  check(await inRow("file", ".who") === "对方 · legal", "a received record without a name reads 对方 · <their agent>");
+  check(await inRow("file", ".id") === shortId(peer) && await inRow("file", ".id", "title") === peer, "without a name the counterpart party id is in the head, shortened, the full id as title");
   check(/^\d{2}:\d{2}$/.test(await inRow("plain", "time")) && await inRow("plain", "time", "dateTime") === records[0].at, "the time is HH:mm with the record's at as datetime");
   check(await evaluate("document.querySelectorAll('#list li.day').length") === 1, "one day divider for one day of records");
   check(await inRow("plain", ".kind") === null && await inRow("file", ".kind") === "文件", "a kind word appears only when the kind is not text");
@@ -381,6 +384,8 @@ async function run() {
   check(await rendered(records.length + 2), "a live record renders without a reload");
   row = await rows();
   check(row.live === live.body, "the live record's body is shown");
+  check(await inRow("live", ".who") === names.theirs + " · legal" && await inRow("live", ".id") === null, "a live record heads with the sender's name");
+  check(await inRow("cut", ".who") === "我方 · advisor" && await inRow("cut", ".id") === shortId(peer), "a sent record without a name reads 我方 · <our agent> with the counterpart's id");
   check(await evaluate(`document.querySelector('#list li[data-id="cut"] .cut').textContent`) === T.truncated, "a truncated record is marked 已截断");
   check(await text("state") === T.live(records.length + 2), "the state line counts the live records");
 
