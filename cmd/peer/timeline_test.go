@@ -23,44 +23,8 @@ import (
 	"github.com/caoer/peer/internal/relay/relaytest"
 	"github.com/caoer/peer/internal/session"
 	"github.com/caoer/peer/internal/store"
-	"github.com/caoer/peer/internal/store/pages/pagestest"
 	"github.com/caoer/peer/internal/timeline"
 )
-
-// timelineOn is cfg with peer name's timeline on page ps.
-func timelineOn(cfg config, name string, ps *pagestest.Server) config {
-	cfg.Timelines = map[string]timelineConfig{name: {Page: ps.URL, Slug: ps.Slug, Login: ps.Bearer}}
-	return cfg
-}
-
-// timelinePages is a handshake whose host keeps the guest's ("ancan")
-// timeline on hp and whose guest keeps the host's ("zt") on gp.
-func timelinePages(t *testing.T, base string) (p *pair, hp, gp *pagestest.Server) {
-	t.Helper()
-	hp = pagestest.New("tl-host-0123456789abcdef", "zt:host-page-secret")
-	gp = pagestest.New("tl-guest-0123456789abcdef", "ay:guest-page-secret")
-	t.Cleanup(hp.Close)
-	t.Cleanup(gp.Close)
-	p = handshake(t, newDir(t, timelineOn(hostCfg(), "ancan", hp)), newDir(t, timelineOn(config{}, "zt", gp)), base)
-	return p, hp, gp
-}
-
-// tlRecord is the record under key, its raw data and top-level field order.
-func tlRecord(t *testing.T, ps *pagestest.Server, key string) (*timeline.Record, []byte, []string) {
-	t.Helper()
-	rec, ok := ps.Record(key)
-	if !ok {
-		t.Fatalf("no record %s", key)
-	}
-	if rec.Schema != timeline.Schema || rec.Version != 1 {
-		t.Fatalf("%s: schema %s version %d", key, rec.Schema, rec.Version)
-	}
-	var r timeline.Record
-	if err := json.Unmarshal(rec.Data, &r); err != nil {
-		t.Fatal(err)
-	}
-	return &r, rec.Data, fieldOrder(t, rec.Data)
-}
 
 // fieldOrder is a JSON object's top-level keys in their order.
 func fieldOrder(t *testing.T, raw []byte) []string {
@@ -84,19 +48,6 @@ func fieldOrder(t *testing.T, raw []byte) []string {
 	return keys
 }
 
-// tlKeys are a page's timeline keys.
-func tlKeys(ps *pagestest.Server, channel string, n int) []string {
-	var out []string
-	for dir, max := range map[string]int{timeline.In: n, timeline.Out: n} {
-		for seq := int64(0); seq <= int64(max); seq++ {
-			if _, ok := ps.Record(timeline.Key(channel, dir, seq)); ok {
-				out = append(out, timeline.Key(channel, dir, seq))
-			}
-		}
-	}
-	return out
-}
-
 // sentSeq is the relay seq a send printed.
 func sentSeq(t *testing.T, out string) int64 {
 	t.Helper()
@@ -110,176 +61,12 @@ func sentSeq(t *testing.T, out string) int64 {
 
 var fieldsInOrder = []string{"id", "dir", "kind", "from", "to", "at", "body"}
 
-// The plan's verify — 一条通道解密后的消息在私有页面上按时间排列: a message
-// each way lands once on each side's page, sent as out under the sender's
-// relay seq, received as in under the same seq, with the fields of
-// peer-timeline@1 in order and nothing about the host, login, token or
-// cursor; the handshake's cards are on the page as card events.
-func TestTimelineReceivedAndSent(t *testing.T) {
-	_, _, base := relaytest.Start(t, login)
-	p, hp, gp := timelinePages(t, base)
-	start := time.Now().Add(-time.Second)
-
-	out := mustOK(t, "send", "--dir", p.guestDir, "--kind", "question", "--text", "are you there?\nline two", "zt/advisor")
-	id1, seq1 := sentRE.FindStringSubmatch(out)[1], sentSeq(t, out)
-	time.Sleep(5 * time.Millisecond)
-	out = mustOK(t, "send", "--dir", p.hostDir, "--kind", "answer", "--text", "here", "ancan")
-	id2, seq2 := sentRE.FindStringSubmatch(out)[1], sentSeq(t, out)
-	mustOK(t, "serve", "--dir", p.hostDir, "--once")
-	mustOK(t, "serve", "--dir", p.guestDir, "--once")
-
-	host, _ := os.Hostname()
-	_, _, gpe := channelOf(t, p.guestDir, "zt")
-	_, _, hpe := channelOf(t, p.hostDir, "ancan")
-	for _, tc := range []struct {
-		ps                 *pagestest.Server
-		dir                string
-		seq                int64
-		id, kind, from, to string
-		body               string
-	}{
-		{gp, timeline.Out, seq1, id1, "question", p.guestParty, p.hostParty + "/advisor", `"are you there?\nline two"`},
-		{hp, timeline.In, seq1, id1, "question", p.guestParty, p.hostParty + "/advisor", `"are you there?\nline two"`},
-		{hp, timeline.Out, seq2, id2, "answer", p.hostParty, p.guestParty, `"here"`},
-		{gp, timeline.In, seq2, id2, "answer", p.hostParty, p.guestParty, `"here"`},
-	} {
-		r, raw, order := tlRecord(t, tc.ps, timeline.Key(p.channel, tc.dir, tc.seq))
-		if strings.Join(order, ",") != strings.Join(fieldsInOrder, ",") {
-			t.Errorf("field order %v: %s", order, raw)
-		}
-		if r.ID != tc.id || r.Dir != tc.dir || r.Kind != tc.kind || r.From != tc.from || r.To != tc.to || string(r.Body) != tc.body || r.At.Before(start) {
-			t.Errorf("record %s %d: %s", tc.dir, tc.seq, raw)
-		}
-		for _, secret := range []string{host, login, "owner-secret", hp.Bearer, gp.Bearer, gpe.Token, hpe.Token, p.guestDir, p.hostDir, `"cursor"`} {
-			if bytes.Contains(raw, []byte(secret)) {
-				t.Errorf("record carries %q: %s", secret, raw)
-			}
-		}
-	}
-	// The received message is stamped by its sender: the page sorts the
-	// question before the answer.
-	q, _, _ := tlRecord(t, hp, timeline.Key(p.channel, timeline.In, seq1))
-	a, _, _ := tlRecord(t, hp, timeline.Key(p.channel, timeline.Out, seq2))
-	if !q.At.Before(a.At) {
-		t.Errorf("question at %v, answer at %v", q.At, a.At)
-	}
-	// Beside the two messages, each page holds the details card its side
-	// received in the handshake, as a card event.
-	for _, ps := range []*pagestest.Server{hp, gp} {
-		keys := tlKeys(ps, p.channel, 5)
-		cards := 0
-		for _, k := range keys {
-			if c, raw, _ := tlRecord(t, ps, k); c.Kind == session.KindCard {
-				cards++
-				if c.Dir != timeline.In || string(c.Body) != `{"event":"card"}` {
-					t.Errorf("card record %s", raw)
-				}
-			}
-		}
-		if len(keys) != 3 || cards != 1 {
-			t.Errorf("%s holds %v, want a card, the question and the answer", ps.Slug, keys)
-		}
-	}
-}
-
-// A doc or file on the timeline is the descriptor's name, size, sha256 and
-// mime: never the key that opens the blob, never the blob id.
-func TestTimelineAttachmentCarriesNoKey(t *testing.T) {
-	srv, _, base := relaytest.Start(t, login)
-	p, hp, gp := timelinePages(t, base)
-	path, _ := writeFile(t, "report.pdf", 4096)
-	out := mustOK(t, "send", "--dir", p.hostDir, "--kind", "doc", "--file", path, "ancan")
-	seq := sentSeq(t, out)
-	mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	q := records(t, deliverDirOf(p.guestDir), "quarantine")
-	if len(q) != 1 {
-		t.Fatalf("quarantine %v", q)
-	}
-	var key, blob string
-	for _, rec := range q {
-		desc, _ := descriptorOf(t, rec)
-		key, blob = strings.Trim(string(mustJSON(t, desc.Key)), `"`), desc.Blob
-	}
-	if blobs := srv.Blobs(p.channel); len(blobs) != 1 || blobs[0] != blob {
-		t.Fatalf("blobs %v, descriptor %s", blobs, blob)
-	}
-	for _, tc := range []struct {
-		ps  *pagestest.Server
-		dir string
-	}{{hp, timeline.Out}, {gp, timeline.In}} {
-		r, raw, _ := tlRecord(t, tc.ps, timeline.Key(p.channel, tc.dir, seq))
-		if order := fieldOrder(t, r.Body); strings.Join(order, ",") != "name,size,sha256" {
-			t.Errorf("%s body fields %v: %s", tc.dir, order, raw)
-		}
-		var f timeline.File
-		json.Unmarshal(r.Body, &f)
-		if r.Kind != "doc" || f.Name != "report.pdf" || f.Size != 4096 || len(f.SHA256) != 64 || f.Mime != "" {
-			t.Errorf("%s record %s", tc.dir, raw)
-		}
-		for _, s := range []string{key, blob, `"key"`, `"blob"`} {
-			if bytes.Contains(raw, []byte(s)) {
-				t.Errorf("%s record carries %q: %s", tc.dir, s, raw)
-			}
-		}
-	}
-}
-
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
-// A page that refuses costs the round one log line and nothing else: both
-// messages are born, the cursor moves, serve and send exit 0.
-func TestTimelineRefusalLeavesDelivery(t *testing.T) {
-	_, _, base := relaytest.Start(t, login)
-	bad := pagestest.New("tl-bad-0123456789abcdef", "zt:right-secret")
-	t.Cleanup(bad.Close)
-	wrong := config{Timelines: map[string]timelineConfig{"zt": {Page: bad.URL, Slug: bad.Slug, Login: "zt:wrong-secret"}}}
-	p := handshake(t, newDir(t, hostCfg()), newDir(t, wrong), base)
-	_, ch, _ := channelOf(t, p.guestDir, "zt")
-	before := ch.Cursor()
-
-	id1, _ := sendOK(t, p.hostDir, "--text", "one", "ancan")
-	id2, _ := sendOK(t, p.hostDir, "--text", "two", "ancan")
-	out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	if !strings.Contains(out, "delivered text "+id1) || !strings.Contains(out, "delivered text "+id2) {
-		t.Fatalf("serve:\n%s", out)
-	}
-	if n := strings.Count(out, "timeline zt: "); n != 1 || !strings.Contains(out, "401 bad_token") {
-		t.Fatalf("%d timeline lines in one round:\n%s", n, out)
-	}
-	if _, ch, _ := channelOf(t, p.guestDir, "zt"); ch.Cursor() != before+2 {
-		t.Fatalf("cursor %d, want %d", ch.Cursor(), before+2)
-	}
-	inbox := records(t, deliverDirOf(p.guestDir), "inbox")
-	if inbox[id1] == nil || inbox[id2] == nil {
-		t.Fatalf("inbox %v", inbox)
-	}
-
-	code, sout, errb := cmd(t, "send", "--dir", p.guestDir, "--text", "back", "zt")
-	if code != 0 || !sentRE.MatchString(sout) || strings.Count(errb, "timeline zt: ") != 1 {
-		t.Fatalf("send with the page refusing: exit %d\n%s%s", code, sout, errb)
-	}
-	if len(tlKeys(bad, p.channel, 5)) != 0 {
-		t.Fatal("a refused page holds records")
-	}
-}
-
-// The key is the message's place on the relay, and the write is
-// create-only: the same message written twice is one record at version 1,
-// and a birth the spool replays at start is written once.
-func TestTimelineSameMessageOnce(t *testing.T) {
+// A spooled message born by the next start's replay — the serve cut after
+// the commit, before the birth — is forwarded then, once.
+func TestForwardSpooledBirth(t *testing.T) {
 	ctx := context.Background()
-	_, _, base := relaytest.Start(t, login)
-	p, _, gp := timelinePages(t, base)
-
-	// Cut the guest's serve after the commit, before the birth: the
-	// message waits in the spool, on no page.
+	p, h, _ := forwardPair(t)
+	before := h.count()
 	id, _ := sendOK(t, p.hostDir, "--text", "replayed", "ancan")
 	sv, err := openServer(p.guestDir, "", io.Discard)
 	if err != nil {
@@ -290,43 +77,29 @@ func TestTimelineSameMessageOnce(t *testing.T) {
 	if err := sv.round(ctx); !errors.Is(err, cut) {
 		t.Fatalf("round: %v", err)
 	}
-	_, ch, _ := channelOf(t, p.guestDir, "zt")
-	key := timeline.Key(p.channel, timeline.In, ch.Cursor())
-	if _, ok := gp.Record(key); ok {
-		t.Fatal("a record before the birth")
+	if h.count() != before {
+		t.Fatal("forwarded before the birth")
 	}
-	// The next start births it and writes it.
-	var log bytes.Buffer
-	sv2, err := openServer(p.guestDir, "", &log)
+	sv2, err := openServer(p.guestDir, "", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := sv2.start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	r, _, _ := tlRecord(t, gp, key)
-	if r.ID != id || string(r.Body) != `"replayed"` {
-		t.Fatalf("record %+v\n%s", r, log.String())
+	if h.count() != before+1 {
+		t.Fatalf("%d POSTs after the replay, want one", h.count()-before)
 	}
-	// Written again — another host, a replay after a crash before the spool
-	// entry went: one more PUT, refused at v=0, the record unchanged.
-	m := &session.Message{V: 1, ID: r.ID, From: r.From, To: r.To, Kind: r.Kind, At: r.At, Body: []byte("replayed")}
-	puts := gp.Puts()
-	sv2.p.writeTimeline(ctx, "zt", p.channel, timeline.In, ch.Cursor(), m)
-	if gp.Puts() != puts+1 {
-		t.Fatalf("%d PUTs for one write", gp.Puts()-puts)
-	}
-	tlRecord(t, gp, key) // still version 1
-	if strings.Contains(log.String(), "timeline") {
-		t.Fatalf("log:\n%s", log.String())
+	if r, raw := h.post(t, before); r.ID != id || string(r.Body) != `"replayed"` {
+		t.Fatalf("record %s", raw)
 	}
 }
 
-// A sent message whose put failed after its commit has no relay seq yet:
-// its record waits beside the outbox and is written under the seq the
-// replay's put returns.
+// A sent message whose put failed after its commit has no relay seq yet: it
+// waits beside the outbox, and the replay's put hands it to writeTimeline
+// once and clears it. A sent message is never forwarded.
 func TestTimelineSentAfterOutboxReplay(t *testing.T) {
-	srv, _, base := relaytest.Start(t, login)
+	_, _, base := relaytest.Start(t, login)
 	target, err := url.Parse(strings.TrimSuffix(base, "/peer"))
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +107,8 @@ func TestTimelineSentAfterOutboxReplay(t *testing.T) {
 	fr := &flakyRelay{proxy: httputil.NewSingleHostReverseProxy(target)}
 	proxy := httptest.NewServer(fr)
 	t.Cleanup(proxy.Close)
-	p, _, gp := timelinePages(t, proxy.URL+"/peer")
+	p, h, _ := forwardPairOn(t, proxy.URL+"/peer")
+	before := h.count()
 
 	fr.refusePuts.Store(true)
 	code, _, errb := cmd(t, "send", "--dir", p.guestDir, "--text", "queued", "zt/advisor")
@@ -348,29 +122,28 @@ func TestTimelineSentAfterOutboxReplay(t *testing.T) {
 	}
 	fr.refusePuts.Store(false)
 	mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	rows := srv.Envelopes(p.channel, "g2h")
-	seq := rows[len(rows)-1].Seq
-	r, raw, _ := tlRecord(t, gp, timeline.Key(p.channel, timeline.Out, seq))
-	if r.ID != m[1] || r.Dir != timeline.Out || string(r.Body) != `"queued"` {
-		t.Fatalf("record %s", raw)
-	}
 	if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pending record left: %v", err)
 	}
+	if h.count() != before {
+		t.Fatalf("%d POSTs for a sent message", h.count()-before)
+	}
 }
 
-// forwardPair is a handshake whose guest keeps the host's ("zt") timeline
-// on a page and forwards to a hook answering code (-1 hangs until the POST
-// gives up). The hook has had the handshake's card by the time it returns.
-func forwardPair(t *testing.T) (p *pair, h *hookServer, code *atomic.Int32, gp *pagestest.Server) {
+// forwardPair is a handshake whose guest forwards the host's ("zt")
+// received messages to a hook answering code (-1 hangs until the POST gives
+// up). The hook has had the handshake's card by the time it returns.
+func forwardPair(t *testing.T) (p *pair, h *hookServer, code *atomic.Int32) {
 	t.Helper()
-	return mirrorPair(t, "")
+	return forwardPairOn(t, "")
 }
 
-// mirrorPair is forwardPair with the guest's timelines.zt.mirror set.
-func mirrorPair(t *testing.T, mirror string) (p *pair, h *hookServer, code *atomic.Int32, gp *pagestest.Server) {
+// forwardPairOn is forwardPair on the relay at base, a fresh one when "".
+func forwardPairOn(t *testing.T, base string) (p *pair, h *hookServer, code *atomic.Int32) {
 	t.Helper()
-	_, _, base := relaytest.Start(t, login)
+	if base == "" {
+		_, _, base = relaytest.Start(t, login)
+	}
 	code = &atomic.Int32{}
 	code.Store(http.StatusOK)
 	h = newHook(t, func(_ int, r *http.Request) int {
@@ -382,14 +155,8 @@ func mirrorPair(t *testing.T, mirror string) (p *pair, h *hookServer, code *atom
 		return c
 	})
 	trustHooks(t, h)
-	gp = pagestest.New("tl-fwd-0123456789abcdef", "ay:guest-page-secret")
-	t.Cleanup(gp.Close)
-	cfg := timelineOn(config{}, "zt", gp)
-	tc := cfg.Timelines["zt"]
-	tc.Forward = h.URL + "/peer/path-secret"
-	tc.Mirror = mirror
-	cfg.Timelines["zt"] = tc
-	return handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base), h, code, gp
+	cfg := config{Forward: forwardConfig{"zt": h.URL + "/peer/path-secret"}}
+	return handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base), h, code
 }
 
 // forwardedRecord is a POST's record with its truncated mark.
@@ -454,9 +221,9 @@ func forwardPending(t *testing.T, dir string) []string {
 
 // A received message reaches the forward URL once, as the timeline record;
 // a sent one never does. A 5xx keeps the record, one POST a round with the
-// inbox and page records already written, and the 2xx clears the file.
+// inbox record already written, and the 2xx clears the file.
 func TestForwardOnceRetriedAndCleared(t *testing.T) {
-	p, h, code, gp := forwardPair(t)
+	p, h, code := forwardPair(t)
 	before := h.count()
 	if before == 0 {
 		t.Fatal("the handshake's card was not forwarded")
@@ -485,7 +252,7 @@ func TestForwardOnceRetriedAndCleared(t *testing.T) {
 
 	code.Store(http.StatusServiceUnavailable)
 	out := mustOK(t, "send", "--dir", p.hostDir, "--text", "again", "ancan")
-	id2, seq2 := sentRE.FindStringSubmatch(out)[1], sentSeq(t, out)
+	id2 := sentRE.FindStringSubmatch(out)[1]
 	base := h.count()
 	out = mustOK(t, "serve", "--dir", p.guestDir, "--once")
 	if h.count() != base+1 || !strings.Contains(out, "forward zt: "+id2+": answered 503") {
@@ -497,7 +264,6 @@ func TestForwardOnceRetriedAndCleared(t *testing.T) {
 	if records(t, deliverDirOf(p.guestDir), "inbox")[id2] == nil {
 		t.Error("no inbox record while the forward waits")
 	}
-	tlRecord(t, gp, timeline.Key(p.channel, timeline.In, seq2))
 	mustOK(t, "serve", "--dir", p.guestDir, "--once")
 	if h.count() != base+2 || forwardFailures(t, p.guestDir, id2) != 2 {
 		t.Fatalf("%d POSTs after the second 503 round, want 2", h.count()-base)
@@ -519,41 +285,23 @@ func TestForwardOnceRetriedAndCleared(t *testing.T) {
 	}
 }
 
-// A channel with no forward sends nothing: the page still gets its record.
+// A peer with no forward entry sends nothing: the inbox still gets its record.
 func TestForwardNoURLSendsNothing(t *testing.T) {
 	_, _, base := relaytest.Start(t, login)
 	h := newHook(t, func(int, *http.Request) int { return http.StatusOK })
 	trustHooks(t, h)
-	p, _, gp := timelinePages(t, base)
-	out := mustOK(t, "send", "--dir", p.hostDir, "--text", "plain", "ancan")
-	seq := sentSeq(t, out)
+	cfg := config{Forward: forwardConfig{"someone-else": h.URL}}
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base)
+	id, _ := sendOK(t, p.hostDir, "--text", "plain", "ancan")
 	mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	tlRecord(t, gp, timeline.Key(p.channel, timeline.In, seq))
+	if records(t, deliverDirOf(p.guestDir), "inbox")[id] == nil {
+		t.Error("no inbox record")
+	}
 	if h.count() != 0 {
 		t.Errorf("%d POSTs", h.count())
 	}
 	if _, err := os.Stat(filepath.Join(p.guestDir, forwardPendingDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("pending directory: %v", err)
-	}
-}
-
-// A page that refuses does not stop the forward.
-func TestForwardWithThePageRefusing(t *testing.T) {
-	_, _, base := relaytest.Start(t, login)
-	h := newHook(t, func(int, *http.Request) int { return http.StatusOK })
-	trustHooks(t, h)
-	bad := pagestest.New("tl-bad-0123456789abcdef", "zt:right-secret")
-	t.Cleanup(bad.Close)
-	cfg := config{Timelines: map[string]timelineConfig{"zt": {Page: bad.URL, Slug: bad.Slug, Login: "zt:wrong-secret", Forward: h.URL}}}
-	p := handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base)
-	before := h.count()
-	id, _ := sendOK(t, p.hostDir, "--text", "past the page", "ancan")
-	out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	if !strings.Contains(out, "401 bad_token") || h.count() != before+1 {
-		t.Fatalf("%d POSTs:\n%s", h.count()-before, out)
-	}
-	if r, raw := h.post(t, before); r.ID != id {
-		t.Errorf("record %s", raw)
 	}
 }
 
@@ -599,7 +347,7 @@ func TestForwardCutsBody(t *testing.T) {
 // A long message is cut on its way through serve, and only the copy is:
 // the inbox record keeps the whole body.
 func TestForwardLongMessageThroughServe(t *testing.T) {
-	p, h, _, _ := forwardPair(t)
+	p, h, _ := forwardPair(t)
 	before := h.count()
 	long := strings.Repeat("a", 70000)
 	id, _ := sendOK(t, p.hostDir, "--text", long, "ancan")
@@ -616,7 +364,7 @@ func TestForwardLongMessageThroughServe(t *testing.T) {
 // A URL that keeps failing gets the first attempt and 20 retries, then the
 // record goes with a log line.
 func TestForwardDroppedAfterRetries(t *testing.T) {
-	p, h, code, _ := forwardPair(t)
+	p, h, code := forwardPair(t)
 	code.Store(http.StatusInternalServerError)
 	before := h.count()
 	id, _ := sendOK(t, p.hostDir, "--text", "lost", "ancan")
@@ -642,7 +390,7 @@ func TestForwardDroppedAfterRetries(t *testing.T) {
 // A URL that never answers holds the round for one timeout, not one per
 // record, and the journal line does not carry the URL's path secret.
 func TestForwardDeadURLOneTimeout(t *testing.T) {
-	p, h, code, _ := forwardPair(t)
+	p, h, code := forwardPair(t)
 	code.Store(-1)
 	const n = 8
 	for i := range n {

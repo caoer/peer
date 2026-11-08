@@ -57,9 +57,9 @@ type config struct {
 	// UCC names the fleet's sessions root and the seat map on it (ucc.go):
 	// with it, Agents come from the map and serve delivers by it.
 	UCC *uccConfig `json:"ucc,omitempty"`
-	// Timelines are the peers' collaboration pages serve and send write
-	// each message on (timeline.go), by peer name.
-	Timelines map[string]timelineConfig `json:"timelines,omitempty"`
+	// Forward is the URL, by peer name, each received message is POSTed
+	// to (forward.go).
+	Forward forwardConfig `json:"forward,omitempty"`
 	// Keys is the key lifecycle: signedPrekeyEvery, oneTimeMin (keys.go).
 	Keys keysConfig `json:"keys,omitempty"`
 	// Push is how a running serve uses the relay's push: pullEvery (push.go).
@@ -124,9 +124,6 @@ func openParty(dir string) (*party, error) {
 		return nil, err
 	}
 	if err := readJSON(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	if err := p.cfg.checkTimelines(); err != nil {
 		return nil, err
 	}
 	if _, err := p.loadSeats(); err != nil {

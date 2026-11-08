@@ -20,14 +20,13 @@ import (
 	"github.com/caoer/peer/internal/timeline"
 )
 
-// A channel's received messages can also go to timelines.<peer>.forward: an
-// HTTPS POST of the peer-timeline@1 record in its page envelope,
-// {"schema": ..., "data": {...}}, beside its write on the page, so
-// a page's handler reaches a human with no seat in the path. A 2xx is the
+// A channel's received messages can also go to forward.<peer>: an HTTPS POST
+// of the peer-timeline@1 record in its envelope, {"schema": ..., "data":
+// {...}}, so a handler reaches a human with no seat in the path. A 2xx is the
 // delivery. Any other answer, or none, keeps the record in
 // <dir>/forward-pending/<id>.json, which every round tries once more; after
-// forwardRetries retries it is dropped with a log line. The inbox and page
-// records are already written by then, so a dead URL costs only the copy.
+// forwardRetries retries it is dropped with a log line. The inbox record is
+// already written by then, so a dead URL costs only the copy.
 
 const (
 	forwardPendingDir = "forward-pending"
@@ -37,7 +36,7 @@ const (
 	forwardBodyMax = 60000
 )
 
-// forwardPost is the POST body: the timeline record as a page holds it,
+// forwardPost is the POST body: the timeline record,
 // marked when its body was cut.
 type forwardPost struct {
 	Schema string      `json:"schema"`
@@ -96,11 +95,11 @@ func forwardBytes(m *session.Message) ([]byte, error) {
 }
 
 // forwardTimeline POSTs received message m to the peer's forward URL, if it
-// has one. Like the page write it never reaches the message path. A URL that
+// has one. It never reaches the message path. A URL that
 // failed earlier in the round is not tried again: the record waits for the
 // next round, its failure count unchanged.
 func (p *party) forwardTimeline(ctx context.Context, name string, m *session.Message) {
-	u := p.cfg.Timelines[name].Forward
+	u := p.cfg.Forward[name]
 	if u == "" {
 		return
 	}
@@ -151,7 +150,7 @@ func (p *party) retryForwards(ctx context.Context) {
 			fmt.Fprintf(log, "forward: %s: %v\n", filepath.Base(n), err)
 			continue
 		}
-		u := p.cfg.Timelines[e.Peer].Forward
+		u := p.cfg.Forward[e.Peer]
 		if u == "" {
 			fmt.Fprintf(log, "forward %s: %s: no forward URL in config; dropped\n", e.Peer, e.ID)
 			p.dropForward(&e)

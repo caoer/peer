@@ -14,8 +14,6 @@ import (
 	"github.com/caoer/peer/internal/e2e"
 	"github.com/caoer/peer/internal/envelope"
 	"github.com/caoer/peer/internal/relay/relaytest"
-	"github.com/caoer/peer/internal/store/pages/pagestest"
-	"github.com/caoer/peer/internal/timeline"
 )
 
 // peerProc runs the CLI in its own OS process and logs the transcript.
@@ -84,11 +82,11 @@ func envelopeKeys(t *testing.T, env []byte) []string {
 
 // The U2 check, each step its own OS process on the fake relay: a keyless
 // peer refused by name; A publishes, B's status lists the key; B's encrypted
-// send is an inbox record marked e2e with the envelope for a body, a
-// timeline record marked e2e with the envelope; A decrypts it to hi.
+// send is an inbox record marked e2e with the envelope for a body; A
+// decrypts it to hi.
 func TestE2ETwoProcess(t *testing.T) {
 	_, _, base := relaytest.Start(t, login)
-	p, hp, gp := timelinePages(t, base)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
 	a, b := p.hostDir, p.guestDir
 
 	code, _, errb := peerProc(t, "send", "--dir", b, "--encrypt", "--text", "too early", "zt")
@@ -109,7 +107,7 @@ func TestE2ETwoProcess(t *testing.T) {
 	}
 
 	out := procOK(t, "send", "--dir", b, "--encrypt", "--text", "hi", "zt")
-	id, seq := sentRE.FindStringSubmatch(out)[1], sentSeq(t, out)
+	id := sentRE.FindStringSubmatch(out)[1]
 	procOK(t, "serve", "--dir", a, "--once")
 
 	path := filepath.Join(deliverDirOf(a), "inbox", id+".md")
@@ -120,19 +118,6 @@ func TestE2ETwoProcess(t *testing.T) {
 	keys, v, body := frontMatter(t, rec)
 	if strings.Join(keys, " ") != "from to kind verified at e2e" || v["e2e"] != e2e.Suite || !strings.HasPrefix(body, `{"e2e":`) {
 		t.Fatalf("record:\n%s", rec)
-	}
-
-	r, raw, order := tlRecord(t, hp, timeline.Key(p.channel, timeline.In, seq))
-	var tlBody string
-	if err := json.Unmarshal(r.Body, &tlBody); err != nil {
-		t.Fatal(err)
-	}
-	if !r.E2E || tlBody != body || order[len(order)-1] != "e2e" || !bytes.Contains(raw, []byte(`"e2e":true`)) {
-		t.Fatalf("timeline record %s", raw)
-	}
-	s, sent, _ := tlRecord(t, gp, timeline.Key(p.channel, timeline.Out, seq))
-	if !s.E2E || bytes.Contains(sent, []byte(`"hi"`)) {
-		t.Fatalf("the sender's timeline record %s", sent)
 	}
 
 	if out := procOK(t, "e2e", "decrypt", "--key", secret, path); out != "hi" {
@@ -327,81 +312,37 @@ func TestE2ERoom(t *testing.T) {
 	}
 }
 
-// mirror e2e: the page holds encrypted records alone, in both directions,
-// while the forward carries every received record.
-func TestMirrorE2E(t *testing.T) {
-	p, h, _, gp := mirrorPair(t, mirrorE2E)
+// The forward carries every received record, an encrypted one marked e2e
+// with the envelope for its body, a plain one as it is.
+func TestForwardMarksE2E(t *testing.T) {
+	p, h, _ := forwardPair(t)
 	// In this process: a child would not trust the forward hook's certificate.
-	for _, d := range [][2]string{{p.guestDir, p.hostDir}, {p.hostDir, p.guestDir}} {
-		pub, _, err := e2e.GenerateKey()
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustOK(t, "e2e", "publish", "--dir", d[0], pub)
-		mustOK(t, "serve", "--dir", d[1], "--once")
+	pub, _, err := e2e.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
 	}
+	mustOK(t, "e2e", "publish", "--dir", p.guestDir, pub)
+	mustOK(t, "serve", "--dir", p.hostDir, "--once")
 
-	out := mustOK(t, "send", "--dir", p.hostDir, "--encrypt", "--text", "locked", "ancan")
-	inEnc := sentSeq(t, out)
-	out = mustOK(t, "send", "--dir", p.hostDir, "--text", "plain words", "ancan")
-	idPlain, inPlain := sentRE.FindStringSubmatch(out)[1], sentSeq(t, out)
+	mustOK(t, "send", "--dir", p.hostDir, "--encrypt", "--text", "locked", "ancan")
+	out := mustOK(t, "send", "--dir", p.hostDir, "--text", "plain words", "ancan")
+	idPlain := sentRE.FindStringSubmatch(out)[1]
 	before := h.count()
 	mustOK(t, "serve", "--dir", p.guestDir, "--once")
-
-	r, _, _ := tlRecord(t, gp, timeline.Key(p.channel, timeline.In, inEnc))
-	if !r.E2E {
-		t.Errorf("record %+v", r)
-	}
-	if _, ok := gp.Record(timeline.Key(p.channel, timeline.In, inPlain)); ok {
-		t.Error("a plain received record on the page")
-	}
 	if h.count() != before+2 {
 		t.Fatalf("%d POSTs, want both records", h.count()-before)
 	}
-	f1, _ := h.post(t, before)
+	f1, raw1 := h.post(t, before)
 	f2, _ := h.post(t, before+1)
-	if !f1.E2E || f2.E2E || f2.ID != idPlain || string(f2.Body) != `"plain words"` {
-		t.Errorf("forwarded %+v and %+v", f1, f2)
+	var env string
+	if err := json.Unmarshal(f1.Body, &env); err != nil {
+		t.Fatal(err)
 	}
-
-	out = mustOK(t, "send", "--dir", p.guestDir, "--encrypt", "--text", "back", "zt")
-	if r, _, _ := tlRecord(t, gp, timeline.Key(p.channel, timeline.Out, sentSeq(t, out))); !r.E2E {
-		t.Errorf("sent record %+v", r)
+	if !f1.E2E || !strings.HasPrefix(env, `{"e2e":1,`) || !bytes.Contains(raw1, []byte(`"e2e":true`)) || bytes.Contains(raw1, []byte("locked")) {
+		t.Errorf("encrypted record %s", raw1)
 	}
-	out = mustOK(t, "send", "--dir", p.guestDir, "--text", "plain back", "zt")
-	if _, ok := gp.Record(timeline.Key(p.channel, timeline.Out, sentSeq(t, out))); ok {
-		t.Error("a plain sent record on the page")
-	}
-}
-
-// Absent or all, the page holds every record.
-func TestMirrorAll(t *testing.T) {
-	for _, mirror := range []string{"", mirrorAll} {
-		t.Run("mirror="+mirror, func(t *testing.T) {
-			p, _, _, gp := mirrorPair(t, mirror)
-			out := mustOK(t, "send", "--dir", p.hostDir, "--text", "plain", "ancan")
-			mustOK(t, "serve", "--dir", p.guestDir, "--once")
-			if r, _, _ := tlRecord(t, gp, timeline.Key(p.channel, timeline.In, sentSeq(t, out))); r.E2E || string(r.Body) != `"plain"` {
-				t.Errorf("record %+v", r)
-			}
-		})
-	}
-}
-
-// Any other value refuses when the config loads, naming the peer.
-func TestMirrorRefusedAtLoad(t *testing.T) {
-	ps := pagestest.New("tl-mir-0123456789abcdef", "ay:page-secret")
-	t.Cleanup(ps.Close)
-	cfg := timelineOn(config{}, "zt", ps)
-	tc := cfg.Timelines["zt"]
-	tc.Mirror = "sometimes"
-	cfg.Timelines["zt"] = tc
-	dir := newDir(t, cfg)
-	for _, args := range [][]string{{"status", "--dir", dir}, {"serve", "--dir", dir, "--once"}} {
-		code, _, errb := cmd(t, args...)
-		if code != 1 || !strings.Contains(errb, "timelines.zt.mirror") || !strings.Contains(errb, "sometimes") {
-			t.Fatalf("peer %s: exit %d: %s", args[0], code, errb)
-		}
+	if f2.E2E || f2.ID != idPlain || string(f2.Body) != `"plain words"` {
+		t.Errorf("plain record %+v", f2)
 	}
 }
 
