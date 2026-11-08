@@ -135,10 +135,11 @@ func forwardBytes(dir, from string, m *session.Message) ([]byte, error) {
 	return json.Marshal(forwardPost{Peer: counterpart(dir, m), From: from, Record: forwardRecord{Schema: timeline.Schema, Data: data}})
 }
 
-// senderName is how the forward names the sender of a message in direction
-// dir with the peer named name on this roster: that name for a received
-// message, config's name for this party on a sent one — "" when config has
-// none, and the worker then names the party by its id.
+// senderName is how the forward and the feed (feedrecord.go) name the sender
+// of a message in direction dir with the peer named name on this roster: that
+// name for a received message, config's name for this party on a sent one —
+// "" when config has none, and the worker's copy then names the party by its
+// id, the reader page by its side.
 func (p *party) senderName(dir, name string) string {
 	if dir == timeline.Out {
 		return p.cfg.Name

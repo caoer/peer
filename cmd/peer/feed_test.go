@@ -31,10 +31,12 @@ const (
 	feedToken  = "feed-reader-token-0123456789abcdefghijklmnop"
 )
 
-// fedRecord is a frame's record: the timeline data and its truncated mark.
+// fedRecord is a frame's record: the timeline data, its truncated mark and
+// the sender's party name ("" when the host sends none).
 type fedRecord struct {
 	timeline.Record
-	Truncated bool `json:"truncated"`
+	Truncated bool   `json:"truncated"`
+	FromName  string `json:"from_name"`
 }
 
 // fedFrame is one frame as a source sends it or a viewer receives it.
@@ -81,15 +83,15 @@ func trustFeed(t *testing.T, s *feedtest.Server) {
 	t.Cleanup(func() { serviceClient, serviceTimeout = client, timeout })
 }
 
-// feedPair is a handshake whose guest ("ancan") feeds its messages to a fake
-// feed admitting feedSecret and the reader token feedToken — both seeded on
-// the fake and in the guest's feed record, as peer feed setup and link leave
-// them — its state in a shared directory so a second host can serve it; fwd,
-// when set, is its forward too.
+// feedPair is a handshake whose guest ("ancan", its own name 安灿 in config)
+// feeds its messages to a fake feed admitting feedSecret and the reader token
+// feedToken — both seeded on the fake and in the guest's feed record, as peer
+// feed setup and link leave them — its state in a shared directory so a
+// second host can serve it; fwd, when set, is its forward too.
 func feedPair(t *testing.T, only string, fwd *forwardConfig) (*pair, *feedtest.Server) {
 	t.Helper()
 	_, _, base := relaytest.Start(t, login)
-	cfg := config{State: stateConfig{Dir: filepath.Join(t.TempDir(), "shared-state")}}
+	cfg := config{Name: "安灿", State: stateConfig{Dir: filepath.Join(t.TempDir(), "shared-state")}}
 	hostDir, guestDir := newDir(t, hostCfg()), newDir(t, cfg)
 	party := keys.PartyID(rootOf(t, guestDir).Public())
 	s := feedtest.Start(t, party, feedSecret, feedToken)
@@ -171,8 +173,10 @@ func waitSources(t *testing.T, s *feedtest.Server, n int) {
 }
 
 // The U13 check. A received message is a frame to the viewer and a sent one
-// a frame and the local out- record; a viewer with a key connecting to two
-// hosts has each replay what it holds, in at order, ending with replay_done
+// a frame and the local out- record, each frame naming its sender by party
+// name — the roster's for a received record, config's for a sent one; a
+// viewer with a key connecting to two hosts has each replay what it holds, in
+// at order and named the same way, ending with replay_done
 // and the card's readers, and leaves the key in readers-pending once; peer
 // e2e publish on the root directory moves it onto the card, where the peer's
 // status lists it, and clears the record; peer e2e revoke takes it off.
@@ -194,10 +198,10 @@ func TestFeedLiveReplayAndReaderKey(t *testing.T) {
 	if len(fr) != before+1 {
 		t.Fatalf("%d frames after the receive, want one", len(fr)-before)
 	}
-	if f := parseFeedFrame(t, fr[before].Body); f.Rec == nil || f.Rec.ID != id || f.Rec.Dir != timeline.In || string(f.Rec.Body) != `"hello"` || f.N == nil || f.To != "" {
+	if f := parseFeedFrame(t, fr[before].Body); f.Rec == nil || f.Rec.ID != id || f.Rec.Dir != timeline.In || string(f.Rec.Body) != `"hello"` || f.Rec.FromName != "zt" || f.N == nil || f.To != "" {
 		t.Fatalf("frame %s", fr[before].Body)
 	}
-	if f := viewerNext(t, v); f.Rec == nil || f.Rec.ID != id || f.N != nil {
+	if f := viewerNext(t, v); f.Rec == nil || f.Rec.ID != id || f.Rec.FromName != "zt" || f.N != nil {
 		t.Fatalf("viewer got %+v", f)
 	}
 
@@ -220,8 +224,11 @@ func TestFeedLiveReplayAndReaderKey(t *testing.T) {
 	if fr := s.Frames(); len(fr) != before+2 || parseFeedFrame(t, fr[before+1].Body).Rec.ID != sid {
 		t.Fatalf("frames after the send: %d", len(fr)-before)
 	}
-	if f := viewerNext(t, v); f.Rec == nil || f.Rec.ID != sid || f.Rec.Dir != timeline.Out {
+	if f := viewerNext(t, v); f.Rec == nil || f.Rec.ID != sid || f.Rec.Dir != timeline.Out || f.Rec.FromName != "安灿" {
 		t.Fatalf("viewer got %+v", f)
+	}
+	if b, _ := os.ReadFile(local[0]); bytes.Contains(b, []byte("from_name")) {
+		t.Errorf("the local record carries the name, which the replay resolves: %s", b)
 	}
 	v.Close()
 
@@ -248,14 +255,14 @@ func TestFeedLiveReplayAndReaderKey(t *testing.T) {
 				t.Errorf("replay_done readers %v, want none yet", f.Readers)
 			}
 		case f.Rec != nil && f.To != "":
-			replayed = append(replayed, f.Rec.ID+" "+f.Rec.Dir)
+			replayed = append(replayed, f.Rec.ID+" "+f.Rec.Dir+" "+f.Rec.FromName)
 		default:
 			t.Fatalf("frame %+v", f)
 		}
 	}
 	// The first host holds the inbox record and the local record; the second
 	// host, serving the same state from its own directory, holds neither.
-	if want := id + " in " + sid + " out"; strings.Join(replayed, " ") != want {
+	if want := id + " in zt " + sid + " out 安灿"; strings.Join(replayed, " ") != want {
 		t.Fatalf("replayed %v", replayed)
 	}
 	sv1.p.feedStop()

@@ -12,13 +12,13 @@
 //
 // Exit 0 when every check passes, 1 when one fails, 2 when no browser runs.
 // CCC_CHROME names the browser (a wrapper script is how to add --no-sandbox).
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { live, other, records, replay, truncated, vector } from "./fixtures/records.mjs";
+import { file, live, me, names, other, peer, records, replay, truncated, vector } from "./fixtures/records.mjs";
 
 const candidates = [
   process.env.CCC_CHROME,
@@ -51,16 +51,26 @@ const T = {
   imported: "已导入，替换了本浏览器原来的钥匙",
   notSecret: "这不是私钥：私钥以 x25519-secret: 开头，后面还有 43 个字符。",
 };
-const lockedLine = (...keys) => "已锁定 — 加密给 " + keys.join(", ");
+const lockedLine = (n) => "已锁定 · 加密给 " + n + " 把钥匙，本浏览器的钥匙不在其中";
+const lockedNoKey = (n) => "已锁定 · 加密给 " + n + " 把钥匙，本浏览器没有钥匙";
 const WRONG = "这把钥匙打不开";
 const BAD = "无法读取的加密消息";
+const DECRYPTED = "已在本机解密";
+const MINE = "本浏览器的钥匙";
+const EMPTY_WAITING = "主机还没连上。连上以后，它保存的消息会在这里补出来。";
+const shortId = (id) => id.slice(0, 12) + "…" + id.slice(-4);
 const KEY_RE = /^x25519:[A-Za-z0-9_-]{43}$/;
+
+// PEER_READER_SHOTS=<dir> saves a screenshot of each named state at desktop
+// and phone widths, light and dark (ccc-design Pass 2); unset, none is taken.
+const shotsDir = process.env.PEER_READER_SHOTS;
+if (shotsDir) mkdirSync(shotsDir, { recursive: true });
 
 // --- The fake feed: a party per scenario, each with a token and a source count.
 
 const partyId = () => "ed25519:" + randomBytes(32).toString("base64url");
 const tokenOf = () => randomBytes(32).toString("base64url");
-const P1 = partyId(), P2 = partyId(), P3 = partyId();
+const P1 = me, P2 = partyId(), P3 = partyId();
 const feeds = {
   [P1]: { token: tokenOf(), sources: 1, readers: [], sockets: new Set() },
   [P2]: { token: tokenOf(), sources: 0, readers: [], sockets: new Set() },
@@ -203,9 +213,27 @@ async function until(fn, ms = 10000) {
 const waitFor = (expression, ms) => until(async () => { try { return await evaluate(expression); } catch (e) { return false; } }, ms);
 
 const text = (id) => evaluate(`document.getElementById(${JSON.stringify(id)}).textContent`);
+// Message rows by id; a day divider is an li without a body.
 const rows = async () => Object.fromEntries(await evaluate(
-  "[...document.querySelectorAll('#list li')].map((li) => [li.dataset.id, li.querySelector('.body').textContent])",
+  "[...document.querySelectorAll('#list li.msg')].map((li) => [li.dataset.id, li.querySelector('.body').textContent])",
 ));
+const inRow = (id, selector, what = "textContent") =>
+  evaluate(`(() => { const e = document.querySelector('#list li[data-id=${JSON.stringify(id)}] ${selector}'); return e ? e.${what} : null; })()`);
+
+async function shots(name) {
+  if (!shotsDir) return;
+  for (const [device, width, height, mobile] of [["desk", 1440, 900, false], ["phone", 390, 844, true]]) {
+    await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+    for (const scheme of ["light", "dark"]) {
+      await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });
+      await sleep(150);
+      const { data } = await send("Page.captureScreenshot", { format: "png" });
+      writeFileSync(join(shotsDir, `${name}-${device}-${scheme}.png`), Buffer.from(data, "base64"));
+    }
+  }
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "" }] });
+  await send("Emulation.clearDeviceMetricsOverride");
+}
 function print(title, row) {
   console.log(`--- ${title}`);
   for (const r of records) console.log(`  ${r.id.padEnd(12)} ${row[r.id]}`);
@@ -214,7 +242,7 @@ function expectRows(row, want, title) {
   for (const [id, body] of Object.entries(want)) check(row[id] === body, `${title}: ${id} shows "${body}"`);
 }
 const is = (id, want) => `document.getElementById(${JSON.stringify(id)}).textContent === ${JSON.stringify(want)}`;
-const rendered = (n) => waitFor(`document.querySelectorAll('#list li').length === ${n}`);
+const rendered = (n) => waitFor(`document.querySelectorAll('#list li.msg').length === ${n}`);
 // The replay's last frame has been handled: the key state names the card.
 const settled = () => waitFor("/^钥匙已/.test(document.getElementById('keystate').textContent)");
 async function enterSecret(secret) {
@@ -295,14 +323,15 @@ async function run() {
   await connect();
   console.log(`page ${origin}/`);
   const [real] = JSON.parse(vector.envelope).to;
-  const vectorLocked = lockedLine(real.key);
+  const vectorLocked = lockedLine(1);
   const plain = records.find((r) => r.id === "plain").body;
   const e2eTwo = records.find((r) => r.id === "e2e-two").body;
   const keyOf = (i) => hellos[i] && hellos[i].hello && hellos[i].hello.key;
   const locked = {
-    plain, vector: vectorLocked, "two-keys": lockedLine(other.public, real.key), indented: vectorLocked,
-    tampered: vectorLocked, "bad-enc": vectorLocked, "other-key": lockedLine(other.public),
+    plain, vector: vectorLocked, "two-keys": lockedLine(2), indented: vectorLocked,
+    tampered: vectorLocked, "bad-enc": vectorLocked, "other-key": lockedLine(1),
     "other-suite": BAD, "no-stanzas": BAD, "e2e-two": e2eTwo,
+    file: file.name + " · 179.1\u00a0KB · " + file.mime,
   };
 
   // 1. A first open: a key is born, the hello carries it, the card does not list it yet.
@@ -323,6 +352,27 @@ async function run() {
   print("locked", row);
   expectRows(row, locked, "locked");
   check(!Object.values(row).includes(vector.plaintext), "locked: the plaintext is not on the page");
+  // The row as a person reads it: the sender's party name and agent, the time, 详情; a record from a
+  // host that sent no name reads by side from dir, with the counterpart's id.
+  check(await inRow("plain", ".who") === names.theirs + " · legal", "a received record heads with the sender's party name and agent");
+  check(await inRow("vector", ".who") === names.ours + " · advisor", "a sent record heads with our party name and agent");
+  check(await inRow("vector", "", "className") === "msg own" && await inRow("plain", "", "className") === "msg", "a sent row carries the own surface");
+  check(await inRow("plain", ".id") === null && await inRow("vector", ".id") === null, "a named record carries no party id in its head");
+  check((await inRow("plain", "details")).includes("对方主体" + peer) && (await inRow("vector", "details")).includes("对方主体" + peer), "详情 lists the counterpart's full party id");
+  check(await inRow("file", ".who") === "对方 · legal", "a received record without a name reads 对方 · <their agent>");
+  check(await inRow("file", ".id") === shortId(peer) && await inRow("file", ".id", "title") === peer, "without a name the counterpart party id is in the head, shortened, the full id as title");
+  check(/^\d{2}:\d{2}$/.test(await inRow("plain", "time")) && await inRow("plain", "time", "dateTime") === records[0].at, "the time is HH:mm with the record's at as datetime");
+  check(await evaluate("document.querySelectorAll('#list li.day').length") === 1, "one day divider for one day of records");
+  check(await inRow("plain", ".kind") === null && await inRow("file", ".kind") === "文件", "a kind word appears only when the kind is not text");
+  check(await inRow("file", ".body.file .name") === file.name, "a file record shows its name");
+  check(await inRow("vector", ".note") === null, "a locked record carries no decrypted note");
+  const vectorDetails = await inRow("vector", "details");
+  check(vectorDetails.includes("详情") && vectorDetails.includes(records[1].from) && vectorDetails.includes(records[1].to) && vectorDetails.includes("vector"), "详情 lists id, sender and recipient addresses");
+  check(vectorDetails.includes(real.key) && vectorDetails.includes(JSON.parse(vector.envelope).body) && vectorDetails.includes("peer-e2e-v1"), "详情 lists the suite, the recipient keys and the ciphertext");
+  check(await inRow("vector", "details .mine") === null, "a key this browser does not hold is not marked as its own");
+  check((await inRow("file", "details")).includes(file.sha256), "a file's sha256 is in 详情");
+  check(await evaluate("document.getElementById('empty').hidden"), "the empty line is hidden when records show");
+  await shots("locked");
   const rec = await stored(P1);
   check(rec.type === "private" && rec.alg === "X25519" && rec.extractable === false, `the stored key is a non-extractable X25519 private key (${JSON.stringify(rec)})`);
   check(rec.pub === K1, "the stored public string is the one in the hello");
@@ -334,6 +384,8 @@ async function run() {
   check(await rendered(records.length + 2), "a live record renders without a reload");
   row = await rows();
   check(row.live === live.body, "the live record's body is shown");
+  check(await inRow("live", ".who") === names.theirs + " · legal" && await inRow("live", ".id") === null, "a live record heads with the sender's name");
+  check(await inRow("cut", ".who") === "我方 · advisor" && await inRow("cut", ".id") === shortId(peer), "a sent record without a name reads 我方 · <our agent> with the counterpart's id");
   check(await evaluate(`document.querySelector('#list li[data-id="cut"] .cut').textContent`) === T.truncated, "a truncated record is marked 已截断");
   check(await text("state") === T.live(records.length + 2), "the state line counts the live records");
 
@@ -375,6 +427,17 @@ async function run() {
   check(await evaluate("document.getElementById('secret').value === ''"), "the key field is emptied once read");
   console.log("  keystate: " + await text("keystate"));
   check((await text("keystate")).includes("3 / 8"), "three encrypted records open with the vector's key");
+  check(await inRow("vector", ".note") === DECRYPTED && await inRow("two-keys", ".note") === DECRYPTED, "an opened record says 已在本机解密 under its text");
+  check(await inRow("tampered", ".note") === null && await inRow("plain", ".note") === null, "a failed or plain record carries no decrypted note");
+  check(await inRow("vector", "details .mine") === MINE, "详情 marks this browser's key among the recipients");
+  await shots("decrypted");
+  await evaluate(`document.querySelector('#list li[data-id="vector"] details').open = true; document.querySelector('#list li[data-id="vector"]').scrollIntoView(); true`);
+  await sleep(100);
+  await shots("details");
+  push(P1, { rec: live });
+  check(await rendered(records.length + 1), "a live record renders after an import");
+  check(await evaluate(`document.querySelector('#list li[data-id="vector"] details').open`), "an open 详情 stays open across a rebuild");
+  await evaluate(`document.querySelector('#list li[data-id="vector"] details').open = false; true`);
 
   await reload();
   check(await rendered(records.length) && await settled(), "the page reloads after an import");
@@ -396,6 +459,8 @@ async function run() {
   check(await waitFor(is("state", T.waitingHost)), "with no source the state line reads 等待主机");
   check(hellos.length === 7 && hellos[6].party === P2 && KEY_RE.test(keyOf(6) || ""), "the hello to a party without a source still carries a key");
   check(await text("keystate") === T.checking, "without a replay the card state is unknown");
+  check(await evaluate("!document.getElementById('empty').hidden") && await text("empty") === EMPTY_WAITING, "with no source and no record the empty line says the host is not connected");
+  await shots("waiting");
 
   // 7. A wrong token.
   const socketsBefore = sockets.length;
@@ -478,7 +543,8 @@ async function run() {
   check(await evaluate("document.getElementById('secret').disabled && document.getElementById('import').disabled"), "without X25519 the import stays disabled");
   check(await until(() => hellos.length === 9), "the page still connects without a key");
   check(hellos[8].party === P3 && hellos[8].hello && !("key" in hellos[8].hello), "the hello has no key member when the browser holds none");
-  check(await rendered(records.length) && (await rows()).vector === vectorLocked, "the records show locked without a key");
+  check(await rendered(records.length) && (await rows()).vector === lockedNoKey(1), "the records show locked, with no key, without a key");
+  await shots("nokey");
   await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: stub.identifier });
 }
 

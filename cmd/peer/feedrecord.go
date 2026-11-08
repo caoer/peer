@@ -18,6 +18,8 @@ import (
 	"github.com/caoer/peer/internal/deliver"
 	"github.com/caoer/peer/internal/e2e"
 	"github.com/caoer/peer/internal/feed"
+	"github.com/caoer/peer/internal/keys"
+	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/seats"
 	"github.com/caoer/peer/internal/session"
 	"github.com/caoer/peer/internal/timeline"
@@ -28,9 +30,10 @@ import (
 // on <url>/feed/<party id> (internal/feed), the host saying hello with the
 // source secret the shared state record feed holds (feed.go, decision 33),
 // each record a frame the worker fans out to the pages and stores nowhere
-// (plan-delivery decisions 15, 23, 30, 31). What a page missed it asks for on
-// connect: the host replays the inbox records it holds for received messages
-// and, for sent ones, the local record this file keeps —
+// (plan-delivery decisions 15, 23, 30, 31), the record carrying the sender's
+// party name as this host knows it (feedData). What a page missed it asks for
+// on connect: the host replays the inbox records it holds for received
+// messages and, for sent ones, the local record this file keeps —
 // <dir>/feed/<peer name>/out-<seq>.json, the peer-timeline@1 data of the
 // message, 30 days. A page's reader key rides the replay request and lands
 // in readers-pending (readers.go). feed.only "e2e" keeps plain messages off
@@ -53,6 +56,15 @@ const (
 	// feedOnlyE2E is the one value of feed.only: encrypted records alone.
 	feedOnlyE2E = "e2e"
 )
+
+// feedData is a record as it travels on the feed, the live frame and the
+// replay alike: the peer-timeline@1 data with its body cut once, and the
+// sender's party name as this host knows it (senderName, forward.go) — absent
+// when it knows none, and the page then names the side alone.
+type feedData struct {
+	forwardData
+	FromName string `json:"from_name,omitempty"`
+}
 
 // check refuses a feed whose url is not https or whose only is not e2e: on
 // this binary each would leave the feed silently off or wide open.
@@ -213,7 +225,7 @@ func (p *party) feedTimeline(ctx context.Context, name, dir string, seq int64, m
 	if p.cfg.Feed.e2eOnly() && !rec.E2E {
 		return
 	}
-	data, err := json.Marshal(cutData(rec))
+	data, err := json.Marshal(feedData{forwardData: cutData(rec), FromName: p.senderName(dir, name)})
 	if err != nil {
 		fmt.Fprintf(log, "feed %s: %s: %v\n", name, m.ID, err)
 		return
@@ -294,17 +306,20 @@ func (p *party) pruneFeed() {
 
 // replayFeed answers a viewer's connect: every record this host holds, the
 // inbox records for received messages and the local records for sent ones,
-// in at order, then the card's current reader keys.
+// in at order, each naming its sender as the live frame does, then the card's
+// current reader keys.
 func (p *party) replayFeed(ctx context.Context, r feed.Replay, send func(json.RawMessage) error) ([]string, error) {
 	recs, err := p.feedRecords()
 	if err != nil {
 		return p.ownReaders(ctx), err
 	}
+	names := p.peerNames(ctx)
 	for _, rec := range recs {
 		if p.cfg.Feed.e2eOnly() && !rec.E2E {
 			continue
 		}
-		data, err := json.Marshal(cutData(rec))
+		party, _, _ := strings.Cut(rec.From, "/")
+		data, err := json.Marshal(feedData{forwardData: cutData(rec), FromName: p.senderName(rec.Dir, names[party])})
 		if err != nil {
 			return p.ownReaders(ctx), err
 		}
@@ -313,6 +328,26 @@ func (p *party) replayFeed(ctx context.Context, r feed.Replay, send func(json.Ra
 		}
 	}
 	return p.ownReaders(ctx), nil
+}
+
+// peerNames is the roster name of every peer whose party is known, by party
+// id: how the replay names a received record's sender. A roster that does not
+// load names nobody, with a line.
+func (p *party) peerNames(ctx context.Context) map[string]string {
+	r, err := roster.Load(ctx, p.backend)
+	if err != nil {
+		fmt.Fprintf(p.timelineLog(), "feed: %v\n", err)
+		return nil
+	}
+	names := map[string]string{}
+	for _, pe := range r.Peers {
+		ch, err := p.store.Channel(ctx, pe.Channel)
+		if err != nil || ch.Root() == nil {
+			continue
+		}
+		names[keys.PartyID(ch.Root())] = pe.Name
+	}
+	return names
 }
 
 // feedRecords is every record the replay serves, in at order: the local
