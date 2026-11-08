@@ -24,8 +24,11 @@
  *
  * The routes (handleFeed, behind PEER_HITS as every /peer route):
  *   GET /feed/<party id>           + Upgrade: websocket → the Object
- *   PUT /feed/<party id>/config    the signed config (src/sign.ts) → {ok, at, readers}
- *   GET /feed/<party id>/config    signed over X-Peer-At → the config held, hashes only
+ *   PUT /feed/<party id>/config    the config signed by the identity key under the
+ *                                  root-signed card, X-Peer-Card + X-Peer-Signature
+ *                                  (src/sign.ts) → {ok, at, readers}
+ *   GET /feed/<party id>/config    the same two headers over X-Peer-At → the config
+ *                                  held, hashes only
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -49,7 +52,9 @@ const answer = (data: unknown) =>
   new Response(JSON.stringify(data, null, 2) + "\n", { headers: { "content-type": "application/json; charset=utf-8", "x-content-type-options": "nosniff" } });
 
 // `parts` is the path split: ["feed", <party id>] or ["feed", <party id>, "config"].
-export async function handleFeed(req: Request, env: FeedEnv, parts: string[]): Promise<Response> {
+// `now` is the clock the config's `at` and X-Peer-At are judged against; a
+// test with a fixed fixture passes its own.
+export async function handleFeed(req: Request, env: FeedEnv, parts: string[], now = Date.now()): Promise<Response> {
   const party = parts[1];
   if (party === undefined || !PARTY_RE.test(party) || parts.length > 3 || (parts.length === 3 && parts[2] !== "config"))
     return fail(404, "no_such_route", "the feed routes are /feed/<party id> and /feed/<party id>/config");
@@ -61,18 +66,19 @@ export async function handleFeed(req: Request, env: FeedEnv, parts: string[]): P
     if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return fail(426, "upgrade_required", "the feed is a WebSocket: GET with Upgrade: websocket");
     return feed.fetch(req);
   }
+  const card = req.headers.get("x-peer-card");
   const sig = req.headers.get("x-peer-signature");
   if (req.method === "PUT") {
     const body = new Uint8Array(await req.arrayBuffer());
     if (body.length > CONFIG_MAX) return fail(413, "too_large", "a feed config is one JSON object of hashes");
-    const c = await signedConfig(party, body, sig);
+    const c = await signedConfig(party, body, card, sig, now);
     if ("status" in c) return fail(c.status, c.code, c.error);
     const put = await feed.putConfig(c);
     if ("refused" in put) return fail(409, "stale", put.refused);
     return answer({ ok: true, at: c.at, readers: c.readers.length });
   }
   if (req.method === "GET") {
-    const refused = await signedRead(party, req.headers.get("x-peer-at"), sig);
+    const refused = await signedRead(party, req.headers.get("x-peer-at"), card, sig, now);
     if (refused !== null) return fail(refused.status, refused.code, refused.error);
     const c = await feed.config();
     if (c === null) return fail(404, "no_config", "this party has no feed config yet");

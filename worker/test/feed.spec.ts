@@ -1,23 +1,32 @@
 // PeerFeed through the Worker: the signed config at /feed/<party>/config, then
-// sources and viewers over /feed/<party>. Every describe signs for its own
-// party born here (helpers/party.ts), so each has its own Object; every
-// request speaks from its own address because PEER_HITS counts per address.
+// sources and viewers over /feed/<party>. The configs come from
+// test/fixtures/card-cases.json (test/fixtures/gen): two throwaway parties,
+// each with its root-signed card and bodies signed by its identity key at a
+// fixed `at`, so the config calls go through handleFeed with that clock while
+// the sockets go through SELF. Every request speaks from its own address
+// because PEER_HITS counts per address.
 
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
 import { sha256Hex, CLOSE_BAD_TOKEN } from "../src/relay/channel";
-import { BODY_CUT } from "../src/feed";
+import { BODY_CUT, type FeedEnv, handleFeed } from "../src/feed";
 import { sleep } from "./helpers/sleep";
 import { FRAME_WAIT_MS } from "./helpers/ws";
-import { newParty, type Party } from "./helpers/party";
+import cases from "./fixtures/card-cases.json";
 
 const ORIGIN = "https://peer.0xtau.com";
-const SECRET = "src_" + "7".repeat(39);
-const TOKEN_A = "tok_" + "a".repeat(39);
-const TOKEN_B = "tok_" + "b".repeat(39);
+// The secret and tokens whose hashes the fixtures' configs carry (gen/main.go).
+const SECRET = "src_" + "7".repeat(43);
+const TOKEN_A = "tok_" + "a".repeat(43);
+const TOKEN_B = "tok_" + "b".repeat(43);
 const KEY = "x25519:" + "k".repeat(43);
+type Fx = typeof cases.p1;
+const p1: Fx = cases.p1;
+const p2: Fx = cases.p2;
 let ip = 0;
 const addr = () => ({ "CF-Connecting-IP": `203.0.113.${(ip++ % 200) + 10}` });
+const atOf = (body: string) => Date.parse((JSON.parse(body) as { at: string }).at);
+const feedEnv = env as unknown as FeedEnv;
 
 type Frame = Record<string, any>;
 
@@ -65,66 +74,68 @@ async function viewer(party: string, token = TOKEN_A, key?: string) {
 	return v;
 }
 
-const configBody = async (party: string, readers = [TOKEN_A, TOKEN_B], at = new Date().toISOString()) =>
-	JSON.stringify({ v: 1, party, at, source: "sha256:" + (await sha256Hex(SECRET)), readers: await Promise.all(readers.map(async (t) => "sha256:" + (await sha256Hex(t)))) });
-
-const putConfig = async (p: Party, body: string, sig?: string) =>
-	SELF.fetch(`${ORIGIN}/feed/${p.id}/config`, { method: "PUT", headers: { "x-peer-signature": sig ?? (await p.sign(body)), ...addr() }, body });
-
-const getConfig = async (p: Party, at = new Date().toISOString(), sig?: string) =>
-	SELF.fetch(`${ORIGIN}/feed/${p.id}/config`, { headers: { "x-peer-at": at, "x-peer-signature": sig ?? (await p.sign(at)), ...addr() } });
+// The config routes through handleFeed, judged at the fixture's own clock.
+const configCall = (party: string, method: string, headers: Record<string, string>, now: number, body?: string) =>
+	handleFeed(new Request(`${ORIGIN}/feed/${party}/config`, { method, headers: { ...headers, ...addr() }, body }), feedEnv, ["feed", party, "config"], now);
+const putConfig = (p: Fx, which: "initial" | "update", opts: { card?: string; signature?: string; body?: string } = {}) => {
+	const c = p.configs[which];
+	const body = opts.body ?? c.body;
+	return configCall(p.party, "PUT", { "x-peer-card": opts.card ?? p.card, "x-peer-signature": opts.signature ?? c.signature }, atOf(c.body), body);
+};
+const getConfig = (p: Fx, opts: { card?: string; signature?: string } = {}) =>
+	configCall(p.party, "GET", { "x-peer-at": p.read.at, "x-peer-card": opts.card ?? p.card, "x-peer-signature": opts.signature ?? p.read.signature }, Date.parse(p.read.at));
 
 describe("the config", () => {
-	let p: Party;
-	beforeAll(async () => (p = await newParty()));
-
-	it("is absent until the party PUTs it signed, then reads back as hashes to a signed GET", async () => {
-		expect((await getConfig(p)).status).toBe(404);
-		const bare = await SELF.fetch(`${ORIGIN}/feed/${p.id}/config`, { headers: addr() });
+	it("is absent until the party PUTs it under its card, then reads back as hashes to a signed GET", async () => {
+		expect((await getConfig(p1)).status).toBe(404);
+		const bare = await SELF.fetch(`${ORIGIN}/feed/${p1.party}/config`, { headers: addr() });
 		expect(bare.status).toBe(401);
+		expect(await bare.json()).toMatchObject({ code: "bad_card" });
 		expect(bare.headers.get("cache-control")).toBe("private, no-store");
 
-		const body = await configBody(p.id);
-		const res = await putConfig(p, body);
+		const res = await putConfig(p1, "initial");
 		expect(res.status, await res.clone().text()).toBe(200);
 		expect(await res.json()).toMatchObject({ ok: true, readers: 2 });
 
-		const read = await getConfig(p);
+		const read = await getConfig(p1);
 		expect(read.status).toBe(200);
 		const got = await read.json();
-		expect(got).toEqual(JSON.parse(body));
+		expect(got).toEqual(JSON.parse(p1.configs.initial.body));
 		expect(JSON.stringify(got)).not.toContain(SECRET);
 		expect(JSON.stringify(got)).not.toContain(TOKEN_A);
 	});
 
-	it("refuses a bad signature, a replayed or older config, and a GET signed over the empty body", async () => {
-		const other = await newParty();
-		const body = await configBody(p.id);
-		expect((await putConfig(p, body, await other.sign(body))).status).toBe(401);
-		const older = await configBody(p.id, [TOKEN_A], new Date(Date.now() - 60_000).toISOString());
-		const res = await putConfig(p, older);
-		expect(res.status).toBe(409);
-		expect(await res.json()).toMatchObject({ code: "stale" });
-		const at = new Date().toISOString();
-		expect((await getConfig(p, at, await p.sign(new Uint8Array(0)))).status).toBe(401);
+	it("refuses another party's card, a root-signed body, a tampered body, a replayed config, and a GET signed over empty bytes", async () => {
+		const bad = async (res: Promise<Response>, status: number, code: string) => {
+			const r = await res;
+			expect(r.status, await r.clone().text()).toBe(status);
+			expect(await r.json()).toMatchObject({ code });
+		};
+		// The newer config first, so the older one below is a replay whatever ran before.
+		expect((await putConfig(p1, "update")).status).toBe(200);
+		await bad(putConfig(p1, "update", { card: p2.card }), 401, "bad_card");
+		await bad(putConfig(p1, "initial", { signature: p1.rootSigned.signature }), 401, "root_signed");
+		await bad(putConfig(p1, "update", { body: p1.configs.update.body + " " }), 401, "bad_signature");
+		await bad(putConfig(p1, "initial"), 409, "stale");
+		await bad(getConfig(p1, { signature: p1.read.emptySignature }), 401, "bad_signature");
+		await bad(getConfig(p1, { card: p2.card }), 401, "bad_card");
 	});
 
 	it("is the only route shape under /feed", async () => {
-		for (const path of ["/feed", "/feed/not-a-party", `/feed/${p.id}/other`, `/feed/${p.id}/config/x`]) {
+		for (const path of ["/feed", "/feed/not-a-party", `/feed/${p1.party}/other`, `/feed/${p1.party}/config/x`]) {
 			const res = await SELF.fetch(`${ORIGIN}${path}`, { headers: addr() });
 			expect(res.status, path).toBe(404);
 			expect(await res.json()).toMatchObject({ code: "no_such_route" });
 		}
-		expect((await SELF.fetch(`${ORIGIN}/feed/${p.id}`, { headers: addr() })).status).toBe(426);
-		expect((await SELF.fetch(`${ORIGIN}/feed/${p.id}`, { method: "POST", headers: addr() })).status).toBe(405);
+		expect((await SELF.fetch(`${ORIGIN}/feed/${p1.party}`, { headers: addr() })).status).toBe(426);
+		expect((await SELF.fetch(`${ORIGIN}/feed/${p1.party}`, { method: "POST", headers: addr() })).status).toBe(405);
 	});
 });
 
 describe("sources and viewers", () => {
-	let p: Party;
+	const p = { id: p2.party };
 	beforeAll(async () => {
-		p = await newParty();
-		expect((await putConfig(p, await configBody(p.id))).status).toBe(200);
+		expect((await putConfig(p2, "initial")).status).toBe(200);
 	});
 
 	it("closes a source with the wrong secret, a viewer with an unknown token, and a hello to a party without a config", async () => {
@@ -132,8 +143,8 @@ describe("sources and viewers", () => {
 		expect((await bad.closed).code).toBe(CLOSE_BAD_TOKEN);
 		const nobody = await viewer(p.id, "tok_" + "z".repeat(39));
 		expect((await nobody.closed).code).toBe(CLOSE_BAD_TOKEN);
-		const empty = await newParty();
-		const s = await source(empty.id);
+		const nobodyParty = "ed25519:" + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+		const s = await source(nobodyParty);
 		expect((await s.closed).code).toBe(CLOSE_BAD_TOKEN);
 	});
 
@@ -200,7 +211,7 @@ describe("sources and viewers", () => {
 	it("closes a viewer whose token a new config drops", async () => {
 		const v = await viewer(p.id, TOKEN_B);
 		await v.next((m) => m.ok === true);
-		expect((await putConfig(p, await configBody(p.id, [TOKEN_A]))).status).toBe(200);
+		expect((await putConfig(p2, "update")).status).toBe(200);
 		expect((await v.closed).code).toBe(CLOSE_BAD_TOKEN);
 	});
 });

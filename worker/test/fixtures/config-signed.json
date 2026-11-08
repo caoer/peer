@@ -1,11 +1,8 @@
 {
-  "party": "ed25519:8i40su8tzHRqmQgV5SBgwp_huLsD84ypLzgfuzfAdgk",
-  "put": {
-    "body": "{\"v\":1,\"party\":\"ed25519:8i40su8tzHRqmQgV5SBgwp_huLsD84ypLzgfuzfAdgk\",\"at\":\"2026-11-08T16:00:00Z\",\"source\":\"sha256:cd35905d0ac191009ae2b586e75abd7d702afbf5d8afa7910f1b3fffc7ce7da1\",\"readers\":[\"sha256:feca0b4ae9364a189834533bbc41109038dc153ce19fb773488ab1e57a0553dd\",\"sha256:837cf6083926e50052b44525deaa0d1e791c8d1b99c6b41153c312bac1f3f8a6\"]}",
-    "signature": "uAhuWZYwf123Jr1dO7uGBDQciIz3YYuXdx0FBmUAUOD_aG3hJwPF_Agi2D9sgtz2_l6wyliGFMc58Bb00PXZDA"
-  },
-  "get": {
-    "at": "2026-11-08T16:00:30Z",
-    "signature": "lf_UX2otPPNelyJhWYZu1h39oK9gHDFwO9G6kv3NA_nVaCbmBZVmDz6h_f5AovLGZLu1aTjdWAa9MkuO_tgRDw"
-  }
+  "party": "ed25519:6iNw-PdfiADZk_Kh9C7g1koZxhcIpHPuL9HEESS3lMs",
+  "body": "{\"v\":1,\"party\":\"ed25519:6iNw-PdfiADZk_Kh9C7g1koZxhcIpHPuL9HEESS3lMs\",\"at\":\"2026-11-08T16:00:00Z\",\"source\":\"sha256:60b519953fb83e8c62494ae71b6ecd7fe59ae7c4e50609287f6bb58137a14e5b\",\"readers\":[\"sha256:4a8658b62c8ed58ee76df1bb34a2f894ccf6d410dd5470ae92e5dd6aa09fc803\",\"sha256:026e12c7812e540f67a5a464d892448a5be6e889d5ce7587cd5c6c9597c8c894\"]}",
+  "card": "09s14FBH3ZnK82LjoKoRawh2jN22PTNRrlSo_DixKAQ9_2YNvDVQz20vkhgAbiZM91_XmgDl0csOo3BxQlCFBnsidiI6MSwicGFydHkiOiJlZDI1NTE5OjZpTnctUGRmaUFEWmtfS2g5QzdnMWtvWnhoY0lwSFB1TDlIRUVTUzNsTXMiLCJrZXlzIjpbeyJpZGVudGl0eSI6ImN1cnZlMjU1MTk6b0lFYzlnN3JXTGRyZEZPRFp2a0RhRGg2bjN5XzBjRXN4SWFFSFltVkVVOCIsInJlZ2lzdHJhdGlvbklkIjoxMzA4NzEwODkxLCJzaWduZWRQcmVrZXkiOnsiaWQiOjEsInB1YiI6ImN1cnZlMjU1MTk6NG1qbHNjV1FVNGstVUR1WFNOZ2ZaU05SUl9MTVNmVDJhSU8xLUU0OXloWSIsInNpZyI6Iis3MEoreXJZc25CMHFtOWY4UW5Cemh6dG11THVwUGlQUWRtMDdDUnFud3RjUHBsdHVpOXhPZGlSRWcxWDBwMEluVEtXM09ua2dmcDZ3SDUySEFrREF3PT0ifSwiZnJvbSI6IjIwMjYtMTEtMDhUMTU6MDA6MDBaIiwidW50aWwiOm51bGx9XSwiYWdlbnRzIjpbeyJpZCI6ImFkdmlzb3IiLCJhY2NlcHRzIjpbInRleHQiXX1dLCJyZWxheXMiOlsiaHR0cHM6Ly9wZWVyLjB4dGF1LmNvbS9wZWVyIl0sImlzc3VlZCI6IjIwMjYtMTEtMDhUMTU6MDA6MDBaIn0",
+  "signature": "eLBCMsrG5XXgHgEfjB07NyMvajt6ADAu8DEWQDJjkW9LVBLzvV58gnYuhI13FluGacMwz-BAeZPO98EK41VxBQ",
+  "at": "2026-11-08T16:00:30Z",
+  "atSignature": "_cpN6kkd8yd3g6-MRoTMPz0stnI3vxxIHAN7731M-MplkzSkH_3MWBgyEtE-m9n-Ay_MvA1dfkOnQsscqm55DA"
 }
