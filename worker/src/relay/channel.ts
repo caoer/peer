@@ -498,7 +498,7 @@ const badToken = () => refused(BAD_TOKEN);
 // The peer release the landings point an agent at. One spelling: README.md
 // carries the same tag, and relay.spec.ts fails when the two differ, so a
 // release bump (scripts/release-build.sh, U5) changes both or neither.
-export const RELEASE_TAG = "v0.5.0";
+export const RELEASE_TAG = "v0.5.1";
 
 // Every landing's install route, before its accept or follow line: an agent
 // on a machine without peer stopped at the accept line and asked its human.
