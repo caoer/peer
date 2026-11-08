@@ -5,6 +5,8 @@
 	"name": "peer",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-07-01",
+	// reader/index.html is imported as text by src/reader.ts and served at /.
+	"rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }],
 	"observability": { "enabled": true },
 	// The zone has no record for the name; the custom domain creates it.
 	"routes": [{ "pattern": "peer.0xtau.com", "custom_domain": true }],

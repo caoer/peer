@@ -1,7 +1,7 @@
 // What src/index.ts adds around the relay routes, which channel.spec.ts and
 // room.spec.ts cannot see: every non-socket answer is private, the route list
-// is at /peer/, the routes still to come answer not_yet, and nothing else is
-// served.
+// is at /peer/, the feed still to come answers not_yet, and nothing else is
+// served (the reader and forward routes have their own specs).
 
 import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
@@ -28,8 +28,8 @@ describe("the peer worker", () => {
 		}
 	});
 
-	it("answers 404 not_yet on the reader and the feed", async () => {
-		for (const [method, path] of [["GET", "/"], ["GET", "/feed/x"], ["PUT", "/feed/x/config"]] as const) {
+	it("answers 404 not_yet on the feed", async () => {
+		for (const [method, path] of [["GET", "/feed/x"], ["PUT", "/feed/x/config"]] as const) {
 			const res = await SELF.fetch(`${ORIGIN}${path}`, { method });
 			expect(res.status, `${method} ${path}`).toBe(404);
 			expect(await res.json()).toMatchObject({ code: "not_yet" });
