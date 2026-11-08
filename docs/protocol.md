@@ -208,7 +208,7 @@ It adds no sender authentication, forward secrecy or replay protection of its ow
 | Records | inbox: sixth frontmatter key `e2e: peer-e2e-v1` (seventh after `group`); feed record: `peer-timeline@1` + `"e2e": true`, `body` the envelope string |
 | CLI | `peer e2e keygen` · `peer e2e publish` · `peer e2e publish <pub>` · `peer e2e revoke <pub>` · `peer e2e decrypt --key <secret> [file]` · `peer send --encrypt [--to-key <pub>]…` |
 | Vector | `internal/e2e/testdata/vector-v1.json` `{secret, public, plaintext, envelope}`, quoted below |
-| Renderer | `worker/reader/index.html`, served at `https://peer.0xtau.com/` (§ Reader feed and forward): decrypts in the browser with `crypto.subtle` only; at v0.5.1 its sha256 is `1c77963f436b488d8f8fb30ba5b81825818a50d381bdc392ea45995dc58c1710` |
+| Renderer | `worker/reader/index.html`, served at `https://peer.0xtau.com/` (§ Reader feed and forward): decrypts in the browser with `crypto.subtle` only; its sha256 is `e95b13b7c2ce1af5eed1305adbd1f48b68be0829b52df07ef29b52ab5f275982` |
 
 Base64 is strict: `enc`, `ct` and `body` are standard with padding, keys are base64url without padding, and non-canonical trailing bits are refused. Detection trims space, tab, CR and LF, and matches member names exactly. A plain body that happens to satisfy it is treated as an envelope.
 
