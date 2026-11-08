@@ -1,0 +1,6 @@
+{
+  "secret": "x25519-secret:gG8LH-pJewLUzn7Etey1ZnOrrbH8uqnd_hZYUPf5eEE",
+  "public": "x25519:rZOVWhTXZwL--zyVB-I0znZ-cAYjtvaegsQGEInpw1k",
+  "plaintext": "hello, peer e2e v1 — 你好",
+  "envelope": "{\"e2e\":1,\"suite\":\"peer-e2e-v1\",\"to\":[{\"key\":\"x25519:rZOVWhTXZwL--zyVB-I0znZ-cAYjtvaegsQGEInpw1k\",\"enc\":\"I/lQ3YrzyyvUrmJHi31JuQxUzdD5z8MBjIOKr1mfX3g=\",\"ct\":\"47wNImVN6ImE/74qwRbjBVoQL6IFgm34B7Twy1Tm04H/H6TJkwDLYXeGkzULaug6\"}],\"body\":\"fAe8Qvt42Fmz5UVqM2VPE8hDBTlo9jY3EV4+V4HZ3bzb2jrKTw9Oy72mEN6g\"}"
+}

@@ -147,3 +147,32 @@ func TestRouteRosterWhateverAccepts(t *testing.T) {
 		}
 	}
 }
+
+// An encrypted body's suite is the frontmatter's last key: sixth, or seventh
+// after group.
+func TestRecordBytesE2E(t *testing.T) {
+	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	r := Record{From: ancan, To: zt, Kind: "text", At: at, Body: []byte(`{"e2e":1}`), E2E: "peer-e2e-v1"}
+	b, err := r.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "at: 2026-11-08T00:00:00Z\ne2e: peer-e2e-v1\n---\n{\"e2e\":1}"; !strings.HasSuffix(string(b), want) {
+		t.Fatalf("record:\n%s", b)
+	}
+	r.Group = strings.Repeat("a", 32)
+	if b, err = r.Bytes(); err != nil {
+		t.Fatal(err)
+	}
+	if want := "group: " + r.Group + "\ne2e: peer-e2e-v1\n---\n"; !strings.Contains(string(b), want) {
+		t.Fatalf("record:\n%s", b)
+	}
+	r.E2E = "not a\nsuite"
+	if _, err := r.Bytes(); !errors.Is(err, ErrRecord) {
+		t.Fatalf("a suite that cannot sit on its line: %v", err)
+	}
+	r.E2E, r.Group = "", ""
+	if b, err = r.Bytes(); err != nil || strings.Contains(string(b), "e2e:") {
+		t.Fatalf("a plain record: %v\n%s", err, b)
+	}
+}

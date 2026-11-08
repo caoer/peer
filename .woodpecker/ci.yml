@@ -1,5 +1,6 @@
 # The test suite, run on every push to any branch and every pull request.
-# It runs tests only; releases are built by scripts/release-build.sh.
+# It runs tests only (go-test, and worker for worker/); releases are built by
+# scripts/release-build.sh.
 
 # Every step is a container image: keep the lane off the darwin local-backend
 # agent, which execs an image name as a shell binary and dies with no log.
@@ -17,7 +18,7 @@ when:
 # settings:) is the mechanism.
 clone:
   - name: clone
-    image: docker.io/woodpeckerci/plugin-git:2.9.2
+    image: docker.io/woodpeckerci/plugin-git:2.11.0
     environment:
       PLUGIN_PARTIAL: "false"
       PLUGIN_TAGS: "false"
@@ -31,7 +32,7 @@ steps:
   - name: go-test
     # The exact toolchain go.mod names; GOTOOLCHAIN=local fails loud instead of
     # downloading another one when the two drift apart.
-    image: golang:1.26.5-bookworm
+    image: golang:1.27.3-trixie
     environment:
       GOTOOLCHAIN: local
     commands:
@@ -45,3 +46,11 @@ steps:
       - runuser -u ci -- env HOME=/home/ci PATH="$PATH" GOTOOLCHAIN=local go vet ./...
       # PEER_LIVE_RELAY stays unset: internal/relay/live_test.go skips without it.
       - runuser -u ci -- env HOME=/home/ci PATH="$PATH" GOTOOLCHAIN=local go test ./...
+
+  - name: worker
+    # worker/: the Cloudflare Worker on peer.0xtau.com, its suite under
+    # @cloudflare/vitest-plugin. node 24: wrangler 4.152 needs node >= 22.
+    image: node:24-trixie
+    commands:
+      - node --version
+      - cd worker && npm ci --no-audit --no-fund && npm test

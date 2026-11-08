@@ -46,6 +46,7 @@ var (
 // pulled on every connect and after every push.pullEvery frames. A relay
 // that never answers the upgrade leaves the rounds' pull as it was.
 func (sv *server) loop(ctx context.Context, every time.Duration, once bool, stderr io.Writer) int {
+	defer sv.p.feedStop()
 	if !once {
 		sv.push = newPusher(ctx, sv)
 		defer sv.push.stop()

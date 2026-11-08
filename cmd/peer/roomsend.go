@@ -440,7 +440,7 @@ func isRoomTarget(ctx context.Context, dir, target string, subset bool) (bool, e
 // roster it is sealed to is the folded one; the subset --to names, each a
 // member's peer name or party id with an optional agent; the ctr committed;
 // then the room outbox and the put.
-func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []string, fromAgent, kind string, body []byte) (*sendResult, error) {
+func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []string, fromAgent, kind string, body []byte, enc *encryptOpts) (*sendResult, error) {
 	switch {
 	case kind == session.KindCard:
 		return nil, errors.New("a card goes out with peer card publish, not peer send")
@@ -486,6 +486,11 @@ func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []str
 	addrs, err := c.resolveTo(ctx, to)
 	if err != nil {
 		return nil, err
+	}
+	if enc != nil {
+		if body, err = c.sealForRoom(addrs, body); err != nil {
+			return nil, err
+		}
 	}
 	from := p.partyID()
 	if fromAgent != "" {

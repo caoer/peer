@@ -59,6 +59,8 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1
 	}
+	fmt.Fprintln(stderr, sv.p.forwardLine())
+	fmt.Fprintln(stderr, sv.p.feedLine(ctx))
 	if err := sv.start(ctx); err != nil {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1
@@ -163,9 +165,11 @@ func commandServer(p *party, out io.Writer) (*server, error) {
 // would fail on it the same way.
 var errSpool = errors.New("spool entry does not open")
 
-// start finishes the spool births a crash cut, before the first round.
+// start opens the feed socket for the serve's life and finishes the spool
+// births a crash cut, before the first round.
 func (sv *server) start(ctx context.Context) error {
 	sv.p.timelineRound(sv.out)
+	sv.p.feedStart(ctx, sv.dir)
 	if err := sv.replaySpool(ctx); err != nil {
 		return err
 	}
@@ -210,6 +214,9 @@ func (sv *server) round(ctx context.Context) error {
 		return err
 	}
 	sv.p.timelineRound(sv.out)
+	sv.p.retryForwards(ctx)
+	sv.p.feedRound(ctx)
+	sv.p.pruneFeed()
 	if sv.seats != nil {
 		sv.retryServices()
 	}
@@ -916,7 +923,7 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 			return "", err
 		}
 	}
-	path, born, err := deliver.Write(dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body})
+	path, born, err := deliver.Write(dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body, E2E: e2eSuite(m.Body)})
 	if err != nil {
 		return "", err
 	}

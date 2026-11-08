@@ -13,20 +13,17 @@ import (
 	"github.com/caoer/peer/internal/deliver"
 	"github.com/caoer/peer/internal/roster"
 	"github.com/caoer/peer/internal/session"
-	"github.com/caoer/peer/internal/status"
 	"github.com/caoer/peer/internal/store"
 	"github.com/caoer/peer/internal/timeline"
 )
 
-// timelineConfig is one peer's collaboration page (design §8): config.json
-// "timelines": {"<peer name>": {"page", "slug", "login"}}, login defaulting
-// to the config login. It is host-local config like the roster page, not a
-// field of the shared roster record: the login is this host's secret. A peer
-// with no entry gets no timeline writes.
-type timelineConfig struct {
-	Page  string `json:"page,omitempty"`
-	Slug  string `json:"slug,omitempty"`
-	Login string `json:"login,omitempty"`
+// forwardConfig is config.json "forward": {"url", "secret"}, the worker
+// every message is POSTed to, both directions (forward.go). The worker maps
+// the counterpart's party id to a chat; the host never names one. It is
+// host-local config: the secret is this host's.
+type forwardConfig struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
 }
 
 // timelinePendingDir holds, under the peer directory, the timeline record of
@@ -34,17 +31,17 @@ type timelineConfig struct {
 // and so its key, is known only once the outbox replay puts it.
 const timelinePendingDir = "timeline-pending"
 
-// timelineState is a party's timeline writes in one round — a serve round or
-// one peer send: where they log, and the peers whose page refused, skipped
-// for the rest of the round so a refusing page costs one log line per round.
+// timelineState is a party's after-delivery work in one round — a serve
+// round or one peer send: where it logs, and the forward URLs whose POST
+// failed in the round.
 type timelineState struct {
-	log     io.Writer
-	refused map[string]bool
+	log         io.Writer
+	deadForward map[string]bool
 }
 
 // timelineRound starts a round of timeline writes logging to log.
 func (p *party) timelineRound(log io.Writer) {
-	p.tl = &timelineState{log: log, refused: map[string]bool{}}
+	p.tl = &timelineState{log: log, deadForward: map[string]bool{}}
 }
 
 func (p *party) timelineLog() io.Writer {
@@ -54,50 +51,16 @@ func (p *party) timelineLog() io.Writer {
 	return p.tl.log
 }
 
-// timelinePage opens the peer's collaboration page; nil when config names none.
-func (p *party) timelinePage(name string) (*status.Page, error) {
-	tc, ok := p.cfg.Timelines[name]
-	if !ok {
-		return nil, nil
-	}
-	if tc.Login == "" {
-		tc.Login = p.cfg.Login
-	}
-	if tc.Page == "" || tc.Slug == "" || tc.Login == "" {
-		return nil, fmt.Errorf("%s: timelines.%s: page, slug and a login (its own or the config's) go together", configFile, name)
-	}
-	return status.NewPage(tc.Page, tc.Slug, tc.Login, nil), nil
-}
-
-// writeTimeline puts message m, relay seq seq in direction dir on the
-// channel, on the peer's collaboration page. It is the last step after the
-// message's birth or commit and never reaches the message path: a failure
-// is logged, and the peer's page is left alone for the rest of the round.
-// The write is create-only (status.Page.Create), so a message written
-// before — a spool replay, another host — is a no-op.
+// writeTimeline is the last step after a message's birth or commit, under
+// its relay seq in direction dir on the channel: its forward, either way,
+// then the feed — a sent message's local record and the frame to the party's
+// reader pages (feedrecord.go). It never reaches the message path.
 func (p *party) writeTimeline(ctx context.Context, name, channel, dir string, seq int64, m *session.Message) {
-	log := p.timelineLog()
-	if p.tl.refused[name] {
-		return
-	}
-	page, err := p.timelinePage(name)
-	if page == nil && err == nil {
-		return
-	}
-	var rec *timeline.Record
-	if err == nil {
-		rec, err = timeline.Of(dir, m)
-	}
-	if err == nil {
-		_, err = page.Create(ctx, timeline.Key(channel, dir, seq), timeline.Schema, rec)
-	}
-	if err != nil {
-		p.tl.refused[name] = true
-		fmt.Fprintf(log, "timeline %s: %s %s: %v; no more timeline writes for %s this round\n", name, dir, m.ID, err, name)
-	}
+	p.forwardTimeline(ctx, name, dir, m)
+	p.feedTimeline(ctx, name, dir, seq, m)
 }
 
-// timelineSpooled writes the timeline record of a spooled message born by a
+// timelineSpooled runs writeTimeline for a spooled message born by a
 // spool replay, the cut tail of an earlier round; body is the entry's
 // plaintext as the spool holds it.
 func (sv *server) timelineSpooled(ctx context.Context, e *store.Entry, body []byte) {
@@ -115,7 +78,7 @@ func (sv *server) timelineSpooled(ctx context.Context, e *store.Entry, body []by
 	}
 }
 
-// pendingTimeline is a sent message's timeline write waiting for its seq.
+// pendingTimeline is a sent message's writeTimeline waiting for its seq.
 type pendingTimeline struct {
 	Peer    string           `json:"peer"`
 	Channel string           `json:"channel"`
@@ -127,9 +90,9 @@ func (p *party) pendingPath(id string) string {
 }
 
 // timelinePending keeps a committed message whose put failed for the outbox
-// replay that puts it (timelineSent); only for a peer with a timeline.
+// replay that puts it (timelineSent).
 func (p *party) timelinePending(pe *roster.Peer, m *session.Message) {
-	if _, ok := p.cfg.Timelines[pe.Name]; !ok || !deliver.ValidID(m.ID) {
+	if !deliver.ValidID(m.ID) {
 		return
 	}
 	b, err := json.Marshal(pendingTimeline{Peer: pe.Name, Channel: pe.Channel, Message: m})
@@ -145,7 +108,7 @@ func (p *party) timelinePending(pe *roster.Peer, m *session.Message) {
 }
 
 // timelineSent is the outbox replay's word that the relay took message id
-// under seq: a pending timeline record for it is written now, once.
+// under seq: writeTimeline runs for its pending message now, once.
 func (p *party) timelineSent(ctx context.Context, id string, seq int64) {
 	if !deliver.ValidID(id) {
 		return

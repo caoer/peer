@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/caoer/peer/internal/card"
 	"github.com/caoer/peer/internal/envelope"
+	"github.com/caoer/peer/internal/feed"
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
@@ -57,9 +59,13 @@ type config struct {
 	// UCC names the fleet's sessions root and the seat map on it (ucc.go):
 	// with it, Agents come from the map and serve delivers by it.
 	UCC *uccConfig `json:"ucc,omitempty"`
-	// Timelines are the peers' collaboration pages serve and send write
-	// each message on (timeline.go), by peer name.
-	Timelines map[string]timelineConfig `json:"timelines,omitempty"`
+	// Forward is the worker each message is POSTed to, both directions
+	// (forward.go); nil is no forward.
+	Forward *forwardConfig `json:"forward,omitempty"`
+	// Feed is the party's reader feed on the worker, which each message
+	// reaches live and the host replays its records to (feedrecord.go); nil
+	// is no feed.
+	Feed *feedConfig `json:"feed,omitempty"`
 	// Keys is the key lifecycle: signedPrekeyEvery, oneTimeMin (keys.go).
 	Keys keysConfig `json:"keys,omitempty"`
 	// Push is how a running serve uses the relay's push: pullEvery (push.go).
@@ -106,6 +112,16 @@ type party struct {
 	roomOutbox *store.Journal
 	// tl is the current round of timeline writes (timeline.go).
 	tl *timelineState
+	// feed is the source socket on the party's reader feed for a serve's
+	// life (feedrecord.go); nil under a command, which opens one per record.
+	feed *feed.Client
+	// feedInbox is the delivery directory whose inbox records the feed
+	// replays — the serve's, else config's. feedServe marks a serve, which
+	// holds one socket (feedRound) where a command opens one per record.
+	feedInbox string
+	feedServe bool
+	// feedN numbers the frames the feed acks.
+	feedN atomic.Int64
 }
 
 // openParty reads the identity, the root key and config when present, and
@@ -123,7 +139,7 @@ func openParty(dir string) (*party, error) {
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, err
 	}
-	if err := readJSON(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := readConfig(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	if _, err := p.loadSeats(); err != nil {
@@ -340,6 +356,53 @@ func permanentPut(err error) bool {
 func splitAddr(s string) (party, agent string) {
 	party, agent, _ = strings.Cut(s, "/")
 	return party, agent
+}
+
+// readConfig reads config.json into cfg, refusing the keys an earlier
+// forward read (checkForwardKeys).
+func readConfig(path string, cfg *config) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(b, cfg); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if err := checkForwardKeys(b); err != nil {
+		return err
+	}
+	return cfg.Feed.check()
+}
+
+// checkForwardKeys refuses, naming the key, a config that still carries
+// timelines or a per-peer forward map, and a forward without its url and
+// secret: on this binary either would leave the forward silently off.
+func checkForwardKeys(b []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		return fmt.Errorf("%s: %w", configFile, err)
+	}
+	if _, ok := top["timelines"]; ok {
+		return fmt.Errorf("%s: timelines is not read any more: the forward is forward: {\"url\", \"secret\"}", configFile)
+	}
+	raw, ok := top["forward"]
+	if !ok || string(raw) == "null" {
+		return nil
+	}
+	var f map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return fmt.Errorf("%s: forward is not an object", configFile)
+	}
+	for k := range f {
+		if k != "url" && k != "secret" {
+			return fmt.Errorf("%s: forward.%s: forward is {\"url\", \"secret\"}; the worker chooses each peer's chat", configFile, k)
+		}
+	}
+	var fc forwardConfig
+	if err := json.Unmarshal(raw, &fc); err != nil || fc.URL == "" || fc.Secret == "" {
+		return fmt.Errorf("%s: forward needs url and secret, both strings", configFile)
+	}
+	return nil
 }
 
 func readJSON(path string, v any) error {

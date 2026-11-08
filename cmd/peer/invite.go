@@ -39,7 +39,13 @@ func cmdInvite(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, link)
 	fmt.Fprintf(stdout, "send this link to %s over a channel you already trust; it is valid for %s and joins once.\n", name, invite.Validity)
-	fmt.Fprintf(stdout, "when %s reads back the 8-digit code and their id, run: peer confirm %s --code <code>; it shows their id to compare\n", name, name)
+	// The hint is a command that runs as printed: flags after the command,
+	// the name last, and the directory the invite itself was given.
+	confirm := "peer confirm"
+	if *dirFlag != "" {
+		confirm += " --dir " + *dirFlag
+	}
+	fmt.Fprintf(stdout, "when %s reads back the 8-digit code and their id, run: %s --code <code> %s; it shows their id to compare\n", name, confirm, name)
 	return 0
 }
 

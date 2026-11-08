@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PEER_SERVE_CHILD") != "" {
 		os.Exit(serveChild())
 	}
+	if os.Getenv("PEER_CLI_CHILD") != "" {
+		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	os.Exit(m.Run())
 }
 

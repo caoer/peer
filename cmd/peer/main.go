@@ -66,6 +66,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdIdentity(args[1:], stdout, stderr)
 	case "room":
 		return cmdRoom(args[1:], stdout, stderr)
+	case "e2e":
+		return cmdE2E(args[1:], stdout, stderr)
+	case "feed":
+		return cmdFeed(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -89,7 +93,9 @@ commands:
             [--dir D] [--code 8-digits] <name>
   send      encrypt a message and put it on the peer's channel
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
-            (--kind doc|file: --file is attached, encrypted, as a blob)
+            (--kind doc|file: --file is attached, encrypted, as a blob;
+            --encrypt [--to-key PUB]...: the body is also sealed to the peer's
+            published e2e keys, which only the holder of a secret key opens)
             or seal it into a room, to every member or to the --to subset
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F]
             [--to MEMBER[/AGENT],...] <room>
@@ -150,17 +156,44 @@ commands:
             room link [--dir D] [--rotate] <room>
             room follow [--dir D] [--name N] <feed link>
             room inspect [--dir D] <room>
+  e2e       message encryption to a key a human holds, on top of the channel:
+            keygen prints a key pair (the secret stays with the human, never
+            on a serving host), publish adds the public key to your card — or,
+            with no key, every key a reader page sent, waiting in the state
+            record readers-pending — revoke takes one off, decrypt opens an
+            inbox record or envelope
+                                     e2e keygen
+                                     e2e publish [--dir D] [<public key>]
+                                     e2e revoke [--dir D] <public key>
+                                     e2e decrypt --key <secret key> [file]
+  feed      your party's reader feed on the worker config.json feed.url names,
+            run on any machine of the party, no root.json: setup mints the
+            source secret, signs the config with the identity key under your
+            card and commits the shared state record feed; link mints a
+            reader link and prints it once (the token is kept nowhere; the
+            record keeps its hash and label); revoke takes a link back; show
+            lists the links, --remote beside the worker's config
+                                     feed setup [--dir D] [--reset]
+                                     feed link [--dir D] [--label L]
+                                     feed revoke [--dir D] <label | hash prefix>
+                                     feed show [--dir D] [--remote]
   version   print the version
 
 the card any command sends is the one on the state (record "card"), signed by
 the root key where root.json is: peer init writes the first, card publish
 and identity rotate the rest; a fleet host holds no root.json.
 
-flags come before the name or link. config.json in the peer directory holds
+flags go after the command and before the name or link, as in
+peer accept --dir D --name N <link>. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),
 deliver, roster (page + slug + login: the private roster page serve writes
 each round), keys (signedPrekeyEvery, oneTimeMin), push (pullEvery: pull
-a channel after this many pushed messages, default 10) and ucc (root, seats,
+a channel after this many pushed messages, default 10), forward (url, secret:
+the worker every message is POSTed to, both directions), feed (url, only:
+the party's reader feed on the worker, which every message reaches live and a
+reader page's connect has replayed from the inbox and <dir>/feed; the source
+secret and the reader links are the shared state record feed, peer feed's;
+only "e2e" keeps plain messages off it) and ucc (root, seats,
 serviceRetries: delivery by the fleet's seat map — a seat row's message,
 and a human row's, is an inbox record in the session of the seat the row
 names; a room record that names no agent lands in the session of each row

@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/caoer/peer/internal/deliver"
+	"github.com/caoer/peer/internal/e2e"
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
@@ -34,17 +35,42 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 	fileFlag := fl.String("file", "", "doc and file kinds: the file to attach; other kinds: read the body from this file")
 	var toFlag listFlag
 	fl.Var(&toFlag, "to", "a room send: the members it goes to, each a peer name or party id with an optional /agent; a comma list or the flag again (default every member)")
+	encryptFlag := fl.Bool("encrypt", false, "seal the body to the recipient's published e2e keys; a doc or file refuses")
+	var toKeyFlag listFlag
+	fl.Var(&toKeyFlag, "to-key", "with --encrypt to a peer: a public key to seal to as well; a comma list or the flag again")
 	if err := fl.Parse(args); err != nil {
 		return 2
 	}
 	if fl.NArg() != 1 || fl.Arg(0) == "" {
-		fmt.Fprintln(stderr, "usage: peer send [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]\n       peer send [--dir D] [--kind K] [--from AGENT] [--text T | --file F] [--to MEMBER[/AGENT],...] <room>")
+		fmt.Fprintln(stderr, "usage: peer send [--dir D] [--kind K] [--from AGENT] [--encrypt [--to-key PUB]...] [--text T | --file F] <name>[/<agent>]\n       peer send [--dir D] [--kind K] [--from AGENT] [--encrypt] [--text T | --file F] [--to MEMBER[/AGENT],...] <room>")
+		return 2
+	}
+	if len(toKeyFlag) > 0 && !*encryptFlag {
+		fmt.Fprintln(stderr, "peer send: --to-key goes with --encrypt")
 		return 2
 	}
 	toRoom, err := isRoomTarget(context.Background(), *dirFlag, fl.Arg(0), len(toFlag) > 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "peer send: %v\n", err)
 		return 1
+	}
+	var enc *encryptOpts
+	if *encryptFlag {
+		if *kindFlag == session.KindDoc || *kindFlag == session.KindFile {
+			fmt.Fprintf(stderr, "peer send: --encrypt does not take a %s: only the message body is sealed, not a blob\n", *kindFlag)
+			return 1
+		}
+		if toRoom && len(toKeyFlag) > 0 {
+			fmt.Fprintln(stderr, "peer send: --to-key goes with a peer: a room send seals to its members' published keys")
+			return 2
+		}
+		for _, k := range toKeyFlag {
+			if _, err := e2e.ParsePublic(k); err != nil {
+				fmt.Fprintf(stderr, "peer send: --to-key %s: %v\n", k, err)
+				return 1
+			}
+		}
+		enc = &encryptOpts{toKeys: toKeyFlag}
 	}
 	if *kindFlag == session.KindDoc || *kindFlag == session.KindFile {
 		if toRoom {
@@ -83,11 +109,11 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 	}
 	if toRoom {
 		return printSent(stdout, stderr, func() (*sendResult, error) {
-			return runRoomSend(context.Background(), stderr, *dirFlag, fl.Arg(0), toFlag, *fromFlag, *kindFlag, body)
+			return runRoomSend(context.Background(), stderr, *dirFlag, fl.Arg(0), toFlag, *fromFlag, *kindFlag, body, enc)
 		})
 	}
 	return printSent(stdout, stderr, func() (*sendResult, error) {
-		return runSend(context.Background(), stderr, *dirFlag, fl.Arg(0), *fromFlag, *kindFlag, body)
+		return runSendEncrypted(context.Background(), stderr, *dirFlag, fl.Arg(0), *fromFlag, *kindFlag, body, enc)
 	})
 }
 
@@ -116,6 +142,12 @@ type sendResult struct {
 const sendTries = 5
 
 func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind string, body []byte) (*sendResult, error) {
+	return runSendEncrypted(ctx, warn, dir, target, fromAgent, kind, body, nil)
+}
+
+// runSendEncrypted is a send, its body sealed first when enc is set: what is
+// refused for want of a key or for size is refused before the session moves.
+func runSendEncrypted(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind string, body []byte, enc *encryptOpts) (*sendResult, error) {
 	name, agent := splitAddr(target)
 	if kind == session.KindCard {
 		return nil, errors.New("a card goes out with peer card publish, not peer send")
@@ -157,9 +189,19 @@ func runSend(ctx context.Context, warn io.Writer, dir, target, fromAgent, kind s
 	if fromAgent != "" {
 		from += "/" + fromAgent
 	}
+	if enc != nil {
+		if body, err = sealForPeer(name, ch, enc, body); err != nil {
+			return nil, err
+		}
+	}
 	m, err := session.NewMessage(from, to, kind, body)
 	if err != nil {
 		return nil, err
+	}
+	if enc != nil {
+		if err := sealedTooLarge(m); err != nil {
+			return nil, err
+		}
 	}
 	rc := relay.New(pe.Relay, nil)
 	for try := 1; ; try++ {

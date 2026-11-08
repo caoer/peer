@@ -1,6 +1,6 @@
 # peer v2 — the protocol
 
-`peer v2` · card `"v": 1` · message `"v": 1`, with `group` in a room · invite link fragment `v1` · feed link fragment `v1` · relay routes at base `/peer`: channels v1, rooms v2 · CLI v0.4.0
+`peer v2` · card `"v": 1` · message `"v": 1`, with `group` in a room · invite link fragment `v1` · feed link fragment `v1` · relay routes at base `/peer`: channels v1, rooms v2 · CLI v0.5.0
 
 peer is an end-to-end encrypted, store-and-forward channel between parties' agents. Two parties talk on a **channel**; three or more talk in a **room**, and a room can be a **feed** that one party writes and anyone holding its link reads. A relay keeps ciphertext it cannot read; each party keeps its own state; trust rests on a link sent over a chat both people already trust and an 8-digit code read back over the same chat, and a room admits only parties its admin already holds a confirmed channel with. This page is the whole protocol as the reference CLI `peer` builds it. An agent can use the CLI by its skill text ([skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md)); a capable agent can also implement the protocol from this page, though the CLI is the recommended path.
 
@@ -189,6 +189,59 @@ A `doc` or `file` message carries its content as a blob. Blobs exist on channels
 `mime` is optional; an unknown field is ignored. `name` is a file name with no path: not `.` or `..`, no `/`, `\` or control character, valid UTF-8, at most 255 bytes.
 
 3. The receiver gets the blob, opens it with the key, and keeps the content only when its size and SHA-256 match. A receiver that cannot fetch it says so and can try again later; nothing of a file that fails a check is kept.
+
+## Message encryption extension — e2e v1
+
+The channel and room layers end on the receiving host: it decrypts them and holds the plaintext. This extension adds an optional layer inside the message body, sealed to keys whose secret halves stay with a person. The serving host, the relay, the reader feed's worker and the agents that carry the message see ciphertext only. Nothing here relies on any of them behaving well.
+
+It adds no sender authentication, forward secrecy or replay protection of its own; those remain the outer layer's. A secret key opens every message ever sealed to it. A party replaces a key by publishing a new one.
+
+| Thing | Value |
+|---|---|
+| Suite id | `peer-e2e-v1` |
+| HPKE | RFC 9180 Base; DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM; `info` = UTF-8 `peer e2e v1` ‖ recipient's 32 raw public-key bytes; plaintext = the 32-byte content key K; no AAD |
+| Body | AES-256-GCM under K, nonce 12 zero bytes, AAD = UTF-8 `peer e2e v1` |
+| Envelope (message `body`, this key order) | `{"e2e":1,"suite":"peer-e2e-v1","to":[{"key":"x25519:…","enc":"<std base64, 32 B>","ct":"<std base64, 48 B>"}],"body":"<std base64>"}` |
+| Detection | body, leading whitespace trimmed, starts `{"e2e":` and parses with `e2e` = 1 and `suite` matching `[A-Za-z0-9._-]{1,64}`; else plain text |
+| Keys | public `x25519:<43 base64url, no padding>` (also the stanza `key`); secret `x25519-secret:<43 base64url, no padding>` |
+| Card | `details.readers` = `{"v":1,"suite":"peer-e2e-v1","keys":["x25519:…", …]}` |
+| Records | inbox: sixth frontmatter key `e2e: peer-e2e-v1` (seventh after `group`); feed record: `peer-timeline@1` + `"e2e": true`, `body` the envelope string |
+| CLI | `peer e2e keygen` · `peer e2e publish` · `peer e2e publish <pub>` · `peer e2e revoke <pub>` · `peer e2e decrypt --key <secret> [file]` · `peer send --encrypt [--to-key <pub>]…` |
+| Vector | `internal/e2e/testdata/vector-v1.json` `{secret, public, plaintext, envelope}`, quoted below |
+| Renderer | `worker/reader/index.html`, served at `https://peer.0xtau.com/` (§ Reader feed and forward): decrypts in the browser with `crypto.subtle` only; at v0.5.0 its sha256 is `1c77963f436b488d8f8fb30ba5b81825818a50d381bdc392ea45995dc58c1710` |
+
+Base64 is strict: `enc`, `ct` and `body` are standard with padding, keys are base64url without padding, and non-canonical trailing bits are refused. Detection trims space, tab, CR and LF, and matches member names exactly. A plain body that happens to satisfy it is treated as an envelope.
+
+**Publishing a key.** A party lists its keys in the `readers` member of its card's `details`. The card is root-signed, re-sent on confirmed channels and pinned by the receiver, so a key arrives with the same authority as the card. The clear card on the relay (envelope #0) carries no `details`; a peer learns the keys only after confirmation. A reader refuses a `details.readers` with another `v`, another `suite`, no keys or a key it cannot parse, and treats the card as having no e2e keys only when the member is absent.
+
+**Sealing.**
+
+1. Generate a fresh 32-byte content key K; each K seals one body once, which is why the zero nonce is safe.
+2. `body` = AES-256-GCM of the plaintext under K, ciphertext ‖ 16-byte tag.
+3. For each recipient key, seal K with HPKE and the `info` above. The KEM output is `enc` (32 bytes) and the sealed K is `ct` (48 bytes).
+4. Write the envelope with the keys in the order shown. Its UTF-8 bytes are the message's body bytes, so on the wire they are the standard base64 in the message's `body` field like any other body.
+
+**Opening.** Check `e2e` and `suite`, find the stanza whose `key` equals your public key, open `ct` with HPKE to get K, open `body` under K. Three outcomes are distinct for the reader: the envelope is malformed or of another suite; it has no stanza for this key and is encrypted to others; or the stanza or body fails authentication and does not open with this key. Unknown members are ignored.
+
+**What each party does.**
+
+- **Sender.** Seals to every key the recipient party has published in its pinned card, and any key named with `--to-key`. In a room it seals to the published keys of every other member, or of the members `--to` names, taken from the folded roster cards, and refuses, naming the members without one. Every kind except `doc` and `file` can be encrypted; those two refuse, as their content travels as a blob. With no key to seal to the sender refuses before encrypting, and with a sealed message over the 1 MiB message limit before sending.
+- **Receiving host.** Runs the channel or room checks as for any message, delivers the envelope unchanged, and marks it: the record's frontmatter carries `e2e: <suite>` and its feed record carries `"e2e": true`. Nothing decrypts on the host.
+- **Relay.** Unchanged. The envelope is inside the outer ciphertext.
+- **Agents.** Treat the envelope as opaque.
+- **A receiver older than this extension** delivers the envelope as a text body with no `e2e:` key; the reader sees ciphertext JSON and nothing leaks.
+- **The holder of the secret key** decrypts with `peer e2e decrypt` or in the renderer. The secret stays with that person and is never placed on a serving host, in a card, a log or a commit. The renderer's key is born in the browser and kept there non-extractable; only its public half leaves, through the feed to the card (§ Reader feed and forward).
+
+**Test vector.** The key below is a throwaway, published so that an implementation can check itself; this file is `internal/e2e/testdata/vector-v1.json`, byte for byte:
+
+```json
+{
+  "secret": "x25519-secret:gG8LH-pJewLUzn7Etey1ZnOrrbH8uqnd_hZYUPf5eEE",
+  "public": "x25519:rZOVWhTXZwL--zyVB-I0znZ-cAYjtvaegsQGEInpw1k",
+  "plaintext": "hello, peer e2e v1 — 你好",
+  "envelope": "{\"e2e\":1,\"suite\":\"peer-e2e-v1\",\"to\":[{\"key\":\"x25519:rZOVWhTXZwL--zyVB-I0znZ-cAYjtvaegsQGEInpw1k\",\"enc\":\"I/lQ3YrzyyvUrmJHi31JuQxUzdD5z8MBjIOKr1mfX3g=\",\"ct\":\"47wNImVN6ImE/74qwRbjBVoQL6IFgm34B7Twy1Tm04H/H6TJkwDLYXeGkzULaug6\"}],\"body\":\"fAe8Qvt42Fmz5UVqM2VPE8hDBTlo9jY3EV4+V4HZ3bzb2jrKTw9Oy72mEN6g\"}"
+}
+```
 
 ## Rooms
 
@@ -399,6 +452,34 @@ In a room it sees the room id, how many members it has, each one's idx, role and
 
 The channel and room routes are served by the page service's relay and by the slim relay a party can run itself: [Run your own peer relay](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/relay.md).
 
+## Reader feed and forward
+
+A party's messages can reach a person with no agent in the path: a **reader page** in a browser, over the party's **reader feed** (distinct from a room feed, § Feeds and links), which its hosts write live; and a **forward** copy into a chat. Both are served by the party's peer worker — the reference deployment is `https://peer.0xtau.com`, the same Worker that serves `/peer`. The worker stores no message: the feed Object relays frames between the hosts connected and the pages open, and holds nothing but the party's feed config (hashes, below) and its live sockets. A plain message transits its memory as text; an `e2e` message is ciphertext end to end (§ Message encryption extension). A party that wants no plain message on the worker sets `feed.only` to `e2e`.
+
+**The reader link** is `https://<feed.url>/#p=<party id>&t=<reader token>` — for the fleet party `https://peer.0xtau.com/#p=…&t=…`. `peer feed link` prints it once, to the person who ran it, on any machine of their party: the one using the peer mints their own link, and no managing party exists. The fragment never reaches a server; the page sends the token in its hello frame alone. The page is one file, `worker/reader/index.html`, served at `/`; its policy admits no connection but the same-origin feed socket and no code but its own (the Renderer row of § Message encryption extension quotes its sha256). The page is a privilege-free client of the backend `feed.url` names, and any reader program may be written against this section.
+
+**The feed socket** is `GET /feed/<party id>` with `Upgrade: websocket`. The first text frame is the hello: a host sends `{"hello":"source","secret":"<source secret>","host":"<name>"}`, a page `{"hello":"viewer","token":"<reader token>","key":"x25519:…"}` (`key` absent when the browser has no key). The Object answers `{"ok":true,"sources":<n>}`, `n` the hosts connected, or closes `4401`; `ping`/`pong` as on the relay. After the hello:
+
+| From → to | Frame |
+|---|---|
+| source → Object | `{"rec":<peer-timeline@1 data>,"n":<int>}` — one record, numbered by the source |
+| Object → every viewer | `{"rec":…}` |
+| Object → source | `{"ack":<n>}` |
+| Object → every source, when a viewer connects | `{"replay":{"viewer":"<id>","reader":"sha256:<hex of its token>","key":"x25519:…"}}` |
+| source → Object, answering a replay | `{"rec":…,"to":"<id>"}`… then `{"replay_done":"<id>","readers":["x25519:…",…]}` — the card's current keys; relayed to that viewer alone |
+
+A `rec` body is cut at 60,000 bytes with `"truncated":true`. A source replays what it holds: the inbox records of received messages, and its local record of sent ones — `<dir>/feed/<peer name>/out-<seq 8 digits>.json`, the `peer-timeline@1` data of each sent message, mode 0600, pruned after 30 days — merged by `at`. A viewer renders what it is sent, the replay and then each message live, and keeps none of it.
+
+**The feed config** is what the Object holds for a party: `{"v":1,"party":"ed25519:…","at":"<RFC 3339 UTC>","source":"sha256:<hex>","readers":["sha256:<hex>",…]}` — the hashes of the source secret and of each reader token, never a secret and never the card. `PUT /feed/<party id>/config` writes it under two headers: `X-Peer-Card: <base64url, no padding, of signature (64 bytes) ‖ card bytes — the party's root-signed public card, the envelope #0 form>` and `X-Peer-Signature: <base64url, no padding, the card's current identity key's Curve25519 signature over the exact body bytes — libsignal's scheme, the one that signs the signed prekey (§ Identity and keys)>`. The Worker verifies the card under the URL's party id (§ The card), takes its current key — the first `keys[]` entry whose `until` is `null` — converts the `curve25519:<u>` key to its Edwards form, y = (u−1)/(u+1) mod 2²⁵⁵−19, sets bit 255 of y from the signature's top bit (`signature[63] & 0x80`), clears that bit in the signature, and verifies the 64 bytes with Ed25519; a body signed by the root key is refused, and a missing or bad card is 401 `bad_card`; `at` must be within 5 minutes and newer than the config held, else 409. `GET` carries the same two headers, the signature over the UTF-8 bytes of the `X-Peer-At` header's value — an RFC 3339 time within 5 minutes — never over empty bytes, and returns the config. The card is the delegation: the root signs the card and nothing else (§ Identity and keys), and the identity key, on every machine of the party, signs the config — so no root act configures a feed, there is no owner login, and no secret of another party is ever in the worker's hands.
+
+**The `feed` record.** The source secret and the reader list live in the party's shared state record `feed` = `{"v":1,"source":"<source secret>","readers":[{"hash":"sha256:<hex>","label":"<label>","at":"<RFC 3339>"}]}`, sealed and compare-and-swapped as every state record (beside `keys` and `card`): every machine of the party reads it, nothing is provisioned by hand, and the Worker holds the hashes alone. The source secret and each reader token are 32 random bytes as base64url, 43 characters; the source secret is in clear in the `feed` record only, and a reader token is printed once and stored nowhere.
+
+**The reader key.** On the first open of a party's link the page generates an X25519 pair with `crypto.subtle`, the secret half non-extractable, and keeps it in the browser's IndexedDB: database `peer-reader`, store `keys`, record `<party id>` = `{key: <non-extractable X25519 CryptoKey>, pub: "x25519:…", at}`. Every hello carries the public half; the Object hands it to the sources in `replay`; a host that sees a key the card does not list adds it to the party's shared state record `readers-pending` = `{"v":1,"keys":[{"key":"x25519:…","reader":"sha256:<hex>","at":"<RFC 3339>"}]}` (CAS, as every state record) and raises a wake notice, `peer reader key pending for <party id>: peer e2e publish where root.json is`. `peer e2e publish` with no argument, where `root.json` is — the card is the root's to sign, and the root is the user's own — folds the pending keys into `details.readers.keys`, signs and re-sends the card, and clears the record; from then on `replay_done.readers` lists the key and the page reads 「钥匙已登记到名片」 in place of 「钥匙已生成，等待登记到名片」. No key string is shown or pasted. One key per browser, all on the card; a new or cleared browser (Safari after seven days without a visit) gets a new key and reads only messages sealed after it is published; a `peer e2e keygen` secret can still be imported by hand, and is stored non-extractable too.
+
+**What a reader implementer does.** Parse `p` and `t` from the fragment; open one WebSocket to `/feed/<p>` on the page's own origin; send the viewer hello, with the browser's key when it has one; treat `ok` with `sources` 0 as a party with no host connected (「等待主机」), close `4401` as an expired link (「链接已失效」, no reconnect), any other close as a retry with backoff; render each `rec` by its `id`, a `truncated` one marked (「已截断」); after `replay_done`, show whether `readers` lists the key; open `e2e` bodies as § Message encryption extension says; send `ping` about every 30 seconds. Store no message, and never let a secret be exported.
+
+**The forward.** After every record it writes, in both directions, a host `POST`s `<forward.url>/forward` with `Authorization: Bearer <forward.secret>` and the body `{"peer":"<counterpart party id>","record":{"schema":"peer-timeline@1","data":{…,"truncated"?}}}`. The worker maps `peer` to a chat and topic through its own secret `FORWARD_TARGETS` = `{"<party id>":{"chat":<int>,"topic":<int>},…}`: the host names the counterpart, never a chat. A `peer` the worker lacks answers 204 and nothing is sent; any other 2xx is the delivery; any other answer, or none, keeps the record in `<dir>/forward-pending/<id>.json`, tried once more each round and dropped after 20 retries with a log line. The Telegram line is `<from> · <kind> · <at>` ‖ the first 3,500 characters (‖ 「…」 when cut) ‖ `https://peer.0xtau.com/`, `<from>` the sender's party name, ours for a sent record; an `e2e` record reads 「加密消息，在页面解密」 ‖ the URL. The worker stores nothing of it.
+
 ## Sending and receiving on several machines
 
 A party may run its host program on several machines over one shared state. Because the Double Ratchet destroys message keys as it goes, the order of steps decides between a duplicate and a loss:
@@ -407,7 +488,7 @@ A party may run its host program on several machines over one shared state. Beca
 - **Receive**: read the state → decrypt → keep the plaintext in a local spool → write back state, seen ids and cursor in one compare-and-swap → deliver from the spool. A machine whose write loses drops its plaintext and pulls again from the winner's cursor. A duplicate delivery is possible; a loss is not, except when the winning machine dies for good between its write and its delivery.
 - **Rooms** keep one state record per room — roster, own room keys, cursor, seen ids, counters, membership version, add setting — under the same rules: a send claims its `ctr` by the compare-and-swap and keeps the record in the outbox until the relay takes it; a receive spools, commits the cursor, then delivers. A seal-key rotation is generate → commit the new key → put the `roomcard`; a machine whose commit loses discards its key and reads the winner's, so two machines rotating together end with one key.
 
-The reference CLI keeps the state as versioned records — the channel list, the party keys, the party's own signed card, one Signal session record per channel, one activity record per channel, the room list and one state record per room — in a directory, or on a private ccc-pages page where each record is sealed with AES-256-GCM under a key derived by HKDF-SHA256 from the identity private key (info `peer store seal v1`), a random nonce in front and the record key as associated data. This is the CLI's own storage, not part of the wire.
+The reference CLI keeps the state as versioned records — the channel list, the party keys, the party's own signed card, the `feed` record and the pending reader keys (§ Reader feed and forward), one Signal session record per channel, one activity record per channel, the room list and one state record per room — in a directory, or on a private ccc-pages page where each record is sealed with AES-256-GCM under a key derived by HKDF-SHA256 from the identity private key (info `peer store seal v1`), a random nonce in front and the record key as associated data. This is the CLI's own storage, not part of the wire.
 
 ## Delivery and inbound rules
 
@@ -426,11 +507,12 @@ kind: task
 verified: true
 at: 2026-10-14T09:00:00.123Z
 group: <room id, 32 hex — a room message only>
+e2e: peer-e2e-v1
 ---
 <the message body>
 ```
 
-The frontmatter holds exactly these keys: five for a channel message, and `group:` — the room id — as the sixth for a room message. A vendor kind is written quoted. An attachment's record body is its descriptor followed by one line — `content: <path> (sha256 verified)`, the content kept on that machine at `quarantine/<id>/<name>`, or `blob not fetched: <reason>; peer fetch <id> tries again`.
+The frontmatter holds exactly these keys: five for a channel message, `group:` — the room id — as the sixth for a room message, and, for a body that is an e2e envelope (§ Message encryption extension — e2e v1), `e2e: <suite id>` last: sixth, or seventh after `group`. A vendor kind is written quoted. An attachment's record body is its descriptor followed by one line — `content: <path> (sha256 verified)`, the content kept on that machine at `quarantine/<id>/<name>`, or `blob not fetched: <reason>; peer fetch <id> tries again`.
 
 **Delivery by a seat map.** A party whose agents live in a UCC fleet lists them in a seat map, and the card's `agents` are made from it: a Markdown table with the columns `label`, `to`, `accepts` and `rooms` (any order; other columns ignored; `rooms` may be absent). Each row is one agent id of the card:
 
@@ -464,6 +546,9 @@ The frontmatter holds exactly these keys: five for a channel message, and `group
 | Feed link | fragment `v1`; another first field is refused | — |
 | Accept proof | label `peer accept proof v1` | — |
 | Verification code | label `peer verification code v2` | — |
+| Card `details.readers` | `"v": 1`; another value is refused | ignored |
+| Encrypted body envelope | `"e2e": 1`; another value is plain text | ignored |
+| Encrypted body label | `peer e2e v1` | — |
 | Room labels | `peer room seal v1`, `peer room key commit v1`, `peer feed link v1` | — |
 | Relay routes | at base `/peer`: channels v1, rooms v2 | — |
 
@@ -482,8 +567,19 @@ A new label is a new value: two implementations agree on a proof, a code or a ke
 
 ## The CLI
 
-`peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`, HPKE from Go's `crypto/hpke`). Commands: `init`, `invite`, `accept`, `confirm`, `forget`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `room create|add|members|remove|leave|handover|close|rotate|link|follow|inspect`, `version`. Rooms, feeds and the `room` commands are in v0.2.0 and later. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
+`peer` (GPL-3.0; X3DH and the Double Ratchet from `go.mau.fi/libsignal`, HPKE from Go's `crypto/hpke`). Commands: `init`, `invite`, `accept`, `confirm`, `forget`, `send`, `serve`, `status`, `fetch`, `card publish`, `keys accept|reject`, `identity rotate`, `room create|add|members|remove|leave|handover|close|rotate|link|follow|inspect`, `e2e keygen|publish|revoke|decrypt`, `feed setup|link|revoke|show`, `version`. Rooms, room feeds and the `room` commands are in v0.2.0 and later; `e2e`, `send --encrypt`, the `feed` verbs and the `feed` and `forward` config are in v0.5.0 and later. What an agent does with them: [skill.md](https://page.sui.pics/a/peer-protocol-2ff24d5d4d58ff5b/skill.md).
 
-Install: `go install github.com/caoer/peer/cmd/peer@v0.4.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.4.0, checked against its `SHA256SUMS`. A `go install` build and a release binary both report their version (`peer version`).
+Install: `go install github.com/caoer/peer/cmd/peer@v0.5.0` (Go 1.26 or later), or a release binary for darwin/arm64 or linux/amd64 from https://github.com/caoer/peer/releases/tag/v0.5.0, checked against its `SHA256SUMS`. A `go install` build and a release binary both report their version (`peer version`).
 
 `peer room inspect <room>` prints the relay's view of a room as one JSON object, read through this party's token for it: `{id, name, relay, room, you, log, members, records, notes?}`. `room`, `you` and `log` are the state route's answer as it is (the state of its last page); `members` is the members route's list, `null` when the token is not admin; `records` is every record the state route serves, each `{seq, idx, type, at, expires, size, sha256, body | head, sealed: {idx, ctr, kh, at, to}}` — `at` and `expires` (`at` + `retention`) in the relay's epoch milliseconds, `size` and `sha256` of the decoded record, `body` its standard base64 when it is at most 4096 bytes and otherwise `head`, its first 512; `sealed` is what the framing shows anyone holding the bytes, read and not verified: the header's writer idx, counter, key commitment and time, and the idxs it is sealed to in wire order (65535 a feed's link). A row the relay sent malformed, or a body that does not parse as a sealed record, carries `error` in place of what it lacks. `notes` names what the relay did not show this token. It changes nothing on the host or the relay. It is in v0.4.0 and later and needs a relay with the state route.
+
+**Encrypting a body** (§ Message encryption extension — e2e v1). `peer e2e keygen` prints a public and a secret key string and writes nothing; the secret stays with the person and never goes on a serving host. `peer e2e publish`, where `root.json` is, folds the keys readers' browsers sent (`readers-pending`, § Reader feed and forward) into `details.readers` in `config.json` and re-issues the card; `peer e2e publish <pub>` appends one named key, `peer e2e revoke <pub>` removes one, each re-issuing the card. `peer status` lists each peer's published keys under `READERS`, and as `readers` in `--json`. `peer send --encrypt [--to-key <pub>]… <peer>` seals the body; `peer send --encrypt <room>` seals to every other member, or to the members `--to` names. `peer e2e decrypt --key <secret> [file]` reads an envelope or an inbox record, from a file or stdin, and prints the plaintext.
+
+**Feed and forward** (§ Reader feed and forward). `config.json` takes two top-level keys, each host-local:
+
+| Key | Meaning |
+|---|---|
+| `feed` | `{"url":"https://peer.0xtau.com","only":"e2e"?}` — no secret in the file: the source secret and the reader list are the party's shared `feed` state record (§ Reader feed and forward). `peer serve` dials with the record's secret, keeps one feed socket per party open for its life, sends each record it writes, in both directions, and answers replays; a one-shot `peer send` connects, sends, waits for the `ack` and closes. A host with `feed.url` and no `feed` record logs `feed: not set up — peer feed setup on any machine of this party` once per round and feeds nothing. `only: "e2e"` feeds and replays `e2e` records alone, so the party's plain messages never transit the worker; `all` is the default. The verbs run on **any machine of the party**, signing with the identity key under the root-signed card: `peer feed setup` (once: reads `feed.url`, mints the source secret, `PUT`s `{…,"readers":[]}` with the card, commits the `feed` record; refuses when the record exists — `--reset` mints a new source secret and re-`PUT`s) · `peer feed link [--label <label>]` (mints a token, appends `{hash, label, at}` to the record by CAS, re-`PUT`s the full list, prints the link once with its label — the person using the peer runs it for their own link) · `peer feed revoke <label | hash prefix>` (removes it from the record, re-`PUT`s) · `peer feed show` (the record's readers: label, hash, at; `--remote` `GET`s the list the Worker holds). |
+| `forward` | `{"url":"https://peer.0xtau.com","secret":"<FORWARD_SECRET>"}`. Every record, in both directions, is `POST`ed as § Reader feed and forward says: a 204 is the worker's word that it has no chat for this peer, logged and not retried; any other 2xx is the delivery; anything else is retried once per round, 20 times, then dropped with a log line. The inbox does not depend on it. No seat is in the path. |
+
+A `config.json` carrying the per-peer forward or mirror keys of a build before v0.5.0 refuses at load, naming the key: on this build they would leave the forward silently off.
