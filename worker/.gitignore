@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+# limiter-double-options.mjs writes the suite's copy of wrangler.jsonc here.
+wrangler.*.gen.json
