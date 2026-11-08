@@ -90,7 +90,7 @@ func TestForwardSpooledBirth(t *testing.T) {
 	if h.count() != before+1 {
 		t.Fatalf("%d POSTs after the replay, want one", h.count()-before)
 	}
-	if r, raw := h.post(t, before); r.ID != id || r.Dir != timeline.In || string(r.Body) != `"replayed"` {
+	if r, raw := h.post(t, before); r.ID != id || r.Dir != timeline.In || r.Sender != "zt" || string(r.Body) != `"replayed"` {
 		t.Fatalf("record %s", raw)
 	}
 }
@@ -128,12 +128,36 @@ func TestTimelineSentAfterOutboxReplay(t *testing.T) {
 	if h.count() != before+1 {
 		t.Fatalf("%d POSTs for the replayed send, want one", h.count()-before)
 	}
-	if r, raw := h.post(t, before); r.ID != m[1] || r.Dir != timeline.Out || r.Peer != p.hostParty || string(r.Body) != `"queued"` {
+	// The guest's config has no name, so the sent record names no sender.
+	if r, raw := h.post(t, before); r.ID != m[1] || r.Dir != timeline.Out || r.Peer != p.hostParty || r.Sender != "" || string(r.Body) != `"queued"` {
 		t.Fatalf("record %s", raw)
 	}
 	mustOK(t, "serve", "--dir", p.guestDir, "--once")
 	if h.count() != before+1 {
 		t.Fatalf("%d POSTs after a later round, want one", h.count()-before)
+	}
+}
+
+// The POST names the sender as the host knows it: the counterpart's name on
+// its roster for a received message, config's name for a sent one.
+func TestForwardNamesTheSender(t *testing.T) {
+	_, _, base := relaytest.Start(t, login)
+	h := newHook(t, func(int, *http.Request) int { return http.StatusOK })
+	trustHooks(t, h)
+	cfg := config{Name: "安灿", Forward: &forwardConfig{URL: h.URL, Secret: forwardSecret}}
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base)
+	before := h.count()
+	sendOK(t, p.hostDir, "--text", "hello", "ancan")
+	mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	sendOK(t, p.guestDir, "--text", "hi", "zt/advisor")
+	if h.count() != before+2 {
+		t.Fatalf("%d POSTs, want one received and one sent", h.count()-before)
+	}
+	if r, raw := h.post(t, before); r.Dir != timeline.In || r.Peer != p.hostParty || r.Sender != "zt" {
+		t.Fatalf("received: %s", raw)
+	}
+	if r, raw := h.post(t, before+1); r.Dir != timeline.Out || r.Peer != p.hostParty || r.Sender != "安灿" {
+		t.Fatalf("sent: %s", raw)
 	}
 }
 
@@ -170,11 +194,12 @@ func forwardPairOn(t *testing.T, base string) (p *pair, h *hookServer, code *ato
 }
 
 // forwardedRecord is a POST's record with its truncated mark, and the
-// POST's peer.
+// POST's peer and sender name ("" when the POST carries none).
 type forwardedRecord struct {
 	timeline.Record
 	Truncated bool   `json:"truncated"`
 	Peer      string `json:"-"`
+	Sender    string `json:"-"`
 }
 
 // parseForward is a POST's record and the raw bytes of its data, the
@@ -183,6 +208,7 @@ func parseForward(t *testing.T, post []byte) (*forwardedRecord, []byte) {
 	t.Helper()
 	var body struct {
 		Peer   string `json:"peer"`
+		From   string `json:"from"`
 		Record struct {
 			Schema string          `json:"schema"`
 			Data   json.RawMessage `json:"data"`
@@ -191,7 +217,11 @@ func parseForward(t *testing.T, post []byte) (*forwardedRecord, []byte) {
 	if err := json.Unmarshal(post, &body); err != nil {
 		t.Fatalf("%v\n%s", err, post)
 	}
-	if order := fieldOrder(t, post); strings.Join(order, ",") != "peer,record" {
+	want := "peer,record"
+	if body.From != "" {
+		want = "peer,from,record"
+	}
+	if order := fieldOrder(t, post); strings.Join(order, ",") != want {
 		t.Fatalf("POST fields %v: %s", order, post)
 	}
 	if body.Record.Schema != timeline.Schema {
@@ -201,7 +231,7 @@ func parseForward(t *testing.T, post []byte) (*forwardedRecord, []byte) {
 	if err := json.Unmarshal(body.Record.Data, &r); err != nil {
 		t.Fatalf("%v\n%s", err, post)
 	}
-	r.Peer = body.Peer
+	r.Peer, r.Sender = body.Peer, body.From
 	return &r, body.Record.Data
 }
 
@@ -418,7 +448,7 @@ func TestForwardCutsBody(t *testing.T) {
 		{"a megabyte", a(1 << 20), a(60000), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := forwardBytes(timeline.In, &session.Message{V: 1, ID: "m1", From: "a", To: "b", Kind: "text", At: time.Now(), Body: []byte(tc.body)})
+			b, err := forwardBytes(timeline.In, "a", &session.Message{V: 1, ID: "m1", From: "a", To: "b", Kind: "text", At: time.Now(), Body: []byte(tc.body)})
 			if err != nil {
 				t.Fatal(err)
 			}

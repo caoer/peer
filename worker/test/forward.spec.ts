@@ -8,6 +8,7 @@ import { CUT_MARK, ENCRYPTED_LINE, LINE_BODY_MAX, READER_URL, handleForward, lin
 
 const SECRET = "fwd_" + "9".repeat(39);
 const YUJING = "ed25519:" + "Y".repeat(43);
+const ZT = "ed25519:" + "T".repeat(43);
 const OTHER = "ed25519:" + "Z".repeat(43);
 const ENV = {
 	FORWARD_SECRET: SECRET,
@@ -15,7 +16,10 @@ const ENV = {
 	TG_BOT_TOKEN: "123:abc",
 };
 const AT = "2026-11-08T15:00:00Z";
-const rec = (data: Record<string, unknown>) => ({ schema: "peer-timeline@1", data: { id: "m1", dir: "in", kind: "text", from: "yujing", to: "zt", at: AT, ...data } });
+// A record's from and to are protocol addresses; the host names the sender
+// beside the record (`from` on the body), as its roster or config spells it.
+const rec = (data: Record<string, unknown>) => ({ schema: "peer-timeline@1", data: { id: "m1", dir: "in", kind: "text", from: `${YUJING}/agent`, to: `${ZT}/zt`, at: AT, ...data } });
+const post = (data: Record<string, unknown>, from = "yujing") => ({ peer: YUJING, from, record: rec(data) });
 const req = (body: unknown, token = SECRET) =>
 	new Request("https://peer.0xtau.com/forward", {
 		method: "POST",
@@ -32,9 +36,9 @@ const sentText = (spy: ReturnType<typeof telegram>) => JSON.parse(spy.mock.calls
 afterEach(() => vi.restoreAllMocks());
 
 describe("POST /forward", () => {
-	it("sends a received message to its party's topic and answers the message id", async () => {
+	it("sends a received message to its party's topic, headed by the sender's name, and answers the message id", async () => {
 		const spy = telegram();
-		const res = await handleForward(req({ peer: YUJING, record: rec({ body: "你好" }) }), ENV);
+		const res = await handleForward(req(post({ body: "你好" })), ENV);
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual({ message_id: 42 });
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -46,19 +50,25 @@ describe("POST /forward", () => {
 
 	it("names our party on a sent record", async () => {
 		const spy = telegram();
-		await handleForward(req({ peer: YUJING, record: rec({ dir: "out", from: "zt", to: "yujing", body: "收到" }) }), ENV);
+		await handleForward(req(post({ dir: "out", from: `${ZT}/zt`, to: YUJING, body: "收到" }, "zt")), ENV);
 		expect(sentText(spy).text).toBe(`zt · text · ${AT}\n收到\n${READER_URL}`);
+	});
+
+	it("names the sender by the record's address when the host sends no name", async () => {
+		const spy = telegram();
+		await handleForward(req({ peer: YUJING, record: rec({ body: "你好" }) }), ENV);
+		expect(sentText(spy).text).toBe(`${YUJING}/agent · text · ${AT}\n你好\n${READER_URL}`);
 	});
 
 	it("cuts a 3,600-character body at 3,500 and marks the cut", async () => {
 		const spy = telegram();
-		await handleForward(req({ peer: YUJING, record: rec({ body: "字".repeat(3_600) }) }), ENV);
+		await handleForward(req(post({ body: "字".repeat(3_600) })), ENV);
 		expect(sentText(spy).text).toBe(`yujing · text · ${AT}\n${"字".repeat(LINE_BODY_MAX)}\n${CUT_MARK}\n${READER_URL}`);
 	});
 
 	it("carries no body of an encrypted record", async () => {
 		const spy = telegram();
-		await handleForward(req({ peer: YUJING, record: rec({ body: "peer-e2e-v1.sealed", e2e: true }) }), ENV);
+		await handleForward(req(post({ body: "peer-e2e-v1.sealed", e2e: true })), ENV);
 		expect(sentText(spy).text).toBe(`yujing · text · ${AT}\n${ENCRYPTED_LINE}\n${READER_URL}`);
 	});
 
@@ -81,6 +91,7 @@ describe("POST /forward", () => {
 		expect((await handleForward(req({ peer: YUJING, record: rec({}) }, "fwd_wrong"), ENV)).status).toBe(401);
 		expect((await handleForward(req({ peer: YUJING, record: rec({}) }), { ...ENV, FORWARD_SECRET: undefined })).status).toBe(401);
 		expect((await handleForward(req({ peer: YUJING, record: { schema: "other", data: {} } }), ENV)).status).toBe(400);
+		expect((await handleForward(req({ peer: YUJING, from: 7, record: rec({}) }), ENV)).status).toBe(400);
 		expect(spy).not.toHaveBeenCalled();
 	});
 

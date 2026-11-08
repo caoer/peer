@@ -23,12 +23,13 @@ import (
 
 // A channel's messages, received and sent, can also go to the worker named
 // by forward: an HTTPS POST to <url>/forward with the bearer secret of the
-// counterpart's party id and the peer-timeline@1 record in its envelope,
-// {"peer": ..., "record": {"schema": ..., "data": {...}}}, so the worker's
-// copy reaches a human with no seat in the path. The worker chooses the chat
-// by party id; a 204 is its word that it has none for this peer, logged and
-// not retried. Any other 2xx is the delivery. Any other answer, or none,
-// keeps the record in
+// counterpart's party id, the sender's name and the peer-timeline@1 record
+// in its envelope, {"peer": ..., "from": ..., "record": {"schema": ...,
+// "data": {...}}}, so the worker's copy reaches a human with no seat in the
+// path. The worker chooses the chat by party id and heads its copy with the
+// name; a 204 is its word that it has no chat for this peer, logged and not
+// retried. Any other 2xx is the delivery. Any other answer, or none, keeps
+// the record in
 // <dir>/forward-pending/<id>.json, which every round tries once more; after
 // forwardRetries retries it is dropped with a log line. The inbox record is
 // already written by then, so a dead URL costs only the copy.
@@ -41,10 +42,12 @@ const (
 	forwardBodyMax = 60000
 )
 
-// forwardPost is the POST body: the counterpart's party id and the timeline
-// record, marked when its body was cut.
+// forwardPost is the POST body: the counterpart's party id, the sender's
+// name as this host knows it (senderName; absent when it knows none) and the
+// timeline record, marked when its body was cut.
 type forwardPost struct {
 	Peer   string        `json:"peer"`
+	From   string        `json:"from,omitempty"`
 	Record forwardRecord `json:"record"`
 }
 
@@ -122,13 +125,25 @@ func cutData(rec *timeline.Record) forwardData {
 	return forwardData{Record: rec, Truncated: cut}
 }
 
-// forwardBytes is the POST body of message m in direction dir.
-func forwardBytes(dir string, m *session.Message) ([]byte, error) {
+// forwardBytes is the POST body of message m in direction dir, its sender
+// named from.
+func forwardBytes(dir, from string, m *session.Message) ([]byte, error) {
 	data, err := timelineData(dir, m)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(forwardPost{Peer: counterpart(dir, m), Record: forwardRecord{Schema: timeline.Schema, Data: data}})
+	return json.Marshal(forwardPost{Peer: counterpart(dir, m), From: from, Record: forwardRecord{Schema: timeline.Schema, Data: data}})
+}
+
+// senderName is how the forward names the sender of a message in direction
+// dir with the peer named name on this roster: that name for a received
+// message, config's name for this party on a sent one — "" when config has
+// none, and the worker then names the party by its id.
+func (p *party) senderName(dir, name string) string {
+	if dir == timeline.Out {
+		return p.cfg.Name
+	}
+	return name
 }
 
 // forwardLine is serve's start line on stderr, the journal: the forward's
@@ -154,7 +169,7 @@ func (p *party) forwardTimeline(ctx context.Context, name, dir string, m *sessio
 		fmt.Fprintf(log, "forward %s: invalid message id\n", name)
 		return
 	}
-	post, err := forwardBytes(dir, m)
+	post, err := forwardBytes(dir, p.senderName(dir, name), m)
 	if err != nil {
 		fmt.Fprintf(log, "forward %s: %s: %v\n", name, m.ID, err)
 		return
