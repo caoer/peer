@@ -28,8 +28,8 @@ describe("the peer worker", () => {
 		}
 	});
 
-	it("answers 404 not_yet on the reader, the feed and the forward", async () => {
-		for (const [method, path] of [["GET", "/"], ["GET", "/feed/x"], ["PUT", "/feed/x/config"], ["POST", "/forward"]] as const) {
+	it("answers 404 not_yet on the reader and the feed", async () => {
+		for (const [method, path] of [["GET", "/"], ["GET", "/feed/x"], ["PUT", "/feed/x/config"]] as const) {
 			const res = await SELF.fetch(`${ORIGIN}${path}`, { method });
 			expect(res.status, `${method} ${path}`).toBe(404);
 			expect(await res.json()).toMatchObject({ code: "not_yet" });

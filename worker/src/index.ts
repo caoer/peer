@@ -10,16 +10,18 @@
  * route is authorised by the channel's side tokens or the room's member
  * tokens. Unset, nothing can be opened.
  *
- * `/`, `/feed/*` and `/forward` (the reader page, the reader feed and the
- * Telegram forward) answer 404 `not_yet` until they are built.
+ * POST /forward sends one timeline record to its party's Telegram topic
+ * (src/forward.ts). `/` and `/feed/*` (the reader page and the reader feed)
+ * answer 404 `not_yet` until they are built.
  */
 
 import { PeerChannel, type PeerEnv, handlePeer, secretMatches } from "./relay/channel";
 import { PeerRoom } from "./relay/room";
+import { type ForwardEnv, handleForward } from "./forward";
 
 export { PeerChannel, PeerRoom };
 
-export interface Env extends PeerEnv {
+export interface Env extends PeerEnv, ForwardEnv {
   RELAY_LOGIN?: string;
 }
 
@@ -87,8 +89,16 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length === 0 || parts[0] === "feed" || (parts[0] === "forward" && parts.length === 1))
-      return json(404, "not_yet", "not served yet");
+    if (parts[0] === "forward" && parts.length === 1) {
+      try {
+        const res = await handleForward(req, env);
+        for (const [k, v] of Object.entries(PRIVATE)) res.headers.set(k, v);
+        return res;
+      } catch (e) {
+        return json(500, "internal_error", e instanceof Error ? e.message : "internal error");
+      }
+    }
+    if (parts.length === 0 || parts[0] === "feed") return json(404, "not_yet", "not served yet");
     if (parts[0] !== "peer") return json(404, "no_such_route", "no such route");
     if (parts.length === 1)
       return new Response(req.method === "HEAD" ? null : USAGE, { headers: { "content-type": "text/plain; charset=utf-8" } });
