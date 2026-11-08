@@ -141,13 +141,16 @@ func TestVector(t *testing.T) {
 
 func TestEnvelopeShape(t *testing.T) {
 	pub, _ := newKey(t)
-	env := seal(t, "hi", pub)
+	// The plaintext holds a space and a '!', which neither base64 nor the
+	// compact JSON around it can contain, so finding it means a leak.
+	const plain = "hi, peer!"
+	env := seal(t, plain, pub)
 	// enc is 32 bytes of base64 and ct 48 bytes, which needs no padding.
 	shape := regexp.MustCompile(`^\{"e2e":1,"suite":"peer-e2e-v1","to":\[\{"key":"x25519:[A-Za-z0-9_-]{43}","enc":"[A-Za-z0-9+/]{43}=","ct":"[A-Za-z0-9+/]{64}"\}\],"body":"[A-Za-z0-9+/=]+"\}$`)
 	if !shape.Match(env) {
 		t.Fatalf("envelope shape: %s", env)
 	}
-	if bytes.Contains(env, []byte("hi")) {
+	if bytes.Contains(env, []byte(plain)) {
 		t.Fatalf("plaintext in envelope: %s", env)
 	}
 }
