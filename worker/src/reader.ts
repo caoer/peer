@@ -3,11 +3,15 @@
  * bytes checked into the repo (docs/protocol.md quotes their sha256). The
  * page's own <meta http-equiv="Content-Security-Policy"> is repeated as the
  * response header, so the policy holds before the parser reaches the meta.
+ * no-transform keeps the edge from rewriting the HTML: Cloudflare Web
+ * Analytics injects its beacon script into HTML responses of the zone unless
+ * Cache-Control carries it (developers.cloudflare.com/web-analytics/faq), and
+ * a reader who audits the page must receive the file's bytes.
  */
 
 import html from "../reader/index.html";
 
-export const READER_CACHE = "public, max-age=300";
+export const READER_CACHE = "public, max-age=300, no-transform";
 
 const csp = /<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i.exec(html)?.[1];
 if (csp === undefined) throw new Error("worker/reader/index.html has no Content-Security-Policy meta");

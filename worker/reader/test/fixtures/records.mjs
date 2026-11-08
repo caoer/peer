@@ -3,7 +3,7 @@
 // the vector's key is published in docs/protocol.md and `other` is made fresh
 // on each run.
 import { readFileSync } from "node:fs";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 export const vector = JSON.parse(
   readFileSync(new URL("../../../../internal/e2e/testdata/vector-v1.json", import.meta.url), "utf8"),
@@ -41,19 +41,30 @@ const bodies = {
 
 const encrypted = new Set(["vector", "two-keys", "indented", "tampered", "bad-enc", "other-key", "other-suite", "no-stanzas"]);
 
+// The viewer's party and its counterpart; the page's link names `me`. An
+// address is <party id>/<agent>: our advisor talks to their legal.
+const partyId = () => "ed25519:" + randomBytes(32).toString("base64url");
+export const me = partyId();
+export const peer = partyId();
+const ours = me + "/advisor", theirs = peer + "/legal";
+
 const record = (id, i, fields) => ({
   id,
   dir: i % 2 ? "out" : "in",
   kind: "text",
-  from: "fp-from",
-  to: "fp-to",
+  from: i % 2 ? ours : theirs,
+  to: i % 2 ? theirs : ours,
   at: `2026-11-08T12:00:${String(i).padStart(2, "0")}Z`,
   ...fields,
 });
 
-// The peer-timeline@1 data the party's one source replays to a viewer.
-export const records = Object.entries(bodies).map(([id, body], i) =>
-  record(id, i, { body, ...(encrypted.has(id) ? { e2e: true } : {}) }));
+// The peer-timeline@1 data the party's one source replays to a viewer: the
+// text bodies above, then one received file (its body is the descriptor).
+export const file = { name: "合同草案.pdf", size: 183421, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", mime: "application/pdf" };
+export const records = [
+  ...Object.entries(bodies).map(([id, body], i) => record(id, i, { body, ...(encrypted.has(id) ? { e2e: true } : {}) })),
+  record("file", 10, { kind: "file", body: file }),
+];
 
 // Two records a source sends while the page is open: a plain one, and one
 // whose body the Object cut at 60,000 bytes.

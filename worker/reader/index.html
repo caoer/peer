@@ -1,8 +1,10 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-P7iUWeaGp/QdyiA9huA+X9+sMyMUX8kLfG3DlruZJWA='; style-src 'sha256-J/Y6ybBaXpgCz1gaVjoRalEy6iLG8/kaEOXQYYLKAeU='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-Qfhq/FBeWltl+IsYUCE0aazkHWIxY6nPOfyR3wDaPxk='; style-src 'sha256-Y4PaYvxDs1m/bSDAea+5RxRtBXR6RiaXkXxnAk2ghKU='; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f6f2">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1f1e1c">
 <title>peer · 消息</title>
 <!--
   The Peer Protocol reader (docs/protocol.md, Reader feed and forward), served
@@ -16,6 +18,14 @@
   records the party's hosts send over it: a replay when it connects, then each
   message live. It stores no message. Every string from a record reaches the
   DOM through textContent.
+
+  What a row shows. Each record is one row, grouped by day: which side sent it
+  (我方 for a record with dir out, 对方 for dir in — never by comparing ids),
+  the sending agent, the kind when it is not text, the counterpart party id,
+  and the time; then the body, or its state when it is encrypted (opened here,
+  locked, or unreadable); then a 详情 disclosure with the record's fields in
+  two groups — what every host in the path sees, and the encrypted part only a
+  key holder can open. Tokens: DESIGN.md beside this file.
 
   The key. On the first open of a party's link this page generates an X25519
   pair with crypto.subtle, the secret half non-extractable, and keeps it in
@@ -35,36 +45,82 @@
   the browser's crypto.subtle, with no other library.
 -->
 <style>
-  :root { color-scheme: light dark; --muted: #8a8f98; --line: #8a8f9833; --in: #2f7d4f; --out: #3a63b8; --warn: #b4531f; }
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
-  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
-  h1 { font-size: 1.25rem; margin: 0; }
-  #state { color: var(--muted); font-size: .9rem; }
-  ol { list-style: none; padding: 0; margin: 1.5rem 0; }
-  li { border-top: 1px solid var(--line); padding: .75rem 0; }
-  .meta { display: flex; gap: .75rem; flex-wrap: wrap; font-size: .85rem; color: var(--muted); }
-  .dir { font-weight: 600; }
-  .dir.in { color: var(--in); }
-  .dir.out { color: var(--out); }
-  .kind { font-family: ui-monospace, monospace; }
-  .cut { color: var(--warn); }
-  .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .25rem; }
-  .file { font-family: ui-monospace, monospace; font-size: .9rem; }
-  .locked { color: var(--muted); font-family: ui-monospace, monospace; font-size: .9rem; }
-  .failed { color: var(--warn); font-family: ui-monospace, monospace; font-size: .9rem; }
-  .opened { border-left: 3px solid var(--in); padding-left: .6rem; }
-  button { font: inherit; }
-  #keys { border: 1px solid var(--line); border-radius: .4rem; padding: .75rem 1rem; margin-top: 1rem; }
-  #keystate, #keynote { font-size: .9rem; margin: 0; overflow-wrap: anywhere; }
-  #keynote { color: var(--warn); margin-top: .35rem; }
+  :root {
+    color-scheme: light dark;
+    --bg: oklch(0.975 0.006 75); --bg-sunken: oklch(0.950 0.009 75); --bg-raised: oklch(0.995 0.002 75);
+    --fg: oklch(0.270 0.015 65); --fg-muted: oklch(0.480 0.015 65); --fg-subtle: oklch(0.525 0.012 65);
+    --border: oklch(0.890 0.010 75); --border-strong: oklch(0.620 0.012 70);
+    --accent: oklch(0.450 0.130 255); --accent-soft: oklch(0.930 0.030 255);
+    --ok: oklch(0.520 0.120 150); --warn: oklch(0.530 0.130 70); --err: oklch(0.530 0.180 28);
+    --own: var(--bg-sunken);
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    --serif: Georgia, "Iowan Old Style", "Songti SC", "Noto Serif CJK SC", serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    caret-color: var(--accent);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: oklch(0.200 0.008 70); --bg-sunken: oklch(0.170 0.008 70); --bg-raised: oklch(0.250 0.009 70);
+      --fg: oklch(0.930 0.008 75); --fg-muted: oklch(0.720 0.010 75); --fg-subtle: oklch(0.650 0.010 75);
+      --border: oklch(0.300 0.010 70); --border-strong: oklch(0.560 0.012 70);
+      --accent: oklch(0.780 0.100 250); --accent-soft: oklch(0.300 0.050 250);
+      --ok: oklch(0.750 0.110 150); --warn: oklch(0.800 0.120 80); --err: oklch(0.720 0.150 28);
+      --own: var(--bg-raised);
+    }
+  }
+  html { background: var(--bg); color: var(--fg); }
+  body { font: 400 1rem/1.5 var(--sans); max-width: 44rem; margin: 0 auto; padding: 1.5rem 1rem 2rem; }
+  @media (min-width: 48rem) { body { padding: 2rem 2rem 3rem; } }
+  ::selection { background: var(--accent-soft); color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap; }
+  h1 { font: 600 1.25rem/1.25 var(--serif); margin: 0; text-wrap: balance; }
+  #state { color: var(--fg-subtle); font-size: .875rem; font-variant-numeric: tabular-nums; }
+  #keys { background: var(--bg-sunken); border-radius: .5rem; padding: .75rem; margin-top: 1rem; }
+  #keystate, #keynote { font-size: .875rem; margin: 0; overflow-wrap: anywhere; }
+  #keynote { color: var(--warn); margin-top: .25rem; }
   #keynote:empty { display: none; }
-  #advanced { margin-top: .6rem; font-size: .9rem; }
-  #advanced p { margin: .4rem 0 0; color: var(--muted); }
+  #advanced { margin-top: .5rem; font-size: .875rem; }
+  summary { cursor: pointer; color: var(--fg-muted); }
+  #advanced p { margin: .5rem 0 0; color: var(--fg-muted); }
   .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .5rem; }
-  #secret { flex: 1 1 18rem; min-width: 0; font: .9rem ui-monospace, monospace; padding: .25rem .4rem; }
-  #guide { margin-top: 1rem; font-size: .9rem; }
-  #guide li { border: 0; padding: .2rem 0; }
-  #guide ol { margin: .5rem 0; padding-left: 1.25rem; list-style: decimal; }
+  #secret { flex: 1 1 16rem; min-width: 0; height: 2rem; box-sizing: border-box; padding: 0 .5rem; font: 400 1rem/1.4 var(--mono); color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: .25rem; }
+  button { height: 2rem; padding: 0 .75rem; font: 500 .875rem/1 var(--sans); color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: .25rem; cursor: pointer; }
+  button:disabled, #secret:disabled { opacity: .5; cursor: default; }
+  #empty { color: var(--fg-muted); margin: 2rem 0; }
+  #empty[hidden] { display: none; }
+  #list { list-style: none; padding: 0; margin: .5rem 0 0; }
+  .day { padding: 1.5rem 0 .5rem; text-align: center; font-size: .75rem; font-weight: 500; color: var(--fg-subtle); }
+  .msg { padding: .75rem 0; border-top: 1px solid var(--border); }
+  .day + .msg, .own + .msg { border-top: 0; }
+  .msg.own { background: var(--own); border: 0; border-radius: .5rem; padding: .75rem; margin: .25rem 0; }
+  .head { display: flex; align-items: baseline; gap: .25rem .5rem; flex-wrap: wrap; font-size: .875rem; line-height: 1.3; }
+  .who { font-weight: 600; }
+  .own .who { color: var(--accent); }
+  .kind { font-size: .75rem; font-weight: 500; color: var(--fg-muted); }
+  .id, .mono { font-family: var(--mono); font-size: .8125rem; }
+  .id { color: var(--fg-subtle); }
+  .cut { font-size: .75rem; font-weight: 500; color: var(--warn); }
+  .head time { margin-left: auto; color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .25rem; }
+  .body.locked, .body.event { color: var(--fg-muted); }
+  .body.failed, .body.bad { color: var(--err); }
+  .body.file .name { font-weight: 600; }
+  .note { margin-top: .25rem; font-size: .75rem; font-weight: 500; color: var(--ok); }
+  .more { margin-top: .25rem; font-size: .75rem; }
+  .more summary { color: var(--fg-subtle); font-weight: 500; }
+  .group { margin: .75rem 0 0; font-size: .75rem; font-weight: 500; color: var(--fg-muted); }
+  .more dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: .375rem 0 0; font-size: .8125rem; }
+  .more dt { color: var(--fg-subtle); }
+  .more dd { margin: 0; overflow-wrap: anywhere; }
+  .mine { font-family: var(--sans); color: var(--ok); }
+  #guide { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: .875rem; color: var(--fg-muted); }
+  #guide ol { margin: .5rem 0 0; padding-left: 1.25rem; }
+  #guide li { padding: .2rem 0; }
+  @media (pointer: coarse) {
+    button, #secret { height: 2.75rem; }
+    summary { padding: .5rem 0; }
+  }
 </style>
 <header>
   <h1>Peer 消息</h1>
@@ -82,17 +138,18 @@
     <p>导入的私钥替换本浏览器生成的钥匙，同样存成不可导出。只导入 <kbd>peer e2e keygen</kbd> 生成、由你自己保管的私钥。</p>
   </details>
 </section>
+<p id="empty" role="status" hidden></p>
+<ol id="list" aria-label="消息"></ol>
 <details id="guide">
   <summary>这个页面怎样处理加密消息</summary>
   <ol>
-    <li>锁着的消息是加密给它那一行列出的公钥的，只有对应的私钥能打开；本站、agent 和转送它的主机经手的都是密文。没加密的消息以明文经过本站的转送程序，转送程序不保存消息。</li>
+    <li>锁着的消息是加密给它「详情」里列出的公钥的，只有对应的私钥能打开；本站、agent 和转送它的主机经手的都是密文。没加密的消息以明文经过本站的转送程序，转送程序不保存消息。</li>
     <li>本浏览器第一次打开这个链接时，会自己生成一把钥匙。私钥留在本浏览器里，不能导出，也不发往任何地方；公钥随连接交给你方的主机，由你方的管理机器登记到名片上。登记之后发给你的加密消息，在这里自动解密。上面一行显示钥匙是否已登记。</li>
     <li>每个浏览器一把钥匙，都登记在名片上。换一个浏览器，或清除了本站的数据（Safari 七天没打开本站也会清除），会生成一把新钥匙；新钥匙只能读登记之后加密的消息，旧钥匙不会带过来。</li>
     <li>不要把私钥贴到别处，也不要交给 agent：agent 的模型服务商能看到 agent 看到的一切。</li>
     <li>你不必信任这个页面。查看源代码就能读到它的全部代码：只有一个文件，没有外部代码；安全策略只允许它连接本站，它唯一的连接是消息通道。本站可能在之后某次加载时换一个文件，所以请把这个文件的 sha256 与 Peer Protocol 文档里写的对照，或者在自己的机器上用 <kbd>peer e2e decrypt</kbd> 解密。</li>
   </ol>
 </details>
-<ol id="list"></ol>
 <script>
 "use strict";
 (() => {
@@ -128,12 +185,37 @@
     notSecret: "这不是私钥：私钥以 x25519-secret: 开头，后面还有 43 个字符。",
     wrongKey: "这把钥匙打不开",
     unreadable: "无法读取的加密消息",
-    locked: (keys) => "已锁定 — 加密给 " + keys.join(", "),
-    received: "收到",
-    sent: "发出",
+    locked: (n) => "已锁定 · 加密给 " + n + " 把钥匙，本浏览器的钥匙不在其中",
+    lockedNoKey: (n) => "已锁定 · 加密给 " + n + " 把钥匙，本浏览器没有钥匙",
+    decrypted: "已在本机解密",
+    ours: "我方",
+    theirs: "对方",
+    vendor: "自定义",
     card: "交换了名片",
+    badAttachment: "附件信息无法读取",
     bytes: " 字节",
+    today: "今天",
+    yesterday: "昨天",
+    emptyLive: "还没有消息。主机在线时，收到和发出的消息会出现在这里。",
+    emptyWaiting: "主机还没连上。连上以后，它保存的消息会在这里补出来。",
+    details: "详情",
+    plainPart: "明文部分 · 经手的每台主机都看得到",
+    encPart: "加密部分 · 只有钥匙持有者看得到内容",
+    id: "编号",
+    kind: "类型",
+    from: "发出方",
+    to: "接收方",
+    at: "时间",
+    cut: "截断",
+    cutNote: "正文被截到 60,000 字节",
+    suite: "加密方式",
+    keys: "收件钥匙",
+    mine: "本浏览器的钥匙",
+    cipher: "密文",
+    none: "—",
   };
+  // The kinds docs/protocol.md § Messages lists, as the page names them; text has no word.
+  const KIND = { text: "", task: "任务", question: "问题", answer: "回答", doc: "文档", file: "文件", card: "名片", ack: "回执", bye: "告别", roster: "成员变动" };
 
   // peer-e2e-v1, as docs/protocol.md fixes it.
   const SUITE = "peer-e2e-v1";
@@ -248,6 +330,9 @@
     return keys.every((k) => typeof k === "string") ? keys : null;
   }
 
+  // Every key string an envelope names, readable or not: what 详情 lists.
+  const envKeys = (env) => Array.isArray(env.to) ? env.to.map((s) => s && s.key).filter((k) => typeof k === "string") : [];
+
   // null when the envelope has no stanza for this key, else {plain} or {failure}.
   async function openEnvelope(env, me) {
     const stanza = env.to.find((s) => s.key === me.pub);
@@ -334,6 +419,7 @@
   let registered = null;   // whether the card lists held.pub; null until a replay says
   let conn = "connecting", retryIn = 0;
   const records = new Map();
+  const open = new Set();  // ids whose 详情 the reader opened; survives a rebuild
 
   // This browser's key for the party: the stored one, else a new one, stored
   // before it is used. null when the browser has no X25519 or cannot keep a
@@ -461,26 +547,120 @@
     return e;
   }
 
-  function encryptedBody(r, env) {
-    const keys = env && recipients(env);
-    if (!keys) return el("div", "body failed", T.unreadable);
-    const result = held && held.results.get(r.body);
-    if (!result) return el("div", "body locked", T.locked(keys));
-    if (result.failure) return el("div", "body failed", result.failure);
-    return el("div", "body opened", result.plain);
+  const timeFmt = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const dayFmt = new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" });
+  const dayYearFmt = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" });
+  const dayKey = (d) => d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+
+  function dayLabel(d) {
+    const now = new Date();
+    if (dayKey(d) === dayKey(now)) return T.today;
+    const y = new Date(now);
+    y.setDate(now.getDate() - 1);
+    if (dayKey(d) === dayKey(y)) return T.yesterday;
+    return (d.getFullYear() === now.getFullYear() ? dayFmt : dayYearFmt).format(d);
   }
 
-  function bodyOf(r) {
+  // An address is "<party id>/<agent>" or a bare party id (docs/protocol.md § Messages).
+  function address(s) {
+    if (typeof s !== "string") return { party: "", agent: "" };
+    const i = s.indexOf("/");
+    return i < 0 ? { party: s, agent: "" } : { party: s.slice(0, i), agent: s.slice(i + 1) };
+  }
+  const shortId = (id) => id.length > 20 ? id.slice(0, 12) + "…" + id.slice(-4) : id;
+  const kindWord = (k) => k in KIND ? KIND[k] : typeof k === "string" && k.startsWith("vnd.") ? T.vendor : String(k);
+
+  function size(n) {
+    n = Number(n);
+    if (!(n >= 0)) return "";
+    if (n < 1024) return n + T.bytes;
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+
+  function encryptedBody(r, env) {
+    const keys = env && recipients(env);
+    if (!keys) return [el("div", "body failed", T.unreadable)];
+    const result = held && held.results.get(r.body);
+    if (!result) return [el("div", "body locked", held ? T.locked(keys.length) : T.lockedNoKey(keys.length))];
+    if (result.failure) return [el("div", "body failed", result.failure)];
+    return [el("div", "body opened", result.plain), el("div", "note", T.decrypted)];
+  }
+
+  // The body as the reader sees it, with a note under it when there is one.
+  function bodyOf(r, env) {
     const b = r.body;
-    const env = envelope(b);
     if (env || r.e2e === true) return encryptedBody(r, env);
-    if (typeof b === "string") return el("div", "body", b);
-    if (b && b.event === "card") return el("div", "body", T.card);
+    if (typeof b === "string") return [el("div", "body", b)];
+    if (b && b.event === "card") return [el("div", "body event", T.card)];
     if (b && typeof b.name === "string") {
-      const mime = typeof b.mime === "string" && b.mime ? " · " + b.mime : "";
-      return el("div", "body file", b.name + " · " + Number(b.size) + T.bytes + mime + " · sha256 " + String(b.sha256));
+      const d = el("div", "body file");
+      d.append(el("span", "name", b.name), " · " + size(b.size) + (typeof b.mime === "string" && b.mime ? " · " + b.mime : ""));
+      return [d];
     }
-    return el("div", "body", JSON.stringify(b));
+    if (b && typeof b.error === "string") return [el("div", "body bad", T.badAttachment)];
+    return [el("div", "body", JSON.stringify(b))];
+  }
+
+  // 详情: the record's fields, what every host sees first, the encrypted part after.
+  function detailsOf(r, env) {
+    const d = el("details", "more");
+    d.append(el("summary", "", T.details));
+    const add = (dl, k, v, mono) => dl.append(el("dt", "", k), el("dd", mono ? "mono" : "", v));
+    const plain = el("dl");
+    add(plain, T.id, r.id, true);
+    const word = kindWord(r.kind);
+    add(plain, T.kind, word && word !== String(r.kind) ? word + " · " + String(r.kind) : String(r.kind));
+    add(plain, T.from, String(r.from), true);
+    add(plain, T.to, typeof r.to === "string" ? r.to : T.none, true);
+    add(plain, T.at, String(r.at), true);
+    if (r.truncated === true) add(plain, T.cut, T.cutNote);
+    if (r.body && typeof r.body.sha256 === "string") add(plain, "sha256", r.body.sha256, true);
+    d.append(el("p", "group", T.plainPart), plain);
+    if (env) {
+      const enc = el("dl");
+      add(enc, T.suite, String(env.suite), true);
+      const keys = el("dd", "mono");
+      for (const k of envKeys(env)) {
+        const line = el("div", "", k);
+        if (held && k === held.pub) line.append(" ", el("span", "mine", T.mine));
+        keys.append(line);
+      }
+      if (!keys.childElementCount) keys.textContent = T.none;
+      enc.append(el("dt", "", T.keys), keys);
+      const ct = typeof env.body === "string" ? env.body : "";
+      const n = ct.length ? (ct.length * 3) / 4 - (ct.endsWith("==") ? 2 : ct.endsWith("=") ? 1 : 0) : 0;
+      add(enc, T.cipher, (n ? n + T.bytes + " · " : "") + (ct || T.none), true);
+      d.append(el("p", "group", T.encPart), enc);
+    }
+    d.open = open.has(r.id);
+    d.addEventListener("toggle", () => { if (d.open) open.add(r.id); else open.delete(r.id); });
+    return d;
+  }
+
+  function rowOf(r) {
+    const out = r.dir === "out";
+    const li = el("li", out ? "msg own" : "msg");
+    li.dataset.id = r.id;
+    const sender = address(r.from);
+    const other = address(out ? r.to : r.from);
+    const head = el("div", "head");
+    head.append(el("span", "who", (out ? T.ours : T.theirs) + (sender.agent ? " · " + sender.agent : "")));
+    const word = kindWord(r.kind);
+    if (word) head.append(el("span", "kind", word));
+    if (other.party) {
+      const id = el("span", "id", shortId(other.party));
+      id.title = other.party;
+      head.append(id);
+    }
+    if (r.truncated === true) head.append(el("span", "cut", T.truncated));
+    const t = el("time", "", timeFmt.format(new Date(r.at)));
+    t.dateTime = r.at;
+    t.title = r.at;
+    head.append(t);
+    const env = envelope(r.body);
+    li.append(head, ...bodyOf(r, env), detailsOf(r, env));
+    return li;
   }
 
   function connText() {
@@ -503,27 +683,36 @@
     return text;
   }
 
+  // One rebuild per frame, however many records arrive in between. The list
+  // follows the newest record only while the reader is already at the end.
+  let queued = false;
   function render() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(paint);
+  }
+
+  function paint() {
+    queued = false;
     const list = $("list");
+    const atEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
     const shown = [...records.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
     list.replaceChildren();
+    let day = null;
     for (const r of shown) {
-      const li = el("li");
-      li.dataset.id = r.id;
-      const meta = el("div", "meta");
-      const dir = r.dir === "out" ? "out" : "in";
-      meta.append(
-        el("span", "dir " + dir, dir === "in" ? T.received : T.sent),
-        el("span", "kind", String(r.kind)),
-        el("time", "", new Date(r.at).toLocaleString()),
-        el("span", "", String(r.from) + " → " + String(r.to)),
-      );
-      if (r.truncated === true) meta.append(el("span", "cut", T.truncated));
-      li.append(meta, bodyOf(r));
-      list.append(li);
+      const d = new Date(r.at);
+      if (dayKey(d) !== day) {
+        day = dayKey(d);
+        list.append(el("li", "day", dayLabel(d)));
+      }
+      list.append(rowOf(r));
     }
     $("state").textContent = connText();
     $("keystate").textContent = keyText(list);
+    const empty = $("empty");
+    empty.textContent = conn === "waiting" ? T.emptyWaiting : T.emptyLive;
+    empty.hidden = shown.length > 0 || (conn !== "live" && conn !== "waiting");
+    if (shown.length && atEnd) list.lastElementChild.scrollIntoView({ block: "end" });
   }
 
   async function start() {
