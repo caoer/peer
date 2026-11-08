@@ -1,7 +1,9 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	// The peer protocol's Worker (src/index.ts): the relay at /peer on
-	// peer.0xtau.com, on the caoer account. Secrets: RELAY_LOGIN.
+	// The peer protocol's Worker (src/index.ts): the relay at /peer, the
+	// reader feed at /feed and the Telegram forward at /forward on
+	// peer.0xtau.com, on the caoer account. Secrets: RELAY_LOGIN,
+	// FORWARD_SECRET, FORWARD_TARGETS, TG_BOT_TOKEN.
 	"name": "peer",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-07-01",
@@ -20,7 +22,8 @@
 			"simple": { "limit": 100, "period": 10 }
 		}
 	],
-	// One instance per channel, named `p/<id>`, and one per room, named `r/<id>`.
+	// One instance per channel, named `p/<id>`, one per room, named `r/<id>`,
+	// and one per party's reader feed, named `feed/<party id>`.
 	"durable_objects": {
 		"bindings": [
 			{
@@ -30,6 +33,10 @@
 			{
 				"name": "PEER_ROOM",
 				"class_name": "PeerRoom"
+			},
+			{
+				"name": "PEER_FEED",
+				"class_name": "PeerFeed"
 			}
 		]
 	},
@@ -43,6 +50,10 @@
 		{
 			"tag": "v2",
 			"new_sqlite_classes": ["PeerRoom"]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": ["PeerFeed"]
 		}
 	]
 }

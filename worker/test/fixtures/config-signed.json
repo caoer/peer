@@ -1,0 +1,11 @@
+{
+  "party": "ed25519:8i40su8tzHRqmQgV5SBgwp_huLsD84ypLzgfuzfAdgk",
+  "put": {
+    "body": "{\"v\":1,\"party\":\"ed25519:8i40su8tzHRqmQgV5SBgwp_huLsD84ypLzgfuzfAdgk\",\"at\":\"2026-11-08T16:00:00Z\",\"source\":\"sha256:cd35905d0ac191009ae2b586e75abd7d702afbf5d8afa7910f1b3fffc7ce7da1\",\"readers\":[\"sha256:feca0b4ae9364a189834533bbc41109038dc153ce19fb773488ab1e57a0553dd\",\"sha256:837cf6083926e50052b44525deaa0d1e791c8d1b99c6b41153c312bac1f3f8a6\"]}",
+    "signature": "uAhuWZYwf123Jr1dO7uGBDQciIz3YYuXdx0FBmUAUOD_aG3hJwPF_Agi2D9sgtz2_l6wyliGFMc58Bb00PXZDA"
+  },
+  "get": {
+    "at": "2026-11-08T16:00:30Z",
+    "signature": "lf_UX2otPPNelyJhWYZu1h39oK9gHDFwO9G6kv3NA_nVaCbmBZVmDz6h_f5AovLGZLu1aTjdWAa9MkuO_tgRDw"
+  }
+}
