@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-Qfhq/FBeWltl+IsYUCE0aazkHWIxY6nPOfyR3wDaPxk='; style-src 'sha256-Y4PaYvxDs1m/bSDAea+5RxRtBXR6RiaXkXxnAk2ghKU='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-g91B7vh8Ya8VS+8VN9did+UqAIz5d/YDyrRhRhVZy+c='; style-src 'sha256-3D3AlTq3X13b8h2qJTzdp8kq4tqFfHEty5UQK/A8ItI='; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f6f2">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1f1e1c">
@@ -110,16 +110,20 @@
   .more { margin-top: .25rem; font-size: .75rem; }
   .more summary { color: var(--fg-subtle); font-weight: 500; }
   .group { margin: .75rem 0 0; font-size: .75rem; font-weight: 500; color: var(--fg-muted); }
-  .more dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: .375rem 0 0; font-size: .8125rem; }
+  .more dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: .5rem 0 0; font-size: .8125rem; }
   .more dt { color: var(--fg-subtle); }
   .more dd { margin: 0; overflow-wrap: anywhere; }
   .mine { font-family: var(--sans); color: var(--ok); }
   #guide { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: .875rem; color: var(--fg-muted); }
   #guide ol { margin: .5rem 0 0; padding-left: 1.25rem; }
   #guide li { padding: .2rem 0; }
+  @media (hover: hover) {
+    summary:hover { color: var(--fg); }
+    button:hover:enabled { border-color: var(--fg-muted); }
+  }
   @media (pointer: coarse) {
     button, #secret { height: 2.75rem; }
-    summary { padding: .5rem 0; }
+    summary { padding: .8125rem 0; margin: -.4375rem 0; }
   }
 </style>
 <header>
@@ -193,7 +197,7 @@
     vendor: "自定义",
     card: "交换了名片",
     badAttachment: "附件信息无法读取",
-    bytes: " 字节",
+    bytes: "\u00a0字节",
     today: "今天",
     yesterday: "昨天",
     emptyLive: "还没有消息。主机在线时，收到和发出的消息会出现在这里。",
@@ -574,8 +578,8 @@
     n = Number(n);
     if (!(n >= 0)) return "";
     if (n < 1024) return n + T.bytes;
-    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
-    return (n / 1048576).toFixed(1) + " MB";
+    if (n < 1048576) return (n / 1024).toFixed(1) + "\u00a0KB";
+    return (n / 1048576).toFixed(1) + "\u00a0MB";
   }
 
   function encryptedBody(r, env) {

@@ -331,7 +331,7 @@ async function run() {
     plain, vector: vectorLocked, "two-keys": lockedLine(2), indented: vectorLocked,
     tampered: vectorLocked, "bad-enc": vectorLocked, "other-key": lockedLine(1),
     "other-suite": BAD, "no-stanzas": BAD, "e2e-two": e2eTwo,
-    file: file.name + " · 179.1 KB · " + file.mime,
+    file: file.name + " · 179.1\u00a0KB · " + file.mime,
   };
 
   // 1. A first open: a key is born, the hello carries it, the card does not list it yet.
@@ -426,7 +426,7 @@ async function run() {
   check(await inRow("tampered", ".note") === null && await inRow("plain", ".note") === null, "a failed or plain record carries no decrypted note");
   check(await inRow("vector", "details .mine") === MINE, "详情 marks this browser's key among the recipients");
   await shots("decrypted");
-  await evaluate(`document.querySelector('#list li[data-id="vector"] details').open = true; true`);
+  await evaluate(`document.querySelector('#list li[data-id="vector"] details').open = true; document.querySelector('#list li[data-id="vector"]').scrollIntoView(); true`);
   await sleep(100);
   await shots("details");
   push(P1, { rec: live });
