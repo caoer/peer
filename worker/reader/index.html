@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self' wss://peer.0xtau.com; script-src 'sha256-P7iUWeaGp/QdyiA9huA+X9+sMyMUX8kLfG3DlruZJWA='; style-src 'sha256-J/Y6ybBaXpgCz1gaVjoRalEy6iLG8/kaEOXQYYLKAeU='; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>peer · 消息</title>
+<!--
+  The Peer Protocol reader (docs/protocol.md, Reader feed and forward), served
+  by the peer worker at https://peer.0xtau.com/. A reader link is
+
+    https://peer.0xtau.com/#p=<party id>&t=<reader token>
+
+  and its fragment never reaches a server. The page opens one WebSocket to
+  /feed/<party id> on its own origin, sends the reader token and this
+  browser's public key in the hello frame, and lists the peer-timeline@1
+  records the party's hosts send over it: a replay when it connects, then each
+  message live. It stores no message. Every string from a record reaches the
+  DOM through textContent.
+
+  The key. On the first open of a party's link this page generates an X25519
+  pair with crypto.subtle, the secret half non-extractable, and keeps it in
+  this browser's IndexedDB (database peer-reader, store keys, record <party
+  id>). The public half rides on every hello; the party's root machine adds it
+  to the party's card, and messages sealed after that open here. The advanced
+  field imports an x25519-secret: string as non-extractable too, in place of
+  the generated key. No code path can export a secret: every secret key is
+  generated or imported non-extractable, and the one exportKey call reads a
+  public key.
+
+  To audit this page, read this file: it is all the code the page runs. The
+  policy above admits only the one script and the one style below, by hash
+  (internal/e2e/page_test.go recomputes both), and connections to this site
+  only; wss://peer.0xtau.com is named beside 'self' because Safari has not
+  always matched a wss: URL to 'self'. Decryption is HPKE and AES-GCM through
+  the browser's crypto.subtle, with no other library.
+-->
+<style>
+  :root { color-scheme: light dark; --muted: #8a8f98; --line: #8a8f9833; --in: #2f7d4f; --out: #3a63b8; --warn: #b4531f; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  #state { color: var(--muted); font-size: .9rem; }
+  ol { list-style: none; padding: 0; margin: 1.5rem 0; }
+  li { border-top: 1px solid var(--line); padding: .75rem 0; }
+  .meta { display: flex; gap: .75rem; flex-wrap: wrap; font-size: .85rem; color: var(--muted); }
+  .dir { font-weight: 600; }
+  .dir.in { color: var(--in); }
+  .dir.out { color: var(--out); }
+  .kind { font-family: ui-monospace, monospace; }
+  .cut { color: var(--warn); }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .25rem; }
+  .file { font-family: ui-monospace, monospace; font-size: .9rem; }
+  .locked { color: var(--muted); font-family: ui-monospace, monospace; font-size: .9rem; }
+  .failed { color: var(--warn); font-family: ui-monospace, monospace; font-size: .9rem; }
+  .opened { border-left: 3px solid var(--in); padding-left: .6rem; }
+  button { font: inherit; }
+  #keys { border: 1px solid var(--line); border-radius: .4rem; padding: .75rem 1rem; margin-top: 1rem; }
+  #keystate, #keynote { font-size: .9rem; margin: 0; overflow-wrap: anywhere; }
+  #keynote { color: var(--warn); margin-top: .35rem; }
+  #keynote:empty { display: none; }
+  #advanced { margin-top: .6rem; font-size: .9rem; }
+  #advanced p { margin: .4rem 0 0; color: var(--muted); }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .5rem; }
+  #secret { flex: 1 1 18rem; min-width: 0; font: .9rem ui-monospace, monospace; padding: .25rem .4rem; }
+  #guide { margin-top: 1rem; font-size: .9rem; }
+  #guide li { border: 0; padding: .2rem 0; }
+  #guide ol { margin: .5rem 0; padding-left: 1.25rem; list-style: decimal; }
+</style>
+<header>
+  <h1>Peer 消息</h1>
+  <span id="state" role="status">连接中…</span>
+</header>
+<section id="keys" aria-label="钥匙">
+  <p id="keystate" role="status"></p>
+  <p id="keynote" role="alert"></p>
+  <details id="advanced">
+    <summary>高级：导入已有的私钥</summary>
+    <div class="row">
+      <input id="secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="x25519-secret:…" aria-label="私钥" disabled>
+      <button id="import" type="button" disabled>导入</button>
+    </div>
+    <p>导入的私钥替换本浏览器生成的钥匙，同样存成不可导出。只导入 <kbd>peer e2e keygen</kbd> 生成、由你自己保管的私钥。</p>
+  </details>
+</section>
+<details id="guide">
+  <summary>这个页面怎样处理加密消息</summary>
+  <ol>
+    <li>锁着的消息是加密给它那一行列出的公钥的，只有对应的私钥能打开；本站、agent 和转送它的主机经手的都是密文。没加密的消息以明文经过本站的转送程序，转送程序不保存消息。</li>
+    <li>本浏览器第一次打开这个链接时，会自己生成一把钥匙。私钥留在本浏览器里，不能导出，也不发往任何地方；公钥随连接交给你方的主机，由你方的管理机器登记到名片上。登记之后发给你的加密消息，在这里自动解密。上面一行显示钥匙是否已登记。</li>
+    <li>每个浏览器一把钥匙，都登记在名片上。换一个浏览器，或清除了本站的数据（Safari 七天没打开本站也会清除），会生成一把新钥匙；新钥匙只能读登记之后加密的消息，旧钥匙不会带过来。</li>
+    <li>不要把私钥贴到别处，也不要交给 agent：agent 的模型服务商能看到 agent 看到的一切。</li>
+    <li>你不必信任这个页面。查看源代码就能读到它的全部代码：只有一个文件，没有外部代码；安全策略只允许它连接本站，它唯一的连接是消息通道。本站可能在之后某次加载时换一个文件，所以请把这个文件的 sha256 与 Peer Protocol 文档里写的对照，或者在自己的机器上用 <kbd>peer e2e decrypt</kbd> 解密。</li>
+  </ol>
+</details>
+<ol id="list"></ol>
+<script>
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const PARTY_RE = /^ed25519:[A-Za-z0-9_-]{43}$/;
+  const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+  const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+  const DB = "peer-reader";
+  const STORE = "keys";
+  const PING_MS = 30000;
+  const BACKOFF_MAX_MS = 30000;
+  const EXPIRED = 4401;
+
+  // Every line the page shows. docs/protocol.md names the state lines.
+  const T = {
+    badLink: "链接不完整：地址里要有 #p=<主体 id>&t=<读者令牌>",
+    connecting: "连接中…",
+    waitingHost: "等待主机",
+    expired: "链接已失效",
+    retry: (s) => "连接断开，" + s + " 秒后重连",
+    live: (n) => "已连接 · " + n + " 条消息",
+    truncated: "已截断",
+    preparing: "正在准备钥匙…",
+    checking: "钥匙在本浏览器里，等待主机核对名片",
+    registered: "钥匙已登记到名片",
+    pending: "钥匙已生成，等待登记到名片",
+    noStore: "此浏览器存不下钥匙，加密消息保持锁定",
+    noX25519: "此浏览器不能解密：缺少 X25519（Chrome 133+、Firefox 130+、Safari 17+）",
+    opened: (a, b) => " · 已解密 " + a + " / " + b + " 条加密消息",
+    newKey: "这是新钥匙",
+    imported: "已导入，替换了本浏览器原来的钥匙",
+    importedTab: "已导入，只在这个标签页里有效：此浏览器存不下钥匙",
+    notSecret: "这不是私钥：私钥以 x25519-secret: 开头，后面还有 43 个字符。",
+    wrongKey: "这把钥匙打不开",
+    unreadable: "无法读取的加密消息",
+    locked: (keys) => "已锁定 — 加密给 " + keys.join(", "),
+    received: "收到",
+    sent: "发出",
+    card: "交换了名片",
+    bytes: " 字节",
+  };
+
+  // peer-e2e-v1, as docs/protocol.md fixes it.
+  const SUITE = "peer-e2e-v1";
+  const SUITE_RE = /^[A-Za-z0-9._-]{1,64}$/;
+  const PUBLIC_PREFIX = "x25519:";
+  const SECRET_PREFIX = "x25519-secret:";
+
+  const utf8 = (s) => new TextEncoder().encode(s);
+  const LABEL = utf8("peer e2e v1");
+  const EMPTY = new Uint8Array(0);
+  const X25519 = { name: "X25519" };
+  // The PKCS#8 wrapper of a raw 32-byte X25519 secret.
+  const PKCS8_PREFIX = new Uint8Array([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20]);
+  // The X25519 base point, u = 9. X25519(secret, 9) is the secret's public key
+  // (RFC 7748 §6.1), so an imported secret's public half is derived through
+  // deriveBits and no extractable copy of the secret is ever made.
+  const BASE_POINT = new Uint8Array(32);
+  BASE_POINT[0] = 9;
+
+  function concat(...parts) {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out;
+  }
+  const u16 = (n) => new Uint8Array([n >> 8, n & 255]);
+
+  // HPKE (RFC 9180) mode Base: DHKEM(X25519, HKDF-SHA256) 0x0020, HKDF-SHA256
+  // 0x0001, AES-256-GCM 0x0002. Only the receiving half.
+  const HPKE_V1 = utf8("HPKE-v1");
+  const KEM_ID = concat(utf8("KEM"), u16(0x0020));
+  const SUITE_ID = concat(utf8("HPKE"), u16(0x0020), u16(0x0001), u16(0x0002));
+
+  async function hmac(keyBytes, data) {
+    const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return new Uint8Array(await crypto.subtle.sign("HMAC", key, data));
+  }
+
+  // HKDF-Extract. An absent salt is 32 zero bytes (RFC 5869), which is also the
+  // only form crypto.subtle accepts: it refuses a zero-length HMAC key.
+  function labeledExtract(id, salt, label, ikm) {
+    return hmac(salt.length ? salt : new Uint8Array(32), concat(HPKE_V1, id, utf8(label), ikm));
+  }
+
+  // HKDF-Expand. Every output here is at most one 32-byte block.
+  async function labeledExpand(id, prk, label, info, length) {
+    const block = await hmac(prk, concat(u16(length), HPKE_V1, id, utf8(label), info, new Uint8Array([1])));
+    return block.subarray(0, length);
+  }
+
+  async function aesOpen(rawKey, iv, aad, data) {
+    const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad, tagLength: 128 }, key, data));
+  }
+
+  // Opens one stanza and returns the content key K. Throws when it does not open.
+  async function openStanza(enc, ct, me) {
+    const pkE = await crypto.subtle.importKey("raw", enc, X25519, false, []);
+    const dh = new Uint8Array(await crypto.subtle.deriveBits({ name: "X25519", public: pkE }, me.key, 256));
+    const prk = await labeledExtract(KEM_ID, EMPTY, "eae_prk", dh);
+    const shared = await labeledExpand(KEM_ID, prk, "shared_secret", concat(enc, me.pubRaw), 32);
+
+    const info = concat(LABEL, me.pubRaw);
+    const pskIdHash = await labeledExtract(SUITE_ID, EMPTY, "psk_id_hash", EMPTY);
+    const infoHash = await labeledExtract(SUITE_ID, EMPTY, "info_hash", info);
+    const context = concat(new Uint8Array([0]), pskIdHash, infoHash);
+    const secret = await labeledExtract(SUITE_ID, shared, "secret", EMPTY);
+    const key = await labeledExpand(SUITE_ID, secret, "key", context, 32);
+    const nonce = await labeledExpand(SUITE_ID, secret, "base_nonce", context, 12);
+    return aesOpen(key, nonce, EMPTY, ct);
+  }
+
+  // Standard base64 with padding; refuses non-canonical trailing bits. Returns
+  // null on anything else, and on a length other than size when size is given.
+  function b64(s, size) {
+    if (typeof s !== "string" || s.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return null;
+    let bin;
+    try { bin = atob(s); } catch (e) { return null; }
+    if (btoa(bin) !== s) return null;
+    const out = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return size === undefined || out.length === size ? out : null;
+  }
+
+  // The 32 bytes of "<prefix><43 base64url, no padding>", or null.
+  function keyBytes(s, prefix) {
+    if (typeof s !== "string" || !s.startsWith(prefix)) return null;
+    const rest = s.slice(prefix.length);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(rest)) return null;
+    return b64(rest.replace(/-/g, "+").replace(/_/g, "/") + "=", 32);
+  }
+
+  // "x25519:<43 base64url>" of a 32-byte public key.
+  const publicText = (bytes) =>
+    PUBLIC_PREFIX + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  // The envelope object when a body is one, else null. The same test as
+  // Detect in internal/e2e: JSON whitespace only, exact member names.
+  function envelope(body) {
+    if (typeof body !== "string") return null;
+    const b = body.replace(/^[ \t\r\n]+/, "");
+    if (!b.startsWith('{"e2e":')) return null;
+    let o;
+    try { o = JSON.parse(b); } catch (e) { return null; }
+    if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+    return o.e2e === 1 && typeof o.suite === "string" && SUITE_RE.test(o.suite) ? o : null;
+  }
+
+  // The stanza keys of an envelope this page can read, or null when it cannot.
+  function recipients(env) {
+    if (env.suite !== SUITE || !Array.isArray(env.to) || !env.to.length || typeof env.body !== "string") return null;
+    const keys = env.to.map((s) => s && s.key);
+    return keys.every((k) => typeof k === "string") ? keys : null;
+  }
+
+  // null when the envelope has no stanza for this key, else {plain} or {failure}.
+  async function openEnvelope(env, me) {
+    const stanza = env.to.find((s) => s.key === me.pub);
+    if (!stanza) return null;
+    const enc = b64(stanza.enc, 32), ct = b64(stanza.ct, 48), body = b64(env.body);
+    if (!enc || !ct || !body) return { failure: T.unreadable };
+    try {
+      const k = await openStanza(enc, ct, me);
+      const plain = await aesOpen(k, new Uint8Array(12), LABEL, body);
+      return { plain: new TextDecoder().decode(plain) };
+    } catch (e) {
+      return { failure: T.wrongKey };
+    }
+  }
+
+  async function openRecord(r, me) {
+    const env = envelope(r.body);
+    if (!env || !recipients(env) || me.results.has(r.body)) return;
+    me.results.set(r.body, await openEnvelope(env, me));
+  }
+
+  // --- The key: one per party in this browser, stored as {key, pub, at}.
+
+  // A fresh pair. The secret half is non-extractable from birth.
+  async function generate() {
+    const pair = await crypto.subtle.generateKey(X25519, false, ["deriveBits"]);
+    const pub = publicText(new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey)));
+    return { key: pair.privateKey, pub, at: new Date().toISOString() };
+  }
+
+  // The stored form of an x25519-secret: string, or null when it is not one.
+  async function importSecret(text) {
+    const raw = keyBytes(text, SECRET_PREFIX);
+    if (!raw) return null;
+    const der = concat(PKCS8_PREFIX, raw);
+    raw.fill(0);
+    try {
+      const key = await crypto.subtle.importKey("pkcs8", der, X25519, false, ["deriveBits"]);
+      const base = await crypto.subtle.importKey("raw", BASE_POINT, X25519, false, []);
+      const pub = publicText(new Uint8Array(await crypto.subtle.deriveBits({ name: "X25519", public: base }, key, 256)));
+      return { key, pub, at: new Date().toISOString() };
+    } catch (e) {
+      return null;
+    } finally {
+      der.fill(0);
+    }
+  }
+
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error("blocked"));
+    });
+  }
+
+  async function inStore(mode, op) {
+    const db = await openDB();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, mode);
+        const req = op(tx.objectStore(STORE));
+        tx.oncomplete = () => resolve(req.result);
+        tx.onerror = tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  const usable = (rec) => !!rec && rec.key instanceof CryptoKey && rec.key.type === "private" &&
+    rec.key.algorithm.name === "X25519" && !!keyBytes(rec.pub, PUBLIC_PREFIX);
+
+  // The key in use, with what it has opened: {key, pub, pubRaw, results}.
+  const hold = (rec) => ({ key: rec.key, pub: rec.pub, pubRaw: keyBytes(rec.pub, PUBLIC_PREFIX), results: new Map() });
+
+  // --- Page state.
+
+  let party = null, token = null;
+  let held = null;
+  let keyProblem = null;   // T.noStore or T.noX25519 when there is no key
+  let registered = null;   // whether the card lists held.pub; null until a replay says
+  let conn = "connecting", retryIn = 0;
+  const records = new Map();
+
+  // This browser's key for the party: the stored one, else a new one, stored
+  // before it is used. null when the browser has no X25519 or cannot keep a
+  // key: a key that is not kept would be a new one on every load.
+  async function setupKey() {
+    let rec;
+    try {
+      rec = await inStore("readonly", (s) => s.get(party));
+    } catch (e) {
+      keyProblem = T.noStore;
+      return null;
+    }
+    if (usable(rec)) return hold(rec);
+    try {
+      rec = await generate();
+    } catch (e) {
+      keyProblem = T.noX25519;
+      return null;
+    }
+    try {
+      await inStore("readwrite", (s) => s.put(rec, party));
+    } catch (e) {
+      keyProblem = T.noStore;
+      return null;
+    }
+    $("keynote").textContent = T.newKey;
+    return hold(rec);
+  }
+
+  async function importFromField() {
+    const input = $("secret");
+    const text = input.value.trim();
+    input.value = "";
+    const rec = await importSecret(text);
+    if (!rec) { $("keynote").textContent = T.notSecret; return; }
+    let note = T.imported;
+    try {
+      await inStore("readwrite", (s) => s.put(rec, party));
+    } catch (e) {
+      note = T.importedTab;
+    }
+    held = hold(rec);
+    keyProblem = null;
+    registered = null;
+    $("keynote").textContent = note;
+    for (const r of records.values()) await openRecord(r, held);
+    render();
+    reconnect();
+  }
+
+  // --- The feed socket.
+
+  let sock = null, retries = 0, retryTimer = 0;
+  let work = Promise.resolve();
+
+  function connect() {
+    clearTimeout(retryTimer);
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/feed/" + party);
+    sock = ws;
+    conn = "connecting";
+    render();
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ hello: "viewer", token, key: held ? held.pub : undefined }));
+    };
+    ws.onmessage = (ev) => {
+      if (ws === sock) work = work.then(() => onFrame(ev.data)).catch(() => {});
+    };
+    ws.onclose = (ev) => {
+      if (ws !== sock) return;
+      sock = null;
+      if (ev.code === EXPIRED) { conn = "expired"; render(); return; }
+      const wait = Math.min(BACKOFF_MAX_MS, 1000 * 2 ** retries++);
+      conn = "retry";
+      retryIn = Math.round(wait / 1000);
+      render();
+      retryTimer = setTimeout(connect, wait);
+    };
+  }
+
+  // A new hello, after the key changed.
+  function reconnect() {
+    const old = sock;
+    sock = null;
+    if (old) old.close(1000);
+    retries = 0;
+    connect();
+  }
+
+  function record(r) {
+    if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+    if (typeof r.id !== "string" || !ID_RE.test(r.id)) return null;
+    return typeof r.at === "string" && !isNaN(Date.parse(r.at)) ? r : null;
+  }
+
+  async function onFrame(data) {
+    if (typeof data !== "string" || data === "pong") return;
+    let f;
+    try { f = JSON.parse(data); } catch (e) { return; }
+    if (!f || typeof f !== "object") return;
+    if (f.ok === true) {
+      retries = 0;
+      conn = Number(f.sources) > 0 ? "live" : "waiting";
+    }
+    if ("rec" in f) {
+      const r = record(f.rec);
+      if (r) {
+        records.set(r.id, r);
+        if (held) await openRecord(r, held);
+        conn = "live";
+      }
+    }
+    if (typeof f.replay_done === "string" && Array.isArray(f.readers)) {
+      registered = held ? f.readers.includes(held.pub) : null;
+      conn = "live";
+    }
+    render();
+  }
+
+  // --- Rendering.
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function encryptedBody(r, env) {
+    const keys = env && recipients(env);
+    if (!keys) return el("div", "body failed", T.unreadable);
+    const result = held && held.results.get(r.body);
+    if (!result) return el("div", "body locked", T.locked(keys));
+    if (result.failure) return el("div", "body failed", result.failure);
+    return el("div", "body opened", result.plain);
+  }
+
+  function bodyOf(r) {
+    const b = r.body;
+    const env = envelope(b);
+    if (env || r.e2e === true) return encryptedBody(r, env);
+    if (typeof b === "string") return el("div", "body", b);
+    if (b && b.event === "card") return el("div", "body", T.card);
+    if (b && typeof b.name === "string") {
+      const mime = typeof b.mime === "string" && b.mime ? " · " + b.mime : "";
+      return el("div", "body file", b.name + " · " + Number(b.size) + T.bytes + mime + " · sha256 " + String(b.sha256));
+    }
+    return el("div", "body", JSON.stringify(b));
+  }
+
+  function connText() {
+    if (conn === "badlink") return T.badLink;
+    if (conn === "expired") return T.expired;
+    if (conn === "retry") return T.retry(retryIn);
+    if (conn === "waiting") return T.waitingHost;
+    if (conn === "live") return T.live(records.size);
+    return T.connecting;
+  }
+
+  function keyText(list) {
+    if (conn === "badlink") return "";
+    if (keyProblem) return keyProblem;
+    if (!held) return T.preparing;
+    let text = registered === true ? T.registered : registered === false ? T.pending : T.checking;
+    const opened = list.querySelectorAll(".opened").length;
+    const closed = list.querySelectorAll(".locked, .failed").length;
+    if (opened + closed) text += T.opened(opened, opened + closed);
+    return text;
+  }
+
+  function render() {
+    const list = $("list");
+    const shown = [...records.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
+    list.replaceChildren();
+    for (const r of shown) {
+      const li = el("li");
+      li.dataset.id = r.id;
+      const meta = el("div", "meta");
+      const dir = r.dir === "out" ? "out" : "in";
+      meta.append(
+        el("span", "dir " + dir, dir === "in" ? T.received : T.sent),
+        el("span", "kind", String(r.kind)),
+        el("time", "", new Date(r.at).toLocaleString()),
+        el("span", "", String(r.from) + " → " + String(r.to)),
+      );
+      if (r.truncated === true) meta.append(el("span", "cut", T.truncated));
+      li.append(meta, bodyOf(r));
+      list.append(li);
+    }
+    $("state").textContent = connText();
+    $("keystate").textContent = keyText(list);
+  }
+
+  async function start() {
+    const h = new URLSearchParams(location.hash.slice(1));
+    party = h.get("p");
+    token = h.get("t");
+    if (!PARTY_RE.test(party || "") || !TOKEN_RE.test(token || "")) {
+      conn = "badlink";
+      render();
+      return;
+    }
+    render();
+    held = await setupKey();
+    if (keyProblem !== T.noX25519) for (const id of ["secret", "import"]) $(id).disabled = false;
+    connect();
+  }
+
+  $("import").addEventListener("click", importFromField);
+  $("secret").addEventListener("keydown", (ev) => { if (ev.key === "Enter") importFromField(); });
+  window.addEventListener("hashchange", () => location.reload());
+  setInterval(() => { if (sock && sock.readyState === WebSocket.OPEN) sock.send("ping"); }, PING_MS);
+  start();
+})();
+</script>
+</html>

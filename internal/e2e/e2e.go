@@ -4,7 +4,7 @@
 // read it. Seats, relays and hosts carry the envelope and see ciphertext.
 //
 // The wire format is fixed in docs/protocol.md; the browser renderer
-// docs/timeline/index.html implements the same bytes with crypto.subtle.
+// worker/reader/index.html implements the same bytes with crypto.subtle.
 package e2e
 
 import (

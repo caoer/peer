@@ -1,6 +1,7 @@
-// records.mjs — the store decrypt-driver.mjs serves at /d/<slug>, built from
-// the committed test vector. Everything here is a throwaway: the vector's key
-// is published in docs/protocol.md and `other` is made fresh on each run.
+// records.mjs — the records decrypt-driver.mjs's fake feed replays and sends
+// live, built from the committed test vector. Everything here is a throwaway:
+// the vector's key is published in docs/protocol.md and `other` is made fresh
+// on each run.
 import { readFileSync } from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
 
@@ -40,24 +41,29 @@ const bodies = {
 
 const encrypted = new Set(["vector", "two-keys", "indented", "tampered", "bad-enc", "other-key", "other-suite", "no-stanzas"]);
 
-export const records = Object.entries(bodies).map(([id, body], i) => ({
+const record = (id, i, fields) => ({
   id,
   dir: i % 2 ? "out" : "in",
   kind: "text",
   from: "fp-from",
   to: "fp-to",
   at: `2026-11-08T12:00:${String(i).padStart(2, "0")}Z`,
-  body,
-  ...(encrypted.has(id) ? { e2e: true } : {}),
-}));
-
-// The shape the page store answers `?prefix=tl.&values=1` with.
-export const listing = () => ({
-  ok: true,
-  keys: records.map((data, i) => ({
-    key: `tl.chan.${data.dir}.${String(i + 1).padStart(8, "0")}`,
-    value: { schema: "peer-timeline@1", data },
-    version: 1,
-  })),
-  cursor: null,
+  ...fields,
 });
+
+// The peer-timeline@1 data the party's one source replays to a viewer.
+export const records = Object.entries(bodies).map(([id, body], i) =>
+  record(id, i, { body, ...(encrypted.has(id) ? { e2e: true } : {}) }));
+
+// Two records a source sends while the page is open: a plain one, and one
+// whose body the Object cut at 60,000 bytes.
+export const live = record("live", 20, { body: "a message sent while the page was open" });
+export const truncated = record("cut", 21, { body: "a long message, cut by the Object at 60,000 bytes…", truncated: true });
+
+// The frames the Object relays to one viewer on its connect: every record the
+// party's source holds, addressed to that viewer, then the card's current
+// reader keys.
+export const replay = (viewer, readers) => [
+  ...records.map((rec) => ({ rec, to: viewer })),
+  { replay_done: viewer, readers },
+];
