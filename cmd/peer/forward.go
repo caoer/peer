@@ -116,7 +116,8 @@ func forwardBytes(dir string, m *session.Message) ([]byte, error) {
 	return json.Marshal(forwardPost{Peer: counterpart(dir, m), Record: forwardRecord{Schema: timeline.Schema, Data: forwardData{Record: rec, Truncated: cut}}})
 }
 
-// forwardLine is serve's start line: the forward's URL, or off.
+// forwardLine is serve's start line on stderr, the journal: the forward's
+// URL, or off.
 func (p *party) forwardLine() string {
 	if p.cfg.Forward == nil {
 		return "forward: off"

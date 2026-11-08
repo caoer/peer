@@ -324,9 +324,8 @@ func TestForwardOffSendsNothing(t *testing.T) {
 	trustHooks(t, h)
 	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
 	id, _ := sendOK(t, p.hostDir, "--text", "plain", "ancan")
-	out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	if !strings.HasPrefix(out, "forward: off\n") {
-		t.Errorf("serve:\n%s", out)
+	if code, _, errb := cmd(t, "serve", "--dir", p.guestDir, "--once"); code != 0 || !strings.HasPrefix(errb, "forward: off\n") {
+		t.Errorf("serve: exit %d, stderr %q", code, errb)
 	}
 	sendOK(t, p.guestDir, "--text", "back", "zt")
 	if records(t, deliverDirOf(p.guestDir), "inbox")[id] == nil {
@@ -347,9 +346,9 @@ func TestForward204NotRetried(t *testing.T) {
 	code.Store(http.StatusNoContent)
 	before := h.count()
 	id, _ := sendOK(t, p.hostDir, "--text", "nobody's", "ancan")
-	out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	if !strings.HasPrefix(out, "forward: "+h.URL+"\n") || !strings.Contains(out, "forward zt: "+id+": no target") || h.count() != before+1 {
-		t.Fatalf("%d POSTs:\n%s", h.count()-before, out)
+	code2, out, errb := cmd(t, "serve", "--dir", p.guestDir, "--once")
+	if code2 != 0 || !strings.HasPrefix(errb, "forward: "+h.URL+"\n") || !strings.Contains(out, "forward zt: "+id+": no target") || h.count() != before+1 {
+		t.Fatalf("exit %d, %d POSTs, stderr %q:\n%s", code2, h.count()-before, errb, out)
 	}
 	if q := forwardPending(t, p.guestDir); len(q) != 0 {
 		t.Errorf("pending after a 204: %v", q)
