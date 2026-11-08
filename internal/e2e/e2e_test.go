@@ -348,7 +348,7 @@ func TestKeyStrings(t *testing.T) {
 func TestParseDetails(t *testing.T) {
 	pub, _ := newKey(t)
 	ok := `{"v":1,"suite":"peer-e2e-v1","keys":["` + pub + `"]}`
-	for name, in := range map[string]string{"none": "", "no member": `{"model":"x"}`} {
+	for name, in := range map[string]string{"none": "", "no member": `{"model":"x"}`, "the old name": `{"e2e":{"v":1,"suite":"peer-e2e-v1","keys":["` + pub + `"]}}`} {
 		t.Run(name, func(t *testing.T) {
 			d, err := ParseDetails(json.RawMessage(in))
 			if d != nil || err != nil {
@@ -356,7 +356,7 @@ func TestParseDetails(t *testing.T) {
 			}
 		})
 	}
-	d, err := ParseDetails(json.RawMessage(`{"model":"x","e2e":` + ok + `}`))
+	d, err := ParseDetails(json.RawMessage(`{"model":"x","readers":` + ok + `}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,11 +365,11 @@ func TestParseDetails(t *testing.T) {
 	}
 	for name, in := range map[string]string{
 		"not json":   `{`,
-		"not object": `{"e2e":[]}`,
-		"version":    `{"e2e":{"v":2,"suite":"peer-e2e-v1","keys":["` + pub + `"]}}`,
-		"suite":      `{"e2e":{"v":1,"suite":"other","keys":["` + pub + `"]}}`,
-		"no keys":    `{"e2e":{"v":1,"suite":"peer-e2e-v1","keys":[]}}`,
-		"bad key":    `{"e2e":{"v":1,"suite":"peer-e2e-v1","keys":["x25519:short"]}}`,
+		"not object": `{"readers":[]}`,
+		"version":    `{"readers":{"v":2,"suite":"peer-e2e-v1","keys":["` + pub + `"]}}`,
+		"suite":      `{"readers":{"v":1,"suite":"other","keys":["` + pub + `"]}}`,
+		"no keys":    `{"readers":{"v":1,"suite":"peer-e2e-v1","keys":[]}}`,
+		"bad key":    `{"readers":{"v":1,"suite":"peer-e2e-v1","keys":["x25519:short"]}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if d, err := ParseDetails(json.RawMessage(in)); err == nil {

@@ -43,11 +43,11 @@ func rosterPage(cfg config) (*status.Page, error) {
 
 // peerView is what the party's store says about one peer.
 type peerView struct {
-	pe     roster.Peer
-	root   ed25519.PublicKey // nil while the host waits for the guest's card
-	cursor int64
-	e2e    []string // the e2e keys on its pinned card
-	act    *status.Activity
+	pe      roster.Peer
+	root    ed25519.PublicKey // nil while the host waits for the guest's card
+	cursor  int64
+	readers []string // the e2e keys on its pinned card
+	act     *status.Activity
 }
 
 func (p *party) peerView(ctx context.Context, pe roster.Peer) (*peerView, error) {
@@ -61,7 +61,7 @@ func (p *party) peerView(ctx context.Context, pe roster.Peer) (*peerView, error)
 	}
 	// A card whose keys do not parse is shown as none; send says why.
 	e2eKeys, _ := channelE2EKeys(ch)
-	return &peerView{pe: pe, root: ch.Root(), cursor: ch.Cursor(), e2e: e2eKeys, act: act}, nil
+	return &peerView{pe: pe, root: ch.Root(), cursor: ch.Cursor(), readers: e2eKeys, act: act}, nil
 }
 
 func (v *peerView) party() string {
@@ -154,7 +154,7 @@ type statusJSON struct {
 	SentAt   *time.Time  `json:"sentAt"`
 	Active   bool        `json:"active"`
 	Page     *pageStatus `json:"page,omitempty"`
-	E2E      []string    `json:"e2e,omitempty"`
+	Readers  []string    `json:"readers,omitempty"`
 }
 
 // pageStatus is the peer's row on the roster page as status read it.
@@ -305,7 +305,7 @@ func runStatus(ctx context.Context, dir string, now time.Time) ([]statusJSON, er
 		row := v.row(0, now)
 		s := statusJSON{
 			Name: pe.Name, Party: v.party(), Channel: pe.Channel, Side: row.Side, State: row.State,
-			Cursor: v.cursor, LastAt: row.LastAt, LastKind: row.LastKind, Unread: row.Unread, Active: row.Active, E2E: v.e2e,
+			Cursor: v.cursor, LastAt: row.LastAt, LastKind: row.LastKind, Unread: row.Unread, Active: row.Active, Readers: v.readers,
 		}
 		if !v.act.SentAt.IsZero() {
 			at := v.act.SentAt.UTC()
@@ -343,7 +343,7 @@ func printStatus(w io.Writer, rows []statusJSON, now time.Time) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tPARTY\tSIDE\tSTATE\tCURSOR\tLAST\tUNREAD\tACTIVE\tPAGE\tE2E")
+	fmt.Fprintln(tw, "NAME\tPARTY\tSIDE\tSTATE\tCURSOR\tLAST\tUNREAD\tACTIVE\tPAGE\tREADERS")
 	for _, s := range rows {
 		last := "-"
 		if s.LastAt != nil {
@@ -358,9 +358,9 @@ func printStatus(w io.Writer, rows []statusJSON, now time.Time) {
 			pg = s.Page.String(now)
 		}
 		e2eKeys := "-"
-		if len(s.E2E) > 0 {
-			tails := make([]string, len(s.E2E))
-			for i, k := range s.E2E {
+		if len(s.Readers) > 0 {
+			tails := make([]string, len(s.Readers))
+			for i, k := range s.Readers {
 				tails[i] = tail(k)
 			}
 			e2eKeys = strings.Join(tails, ",")

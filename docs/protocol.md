@@ -204,7 +204,7 @@ It adds no sender authentication, forward secrecy or replay protection of its ow
 | Envelope (message `body`, this key order) | `{"e2e":1,"suite":"peer-e2e-v1","to":[{"key":"x25519:…","enc":"<std base64, 32 B>","ct":"<std base64, 48 B>"}],"body":"<std base64>"}` |
 | Detection | body, leading whitespace trimmed, starts `{"e2e":` and parses with `e2e` = 1 and `suite` matching `[A-Za-z0-9._-]{1,64}`; else plain text |
 | Keys | public `x25519:<43 base64url, no padding>` (also the stanza `key`); secret `x25519-secret:<43 base64url, no padding>` |
-| Card | `details.e2e` = `{"v":1,"suite":"peer-e2e-v1","keys":["x25519:…", …]}` |
+| Card | `details.readers` = `{"v":1,"suite":"peer-e2e-v1","keys":["x25519:…", …]}` |
 | Records | inbox: sixth frontmatter key `e2e: peer-e2e-v1` (seventh after `group`); timeline: `peer-timeline@1` + `"e2e": true`, `body` the envelope string |
 | CLI | `peer e2e keygen` · `peer e2e publish <pub>` · `peer e2e decrypt --key <secret> [file]` · `peer send --encrypt [--to-key <pub>]…` |
 | Vector | `internal/e2e/testdata/vector-v1.json` `{secret, public, plaintext, envelope}`, quoted below |
@@ -212,7 +212,7 @@ It adds no sender authentication, forward secrecy or replay protection of its ow
 
 Base64 is strict: `enc`, `ct` and `body` are standard with padding, keys are base64url without padding, and non-canonical trailing bits are refused. Detection trims space, tab, CR and LF, and matches member names exactly. A plain body that happens to satisfy it is treated as an envelope.
 
-**Publishing a key.** A party lists its keys in the `e2e` member of its card's `details`. The card is root-signed, re-sent on confirmed channels and pinned by the receiver, so a key arrives with the same authority as the card. The clear card on the relay (envelope #0) carries no `details`; a peer learns the keys only after confirmation. A reader refuses a `details.e2e` with another `v`, another `suite`, no keys or a key it cannot parse, and treats the card as having no e2e keys only when the member is absent.
+**Publishing a key.** A party lists its keys in the `readers` member of its card's `details`. The card is root-signed, re-sent on confirmed channels and pinned by the receiver, so a key arrives with the same authority as the card. The clear card on the relay (envelope #0) carries no `details`; a peer learns the keys only after confirmation. A reader refuses a `details.readers` with another `v`, another `suite`, no keys or a key it cannot parse, and treats the card as having no e2e keys only when the member is absent.
 
 **Sealing.**
 
@@ -518,7 +518,7 @@ The frontmatter holds exactly these keys: five for a channel message, `group:` �
 | Feed link | fragment `v1`; another first field is refused | — |
 | Accept proof | label `peer accept proof v1` | — |
 | Verification code | label `peer verification code v2` | — |
-| Card `details.e2e` | `"v": 1`; another value is refused | ignored |
+| Card `details.readers` | `"v": 1`; another value is refused | ignored |
 | Encrypted body envelope | `"e2e": 1`; another value is plain text | ignored |
 | Encrypted body label | `peer e2e v1` | — |
 | Room labels | `peer room seal v1`, `peer room key commit v1`, `peer feed link v1` | — |
@@ -545,7 +545,7 @@ Install: `go install github.com/caoer/peer/cmd/peer@v0.5.0` (Go 1.26 or later), 
 
 `peer room inspect <room>` prints the relay's view of a room as one JSON object, read through this party's token for it: `{id, name, relay, room, you, log, members, records, notes?}`. `room`, `you` and `log` are the state route's answer as it is (the state of its last page); `members` is the members route's list, `null` when the token is not admin; `records` is every record the state route serves, each `{seq, idx, type, at, expires, size, sha256, body | head, sealed: {idx, ctr, kh, at, to}}` — `at` and `expires` (`at` + `retention`) in the relay's epoch milliseconds, `size` and `sha256` of the decoded record, `body` its standard base64 when it is at most 4096 bytes and otherwise `head`, its first 512; `sealed` is what the framing shows anyone holding the bytes, read and not verified: the header's writer idx, counter, key commitment and time, and the idxs it is sealed to in wire order (65535 a feed's link). A row the relay sent malformed, or a body that does not parse as a sealed record, carries `error` in place of what it lacks. `notes` names what the relay did not show this token. It changes nothing on the host or the relay. It is in v0.4.0 and later and needs a relay with the state route.
 
-**Encrypting a body** (§ Message encryption extension — e2e v1). `peer e2e keygen` prints a public and a secret key string and writes nothing; the secret stays with the person and never goes on a serving host. `peer e2e publish <pub>` names the key as the party's in `details.e2e` in `config.json`, replacing any earlier one, and re-issues the card. `peer status` lists each peer's published keys. `peer send --encrypt [--to-key <pub>]… <peer>` seals the body; `peer send --encrypt <room>` seals to every other member, or to the members `--to` names. `peer e2e decrypt --key <secret> [file]` reads an envelope or an inbox record, from a file or stdin, and prints the plaintext.
+**Encrypting a body** (§ Message encryption extension — e2e v1). `peer e2e keygen` prints a public and a secret key string and writes nothing; the secret stays with the person and never goes on a serving host. `peer e2e publish <pub>` names the key as the party's in `details.readers` in `config.json`, replacing any earlier one, and re-issues the card. `peer status` lists each peer's published keys under `READERS`, and as `readers` in `--json`. `peer send --encrypt [--to-key <pub>]… <peer>` seals the body; `peer send --encrypt <room>` seals to every other member, or to the members `--to` names. `peer e2e decrypt --key <secret> [file]` reads an envelope or an inbox record, from a file or stdin, and prints the plaintext.
 
 **Timelines.** `config.json` `timelines.<peer>` also takes these keys:
 

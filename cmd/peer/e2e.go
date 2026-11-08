@@ -95,7 +95,7 @@ func cmdE2EPublish(args []string, stdout, stderr io.Writer) int {
 	fl.SetOutput(stderr)
 	dirFlag := fl.String("dir", "", "peer directory (default $PEER_HOME, else <config dir>/peer)")
 	fl.Usage = func() {
-		fmt.Fprintln(stderr, "usage: peer e2e publish [--dir D] <public key>\n\nNames the public key as this party's in config.json details.e2e, replacing any\nearlier one, signs the card and sends it on every confirmed channel. Run it\nwhere root.json is; the secret key is not needed and does not belong here.")
+		fmt.Fprintln(stderr, "usage: peer e2e publish [--dir D] <public key>\n\nNames the public key as this party's in config.json details.readers, replacing any\nearlier one, signs the card and sends it on every confirmed channel. Run it\nwhere root.json is; the secret key is not needed and does not belong here.")
 	}
 	if code, done := parseFlags(fl, args); done {
 		return code
@@ -111,7 +111,7 @@ func cmdE2EPublish(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runE2EPublish merges details.e2e into config.json, every other key of the
+// runE2EPublish merges details.readers into config.json, every other key of the
 // file left as it is, and publishes the card it now describes.
 func runE2EPublish(ctx context.Context, dir, pub string, out io.Writer) error {
 	if _, err := e2e.ParsePublic(pub); err != nil {
@@ -131,7 +131,7 @@ func runE2EPublish(ctx context.Context, dir, pub string, out io.Writer) error {
 	if err := writeE2EDetails(filepath.Join(dir, configFile), pub); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "%s details.e2e names %s\n", configFile, pub)
+	fmt.Fprintf(out, "%s details.readers names %s\n", configFile, pub)
 	return runCardPublish(ctx, dir, out)
 }
 
@@ -158,7 +158,7 @@ func writeE2EDetails(path, pub string) error {
 		}
 	}
 	var err error
-	if details["e2e"], err = json.Marshal(e2e.Details{V: e2e.Version, Suite: e2e.Suite, Keys: []string{pub}}); err != nil {
+	if details[e2e.DetailsMember], err = json.Marshal(e2e.Details{V: e2e.Version, Suite: e2e.Suite, Keys: []string{pub}}); err != nil {
 		return err
 	}
 	if top["details"], err = json.Marshal(details); err != nil {

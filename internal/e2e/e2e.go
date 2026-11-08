@@ -25,7 +25,7 @@ import (
 const (
 	// Suite is the suite id of this implementation.
 	Suite = "peer-e2e-v1"
-	// Version is the envelope's "e2e" value and the card's details.e2e "v".
+	// Version is the envelope's "e2e" value and the card's details.readers "v".
 	Version = 1
 
 	// PublicPrefix and SecretPrefix tag the text form of a key.
@@ -73,7 +73,10 @@ type envelope struct {
 	Body  string   `json:"body"`
 }
 
-// Details is the card's details.e2e object: the keys a party receives on.
+// DetailsMember is the member of a card's details that holds its Details.
+const DetailsMember = "readers"
+
+// Details is the card's details.readers object: the keys a party receives on.
 type Details struct {
 	V     int      `json:"v"`
 	Suite string   `json:"suite"`
@@ -271,7 +274,7 @@ func Detect(body []byte) (suite string, ok bool) {
 	return suite, true
 }
 
-// ParseDetails reads the e2e member of a card's details. It returns nil and
+// ParseDetails reads the readers member of a card's details. It returns nil and
 // no error when the card names no e2e keys, and an error when the member is
 // present and not a usable v1 key list.
 func ParseDetails(details json.RawMessage) (*Details, error) {
@@ -282,26 +285,26 @@ func ParseDetails(details json.RawMessage) (*Details, error) {
 	if err := json.Unmarshal(details, &fields); err != nil {
 		return nil, fmt.Errorf("card details: %w", err)
 	}
-	raw, ok := fields["e2e"]
+	raw, ok := fields[DetailsMember]
 	if !ok {
 		return nil, nil
 	}
 	var d Details
 	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, fmt.Errorf("card details.e2e: %w", err)
+		return nil, fmt.Errorf("card details.readers: %w", err)
 	}
 	if d.V != Version {
-		return nil, fmt.Errorf("card details.e2e: version %d, want %d", d.V, Version)
+		return nil, fmt.Errorf("card details.readers: version %d, want %d", d.V, Version)
 	}
 	if d.Suite != Suite {
-		return nil, fmt.Errorf("card details.e2e: suite %q, want %q", d.Suite, Suite)
+		return nil, fmt.Errorf("card details.readers: suite %q, want %q", d.Suite, Suite)
 	}
 	if len(d.Keys) == 0 {
-		return nil, errors.New("card details.e2e: no keys")
+		return nil, errors.New("card details.readers: no keys")
 	}
 	for _, k := range d.Keys {
 		if _, err := ParsePublic(k); err != nil {
-			return nil, fmt.Errorf("card details.e2e: %w", err)
+			return nil, fmt.Errorf("card details.readers: %w", err)
 		}
 	}
 	return &d, nil

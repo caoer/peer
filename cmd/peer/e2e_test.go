@@ -101,10 +101,10 @@ func TestE2ETwoProcess(t *testing.T) {
 	if err := json.Unmarshal([]byte(procOK(t, "status", "--dir", b, "--json")), &rows); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || len(rows[0].E2E) != 1 || rows[0].E2E[0] != pub {
+	if len(rows) != 1 || len(rows[0].Readers) != 1 || rows[0].Readers[0] != pub {
 		t.Fatalf("status: %+v", rows)
 	}
-	if out := procOK(t, "status", "--dir", b); !strings.Contains(out, "E2E") || !strings.Contains(out, tail(pub)) {
+	if out := procOK(t, "status", "--dir", b); !strings.Contains(out, "READERS") || !strings.Contains(out, tail(pub)) {
 		t.Fatalf("status table:\n%s", out)
 	}
 
@@ -212,7 +212,7 @@ func TestE2EKeygenHelp(t *testing.T) {
 	}
 }
 
-// publish edits only details.e2e, and a second publish replaces the key.
+// publish edits only details.readers, and a second publish replaces the key.
 func TestE2EPublishKeepsConfig(t *testing.T) {
 	dir := newDir(t, hostCfg())
 	path := filepath.Join(dir, configFile)
