@@ -259,11 +259,12 @@ func TestFeedLiveReplayAndReaderKey(t *testing.T) {
 		t.Fatalf("revoke:\n%s", out)
 	}
 	procOK(t, "serve", "--dir", p.hostDir, "--once")
-	if err := json.Unmarshal([]byte(procOK(t, "status", "--dir", p.hostDir, "--json")), &rows); err != nil {
+	var after []statusJSON
+	if err := json.Unmarshal([]byte(procOK(t, "status", "--dir", p.hostDir, "--json")), &after); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || len(rows[0].Readers) != 0 {
-		t.Fatalf("status after the revoke: %+v", rows)
+	if len(after) != 1 || len(after[0].Readers) != 0 {
+		t.Fatalf("status after the revoke: %+v", after)
 	}
 	if code, _, errb := peerProc(t, "e2e", "revoke", "--dir", p.guestDir, pub); code != 1 || !strings.Contains(errb, "is not in") {
 		t.Fatalf("revoking a key not on the card: exit %d: %s", code, errb)
