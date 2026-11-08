@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/caoer/peer/internal/deliver"
@@ -20,10 +21,14 @@ import (
 	"github.com/caoer/peer/internal/timeline"
 )
 
-// A channel's received messages can also go to forward.<peer>: an HTTPS POST
-// of the peer-timeline@1 record in its envelope, {"schema": ..., "data":
-// {...}}, so a handler reaches a human with no seat in the path. A 2xx is the
-// delivery. Any other answer, or none, keeps the record in
+// A channel's messages, received and sent, can also go to the worker named
+// by forward: an HTTPS POST to <url>/forward with the bearer secret of the
+// counterpart's party id and the peer-timeline@1 record in its envelope,
+// {"peer": ..., "record": {"schema": ..., "data": {...}}}, so the worker's
+// copy reaches a human with no seat in the path. The worker chooses the chat
+// by party id; a 204 is its word that it has none for this peer, logged and
+// not retried. Any other 2xx is the delivery. Any other answer, or none,
+// keeps the record in
 // <dir>/forward-pending/<id>.json, which every round tries once more; after
 // forwardRetries retries it is dropped with a log line. The inbox record is
 // already written by then, so a dead URL costs only the copy.
@@ -36,9 +41,14 @@ const (
 	forwardBodyMax = 60000
 )
 
-// forwardPost is the POST body: the timeline record,
-// marked when its body was cut.
+// forwardPost is the POST body: the counterpart's party id and the timeline
+// record, marked when its body was cut.
 type forwardPost struct {
+	Peer   string        `json:"peer"`
+	Record forwardRecord `json:"record"`
+}
+
+type forwardRecord struct {
 	Schema string      `json:"schema"`
 	Data   forwardData `json:"data"`
 }
@@ -83,32 +93,52 @@ func cutBody(body json.RawMessage) (json.RawMessage, bool) {
 	return cut, true
 }
 
-// forwardBytes is the POST body of received message m.
-func forwardBytes(m *session.Message) ([]byte, error) {
-	rec, err := timeline.Of(timeline.In, m)
+// counterpart is the other party of message m in direction dir: the
+// sender's party id for a received message, the recipient's for a sent one,
+// without the agent.
+func counterpart(dir string, m *session.Message) string {
+	addr := m.To
+	if dir == timeline.In {
+		addr = m.From
+	}
+	party, _, _ := strings.Cut(addr, "/")
+	return party
+}
+
+// forwardBytes is the POST body of message m in direction dir.
+func forwardBytes(dir string, m *session.Message) ([]byte, error) {
+	rec, err := timeline.Of(dir, m)
 	if err != nil {
 		return nil, err
 	}
 	var cut bool
 	rec.Body, cut = cutBody(rec.Body)
-	return json.Marshal(forwardPost{Schema: timeline.Schema, Data: forwardData{Record: rec, Truncated: cut}})
+	return json.Marshal(forwardPost{Peer: counterpart(dir, m), Record: forwardRecord{Schema: timeline.Schema, Data: forwardData{Record: rec, Truncated: cut}}})
 }
 
-// forwardTimeline POSTs received message m to the peer's forward URL, if it
-// has one. It never reaches the message path. A URL that
-// failed earlier in the round is not tried again: the record waits for the
-// next round, its failure count unchanged.
-func (p *party) forwardTimeline(ctx context.Context, name string, m *session.Message) {
-	u := p.cfg.Forward[name]
-	if u == "" {
+// forwardLine is serve's start line: the forward's URL, or off.
+func (p *party) forwardLine() string {
+	if p.cfg.Forward == nil {
+		return "forward: off"
+	}
+	return "forward: " + p.cfg.Forward.URL
+}
+
+// forwardTimeline POSTs message m in direction dir to the forward, if config
+// names one. It never reaches the message path. A forward that failed
+// earlier in the round is not tried again: the record waits for the next
+// round, its failure count unchanged.
+func (p *party) forwardTimeline(ctx context.Context, name, dir string, m *session.Message) {
+	if p.cfg.Forward == nil {
 		return
 	}
+	u := p.cfg.Forward.URL
 	log := p.timelineLog()
 	if !deliver.ValidID(m.ID) {
 		fmt.Fprintf(log, "forward %s: invalid message id\n", name)
 		return
 	}
-	post, err := forwardBytes(m)
+	post, err := forwardBytes(dir, m)
 	if err != nil {
 		fmt.Fprintf(log, "forward %s: %s: %v\n", name, m.ID, err)
 		return
@@ -120,7 +150,10 @@ func (p *party) forwardTimeline(ctx context.Context, name string, m *session.Mes
 		p.keepForward(e)
 		return
 	}
-	if err := p.postForward(ctx, u, post); err != nil {
+	switch err := p.postForward(ctx, post); {
+	case errors.Is(err, errNoTarget):
+		fmt.Fprintf(log, "forward %s: %s: no target\n", name, m.ID)
+	case err != nil:
 		p.tl.deadForward[u] = true
 		p.forwardFailed(e, err)
 	}
@@ -150,21 +183,25 @@ func (p *party) retryForwards(ctx context.Context) {
 			fmt.Fprintf(log, "forward: %s: %v\n", filepath.Base(n), err)
 			continue
 		}
-		u := p.cfg.Forward[e.Peer]
-		if u == "" {
-			fmt.Fprintf(log, "forward %s: %s: no forward URL in config; dropped\n", e.Peer, e.ID)
+		if p.cfg.Forward == nil {
+			fmt.Fprintf(log, "forward %s: %s: no forward in config; dropped\n", e.Peer, e.ID)
 			p.dropForward(&e)
 			continue
 		}
+		u := p.cfg.Forward.URL
 		if p.tl.deadForward[u] {
 			continue
 		}
-		if err := p.postForward(ctx, u, e.Post); err != nil {
+		switch err := p.postForward(ctx, e.Post); {
+		case errors.Is(err, errNoTarget):
+			fmt.Fprintf(log, "forward %s: %s: no target\n", e.Peer, e.ID)
+		case err != nil:
 			p.tl.deadForward[u] = true
 			p.forwardFailed(&e, err)
 			continue
+		default:
+			fmt.Fprintf(log, "forward %s: %s: delivered after %d failures\n", e.Peer, e.ID, e.Failures)
 		}
-		fmt.Fprintf(log, "forward %s: %s: delivered after %d failures\n", e.Peer, e.ID, e.Failures)
 		p.dropForward(&e)
 	}
 }
@@ -200,9 +237,13 @@ func (p *party) dropForward(e *forwardEntry) {
 	}
 }
 
-// postForward is one POST of a record to u. An error never carries the URL:
-// its path is the handler's secret and the error goes to the journal.
-func (p *party) postForward(ctx context.Context, u string, post []byte) error {
+// errNoTarget is the worker's 204: it has no chat for this peer.
+var errNoTarget = errors.New("no target")
+
+// postForward is one POST of a record to the forward. An error never
+// carries the URL or the secret: the error goes to the journal.
+func (p *party) postForward(ctx context.Context, post []byte) error {
+	u := strings.TrimSuffix(p.cfg.Forward.URL, "/") + "/forward"
 	pu, err := url.Parse(u)
 	if err != nil || pu.Scheme != "https" {
 		return errors.New("the forward URL is not an https URL")
@@ -214,6 +255,7 @@ func (p *party) postForward(ctx context.Context, u string, post []byte) error {
 		return errors.New("the forward URL does not form a request")
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.cfg.Forward.Secret)
 	resp, err := serviceClient.Do(req)
 	if err != nil {
 		var ue *url.Error
@@ -224,7 +266,10 @@ func (p *party) postForward(ctx context.Context, u string, post []byte) error {
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode/100 != 2 {
+	switch {
+	case resp.StatusCode == http.StatusNoContent:
+		return errNoTarget
+	case resp.StatusCode/100 != 2:
 		return fmt.Errorf("answered %s", resp.Status)
 	}
 	return nil

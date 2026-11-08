@@ -59,6 +59,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1
 	}
+	fmt.Fprintln(stdout, sv.p.forwardLine())
 	if err := sv.start(ctx); err != nil {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1

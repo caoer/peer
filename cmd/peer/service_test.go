@@ -46,6 +46,8 @@ type hookServer struct {
 	mu     sync.Mutex
 	posts  [][]byte
 	ctypes []string
+	auths  []string
+	paths  []string
 }
 
 func newHook(t *testing.T, answer func(n int, r *http.Request) int) *hookServer {
@@ -56,6 +58,8 @@ func newHook(t *testing.T, answer func(n int, r *http.Request) int) *hookServer 
 		h.mu.Lock()
 		h.posts = append(h.posts, b)
 		h.ctypes = append(h.ctypes, r.Header.Get("Content-Type"))
+		h.auths = append(h.auths, r.Header.Get("Authorization"))
+		h.paths = append(h.paths, r.URL.Path)
 		n := len(h.posts)
 		h.mu.Unlock()
 		if code := answer(n, r); code != 0 {

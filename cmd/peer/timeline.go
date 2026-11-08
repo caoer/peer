@@ -17,11 +17,14 @@ import (
 	"github.com/caoer/peer/internal/timeline"
 )
 
-// forwardConfig is config.json "forward": {"<peer name>": "<https URL>"},
-// the URL a peer's received messages are POSTed to (forward.go). It is
-// host-local config, not a field of the shared roster record: the URL's path
-// is this host's secret. A peer with no entry is not forwarded.
-type forwardConfig map[string]string
+// forwardConfig is config.json "forward": {"url", "secret"}, the worker
+// every message is POSTed to, both directions (forward.go). The worker maps
+// the counterpart's party id to a chat; the host never names one. It is
+// host-local config: the secret is this host's.
+type forwardConfig struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+}
 
 // timelinePendingDir holds, under the peer directory, the timeline record of
 // each sent message whose relay put failed after its commit: its relay seq,
@@ -49,12 +52,10 @@ func (p *party) timelineLog() io.Writer {
 }
 
 // writeTimeline is the last step after a message's birth or commit, under
-// its relay seq in direction dir on the channel: for a received message, its
-// forward. It never reaches the message path.
+// its relay seq in direction dir on the channel: its forward, either way.
+// It never reaches the message path.
 func (p *party) writeTimeline(ctx context.Context, name, channel, dir string, seq int64, m *session.Message) {
-	if dir == timeline.In {
-		p.forwardTimeline(ctx, name, m)
-	}
+	p.forwardTimeline(ctx, name, dir, m)
 }
 
 // timelineSpooled runs writeTimeline for a spooled message born by a

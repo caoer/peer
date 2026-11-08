@@ -57,9 +57,9 @@ type config struct {
 	// UCC names the fleet's sessions root and the seat map on it (ucc.go):
 	// with it, Agents come from the map and serve delivers by it.
 	UCC *uccConfig `json:"ucc,omitempty"`
-	// Forward is the URL, by peer name, each received message is POSTed
-	// to (forward.go).
-	Forward forwardConfig `json:"forward,omitempty"`
+	// Forward is the worker each message is POSTed to, both directions
+	// (forward.go); nil is no forward.
+	Forward *forwardConfig `json:"forward,omitempty"`
 	// Keys is the key lifecycle: signedPrekeyEvery, oneTimeMin (keys.go).
 	Keys keysConfig `json:"keys,omitempty"`
 	// Push is how a running serve uses the relay's push: pullEvery (push.go).
@@ -123,7 +123,7 @@ func openParty(dir string) (*party, error) {
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, err
 	}
-	if err := readJSON(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := readConfig(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	if _, err := p.loadSeats(); err != nil {
@@ -340,6 +340,50 @@ func permanentPut(err error) bool {
 func splitAddr(s string) (party, agent string) {
 	party, agent, _ = strings.Cut(s, "/")
 	return party, agent
+}
+
+// readConfig reads config.json into cfg, refusing the keys an earlier
+// forward read (checkForwardKeys).
+func readConfig(path string, cfg *config) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(b, cfg); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return checkForwardKeys(b)
+}
+
+// checkForwardKeys refuses, naming the key, a config that still carries
+// timelines or a per-peer forward map, and a forward without its url and
+// secret: on this binary either would leave the forward silently off.
+func checkForwardKeys(b []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		return fmt.Errorf("%s: %w", configFile, err)
+	}
+	if _, ok := top["timelines"]; ok {
+		return fmt.Errorf("%s: timelines is not read any more: the forward is forward: {\"url\", \"secret\"}", configFile)
+	}
+	raw, ok := top["forward"]
+	if !ok || string(raw) == "null" {
+		return nil
+	}
+	var f map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return fmt.Errorf("%s: forward is not an object", configFile)
+	}
+	for k := range f {
+		if k != "url" && k != "secret" {
+			return fmt.Errorf("%s: forward.%s: forward is {\"url\", \"secret\"}; the worker chooses each peer's chat", configFile, k)
+		}
+	}
+	var fc forwardConfig
+	if err := json.Unmarshal(raw, &fc); err != nil || fc.URL == "" || fc.Secret == "" {
+		return fmt.Errorf("%s: forward needs url and secret, both strings", configFile)
+	}
+	return nil
 }
 
 func readJSON(path string, v any) error {

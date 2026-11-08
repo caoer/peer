@@ -90,14 +90,14 @@ func TestForwardSpooledBirth(t *testing.T) {
 	if h.count() != before+1 {
 		t.Fatalf("%d POSTs after the replay, want one", h.count()-before)
 	}
-	if r, raw := h.post(t, before); r.ID != id || string(r.Body) != `"replayed"` {
+	if r, raw := h.post(t, before); r.ID != id || r.Dir != timeline.In || string(r.Body) != `"replayed"` {
 		t.Fatalf("record %s", raw)
 	}
 }
 
 // A sent message whose put failed after its commit has no relay seq yet: it
-// waits beside the outbox, and the replay's put hands it to writeTimeline
-// once and clears it. A sent message is never forwarded.
+// waits beside the outbox, and the replay's put forwards it once, as out,
+// and clears it.
 func TestTimelineSentAfterOutboxReplay(t *testing.T) {
 	_, _, base := relaytest.Start(t, login)
 	target, err := url.Parse(strings.TrimSuffix(base, "/peer"))
@@ -125,14 +125,24 @@ func TestTimelineSentAfterOutboxReplay(t *testing.T) {
 	if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pending record left: %v", err)
 	}
-	if h.count() != before {
-		t.Fatalf("%d POSTs for a sent message", h.count()-before)
+	if h.count() != before+1 {
+		t.Fatalf("%d POSTs for the replayed send, want one", h.count()-before)
+	}
+	if r, raw := h.post(t, before); r.ID != m[1] || r.Dir != timeline.Out || r.Peer != p.hostParty || string(r.Body) != `"queued"` {
+		t.Fatalf("record %s", raw)
+	}
+	mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	if h.count() != before+1 {
+		t.Fatalf("%d POSTs after a later round, want one", h.count()-before)
 	}
 }
 
-// forwardPair is a handshake whose guest forwards the host's ("zt")
-// received messages to a hook answering code (-1 hangs until the POST gives
-// up). The hook has had the handshake's card by the time it returns.
+// forwardSecret is the guest's forward bearer in forwardPair.
+const forwardSecret = "fwd-secret-0123456789"
+
+// forwardPair is a handshake whose guest forwards its messages with the host
+// ("zt") to a hook answering code (-1 hangs until the POST gives up). The
+// hook has had the handshake's card by the time it returns.
 func forwardPair(t *testing.T) (p *pair, h *hookServer, code *atomic.Int32) {
 	t.Helper()
 	return forwardPairOn(t, "")
@@ -155,35 +165,44 @@ func forwardPairOn(t *testing.T, base string) (p *pair, h *hookServer, code *ato
 		return c
 	})
 	trustHooks(t, h)
-	cfg := config{Forward: forwardConfig{"zt": h.URL + "/peer/path-secret"}}
+	cfg := config{Forward: &forwardConfig{URL: h.URL, Secret: forwardSecret}}
 	return handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base), h, code
 }
 
-// forwardedRecord is a POST's record with its truncated mark.
+// forwardedRecord is a POST's record with its truncated mark, and the
+// POST's peer.
 type forwardedRecord struct {
 	timeline.Record
-	Truncated bool `json:"truncated"`
+	Truncated bool   `json:"truncated"`
+	Peer      string `json:"-"`
 }
 
 // parseForward is a POST's record and the raw bytes of its data, the
-// envelope's schema checked.
+// body's fields and schema checked.
 func parseForward(t *testing.T, post []byte) (*forwardedRecord, []byte) {
 	t.Helper()
-	var env struct {
-		Schema string          `json:"schema"`
-		Data   json.RawMessage `json:"data"`
+	var body struct {
+		Peer   string `json:"peer"`
+		Record struct {
+			Schema string          `json:"schema"`
+			Data   json.RawMessage `json:"data"`
+		} `json:"record"`
 	}
-	if err := json.Unmarshal(post, &env); err != nil {
+	if err := json.Unmarshal(post, &body); err != nil {
 		t.Fatalf("%v\n%s", err, post)
 	}
-	if env.Schema != timeline.Schema {
-		t.Fatalf("schema %q: %s", env.Schema, post)
+	if order := fieldOrder(t, post); strings.Join(order, ",") != "peer,record" {
+		t.Fatalf("POST fields %v: %s", order, post)
+	}
+	if body.Record.Schema != timeline.Schema {
+		t.Fatalf("schema %q: %s", body.Record.Schema, post)
 	}
 	var r forwardedRecord
-	if err := json.Unmarshal(env.Data, &r); err != nil {
+	if err := json.Unmarshal(body.Record.Data, &r); err != nil {
 		t.Fatalf("%v\n%s", err, post)
 	}
-	return &r, env.Data
+	r.Peer = body.Peer
+	return &r, body.Record.Data
 }
 
 // post is the hook's i'th POST, parsed, and the raw bytes of its data.
@@ -219,9 +238,10 @@ func forwardPending(t *testing.T, dir string) []string {
 	return names
 }
 
-// A received message reaches the forward URL once, as the timeline record;
-// a sent one never does. A 5xx keeps the record, one POST a round with the
-// inbox record already written, and the 2xx clears the file.
+// A received and a sent message each reach <url>/forward once, with the
+// bearer, as {peer, record}: the counterpart's party id, no chat. A 5xx keeps
+// the record, one POST a round with the inbox record already written, and
+// the 2xx clears the file.
 func TestForwardOnceRetriedAndCleared(t *testing.T) {
 	p, h, code := forwardPair(t)
 	before := h.count()
@@ -237,17 +257,29 @@ func TestForwardOnceRetriedAndCleared(t *testing.T) {
 	if order := fieldOrder(t, raw); strings.Join(order, ",") != strings.Join(fieldsInOrder, ",") {
 		t.Errorf("field order %v: %s", order, raw)
 	}
-	if r.ID != id || r.Dir != timeline.In || r.Kind != "text" || string(r.Body) != `"hello"` || r.Truncated {
+	if r.ID != id || r.Dir != timeline.In || r.Kind != "text" || r.Peer != p.hostParty || string(r.Body) != `"hello"` || r.Truncated {
 		t.Errorf("record %s", raw)
+	}
+	h.mu.Lock()
+	auth, path, post := h.auths[before], h.paths[before], h.posts[before]
+	h.mu.Unlock()
+	if auth != "Bearer "+forwardSecret || path != "/forward" || bytes.Contains(post, []byte("chat")) || bytes.Contains(post, []byte("topic")) {
+		t.Errorf("POST %s with %q: %s", path, auth, post)
 	}
 	if q := forwardPending(t, p.guestDir); len(q) != 0 {
 		t.Errorf("pending after a 2xx: %v", q)
 	}
 	mustOK(t, "serve", "--dir", p.guestDir, "--once")
-	sendOK(t, p.guestDir, "--text", "sent, not received", "zt")
-	mustOK(t, "serve", "--dir", p.guestDir, "--once")
 	if h.count() != before+1 {
-		t.Fatalf("%d POSTs after a later round and a send, want one", h.count()-before)
+		t.Fatalf("%d POSTs after a later round, want one", h.count()-before)
+	}
+	sid, _ := sendOK(t, p.guestDir, "--kind", "answer", "--text", "sent", "zt/advisor")
+	mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	if h.count() != before+2 {
+		t.Fatalf("%d POSTs after a send and a round, want two", h.count()-before)
+	}
+	if r, raw := h.post(t, before+1); r.ID != sid || r.Dir != timeline.Out || r.Kind != "answer" || r.Peer != p.hostParty || r.To != p.hostParty+"/advisor" || string(r.Body) != `"sent"` {
+		t.Errorf("sent record %s", raw)
 	}
 
 	code.Store(http.StatusServiceUnavailable)
@@ -285,15 +317,18 @@ func TestForwardOnceRetriedAndCleared(t *testing.T) {
 	}
 }
 
-// A peer with no forward entry sends nothing: the inbox still gets its record.
-func TestForwardNoURLSendsNothing(t *testing.T) {
+// A config with no forward sends nothing, and serve says so at start.
+func TestForwardOffSendsNothing(t *testing.T) {
 	_, _, base := relaytest.Start(t, login)
 	h := newHook(t, func(int, *http.Request) int { return http.StatusOK })
 	trustHooks(t, h)
-	cfg := config{Forward: forwardConfig{"someone-else": h.URL}}
-	p := handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
 	id, _ := sendOK(t, p.hostDir, "--text", "plain", "ancan")
-	mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	if !strings.HasPrefix(out, "forward: off\n") {
+		t.Errorf("serve:\n%s", out)
+	}
+	sendOK(t, p.guestDir, "--text", "back", "zt")
 	if records(t, deliverDirOf(p.guestDir), "inbox")[id] == nil {
 		t.Error("no inbox record")
 	}
@@ -303,6 +338,68 @@ func TestForwardNoURLSendsNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(p.guestDir, forwardPendingDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("pending directory: %v", err)
 	}
+}
+
+// A 204 is the worker's word that it has no chat for this peer: logged once,
+// not kept, not retried.
+func TestForward204NotRetried(t *testing.T) {
+	p, h, code := forwardPair(t)
+	code.Store(http.StatusNoContent)
+	before := h.count()
+	id, _ := sendOK(t, p.hostDir, "--text", "nobody's", "ancan")
+	out := mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	if !strings.HasPrefix(out, "forward: "+h.URL+"\n") || !strings.Contains(out, "forward zt: "+id+": no target") || h.count() != before+1 {
+		t.Fatalf("%d POSTs:\n%s", h.count()-before, out)
+	}
+	if q := forwardPending(t, p.guestDir); len(q) != 0 {
+		t.Errorf("pending after a 204: %v", q)
+	}
+	mustOK(t, "serve", "--dir", p.guestDir, "--once")
+	if h.count() != before+1 {
+		t.Errorf("%d POSTs after another round, want one", h.count()-before)
+	}
+}
+
+// A config that still has timelines, U2b's per-peer forward map, or a
+// forward without its url and secret refuses to load, naming the key.
+func TestForwardConfigRefusesOldKeys(t *testing.T) {
+	for name, tc := range map[string]struct{ key, raw, want string }{
+		"timelines":    {"timelines", `{"zt":{"forward":"https://x/h"}}`, "timelines"},
+		"per-peer map": {"forward", `{"zt":"https://x/h"}`, "forward.zt"},
+		"no secret":    {"forward", `{"url":"https://x"}`, "url and secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := newDir(t, config{})
+			path := filepath.Join(dir, configFile)
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(b, &top); err != nil {
+				t.Fatal(err)
+			}
+			top[tc.key] = json.RawMessage(tc.raw)
+			if err := os.WriteFile(path, mustJSON(t, top), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"status", "--dir", dir}, {"serve", "--dir", dir, "--once"}} {
+				code, _, errb := cmd(t, args...)
+				if code != 1 || !strings.Contains(errb, tc.want) {
+					t.Fatalf("peer %s: exit %d: %s", args[0], code, errb)
+				}
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // The body is cut where its JSON form reaches 60,000 bytes, on a rune
@@ -322,7 +419,7 @@ func TestForwardCutsBody(t *testing.T) {
 		{"a megabyte", a(1 << 20), a(60000), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := forwardBytes(&session.Message{V: 1, ID: "m1", From: "a", To: "b", Kind: "text", At: time.Now(), Body: []byte(tc.body)})
+			b, err := forwardBytes(timeline.In, &session.Message{V: 1, ID: "m1", From: "a", To: "b", Kind: "text", At: time.Now(), Body: []byte(tc.body)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -388,7 +485,7 @@ func TestForwardDroppedAfterRetries(t *testing.T) {
 }
 
 // A URL that never answers holds the round for one timeout, not one per
-// record, and the journal line does not carry the URL's path secret.
+// record, and the journal line does not carry the forward secret.
 func TestForwardDeadURLOneTimeout(t *testing.T) {
 	p, h, code := forwardPair(t)
 	code.Store(-1)
@@ -410,8 +507,8 @@ func TestForwardDeadURLOneTimeout(t *testing.T) {
 		if posts := h.count() - before; posts != round || took >= n/2*serviceTimeout {
 			t.Errorf("round %d: %d POSTs in all, took %v", round, posts, took)
 		}
-		if strings.Contains(out, "path-secret") {
-			t.Errorf("the log carries the URL's path secret:\n%s", out)
+		if strings.Contains(out, forwardSecret) {
+			t.Errorf("the log carries the forward secret:\n%s", out)
 		}
 		if q := forwardPending(t, p.guestDir); len(q) != n || sum() != round {
 			t.Errorf("round %d: %d pending, %d failures in all", round, len(q), sum())
