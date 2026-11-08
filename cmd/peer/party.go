@@ -47,6 +47,10 @@ type config struct {
 	// carries and envelope #0 does not (design §3.3).
 	Agents  []card.Agent    `json:"agents,omitempty"`
 	Details json.RawMessage `json:"details,omitempty"`
+	// Name is the party's name as its own people write it: the forward's
+	// copy of a sent message names its sender so (forward.go). Absent, that
+	// copy names the party by its id.
+	Name string `json:"name,omitempty"`
 	// State is where the session state lives, shared by every host of the
 	// party that serves (design §3.2): a directory for the file backend, or
 	// a private ccc-pages state page. Absent, it is <dir>/state.

@@ -5,8 +5,11 @@
  * The host names the counterpart party, never a chat: the Worker maps it
  * through the secret FORWARD_TARGETS, `{"<party id>": {"chat": <int>,
  * "topic": <int>}, …}`, and a party the map lacks answers 204 with nothing
- * sent. Authorised by `Bearer <FORWARD_SECRET>`. Nothing is stored: the
- * record passes through this request's memory to one Telegram call.
+ * sent. The host also names the sender (`from`, the party's name as the
+ * host knows it), which heads the Telegram line; a body without it is
+ * headed by the record's own `from`, the sender's address. Authorised by
+ * `Bearer <FORWARD_SECRET>`. Nothing is stored: the record passes through
+ * this request's memory to one Telegram call.
  */
 
 import { secretMatches } from "./relay/channel";
@@ -59,11 +62,12 @@ export type TimelineData = {
   truncated?: boolean;
 };
 
-// The Telegram text of one record: `<from> · <kind> · <at>`, then the body
+// The Telegram text of one record: `<from> · <kind> · <at>` — `<from>` the
+// sender's name the host sent, else the record's own `from` — then the body
 // cut at LINE_BODY_MAX characters (CUT_MARK when cut), then the reader URL.
 // An encrypted record carries ENCRYPTED_LINE in place of its body.
-export function lineOf(d: TimelineData): string {
-  const head = `${d.from ?? "?"} · ${d.kind ?? "?"} · ${d.at ?? "?"}`;
+export function lineOf(d: TimelineData, from?: string): string {
+  const head = `${from || d.from || "?"} · ${d.kind ?? "?"} · ${d.at ?? "?"}`;
   if (d.e2e) return [head, ENCRYPTED_LINE, READER_URL].join("\n");
   const text = typeof d.body === "string" ? d.body : JSON.stringify(d.body ?? null);
   const chars = Array.from(text);
@@ -89,14 +93,20 @@ export async function handleForward(req: Request, env: ForwardEnv): Promise<Resp
     return fail(401, "bad_token", "forward takes Bearer <forward secret>");
   const raw = await req.text();
   if (raw.length > REQUEST_MAX) return fail(413, "too_large", "a forward body is one record");
-  let body: { peer?: unknown; record?: { schema?: unknown; data?: unknown } };
+  let body: { peer?: unknown; from?: unknown; record?: { schema?: unknown; data?: unknown } };
   try {
     body = JSON.parse(raw);
   } catch {
     return fail(400, "bad_request", "body is not JSON");
   }
-  if (typeof body?.peer !== "string" || body.record?.schema !== "peer-timeline@1" || typeof body.record.data !== "object" || body.record.data === null)
-    return fail(400, "bad_request", 'body is {"peer": "<party id>", "record": {"schema": "peer-timeline@1", "data": {…}}}');
+  if (
+    typeof body?.peer !== "string" ||
+    (body.from !== undefined && typeof body.from !== "string") ||
+    body.record?.schema !== "peer-timeline@1" ||
+    typeof body.record.data !== "object" ||
+    body.record.data === null
+  )
+    return fail(400, "bad_request", 'body is {"peer": "<party id>", "from"?: "<sender name>", "record": {"schema": "peer-timeline@1", "data": {…}}}');
   const target = targetsOf(env.FORWARD_TARGETS).get(body.peer);
   if (target === undefined) return reply(204);
   const tg = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN ?? ""}/sendMessage`, {
@@ -105,7 +115,7 @@ export async function handleForward(req: Request, env: ForwardEnv): Promise<Resp
     body: JSON.stringify({
       chat_id: target.chat,
       message_thread_id: target.topic,
-      text: lineOf(body.record.data as TimelineData),
+      text: lineOf(body.record.data as TimelineData, body.from as string | undefined),
       link_preview_options: { is_disabled: true },
     }),
   });
