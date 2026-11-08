@@ -1,0 +1,232 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"unicode/utf8"
+
+	"github.com/caoer/peer/internal/deliver"
+	"github.com/caoer/peer/internal/session"
+	"github.com/caoer/peer/internal/timeline"
+)
+
+// A channel's received messages can also go to timelines.<peer>.forward: an
+// HTTPS POST of the peer-timeline@1 record in its page envelope,
+// {"schema": ..., "data": {...}}, beside its write on the page, so
+// a page's handler reaches a human with no seat in the path. A 2xx is the
+// delivery. Any other answer, or none, keeps the record in
+// <dir>/forward-pending/<id>.json, which every round tries once more; after
+// forwardRetries retries it is dropped with a log line. The inbox and page
+// records are already written by then, so a dead URL costs only the copy.
+
+const (
+	forwardPendingDir = "forward-pending"
+	forwardRetries    = 20
+	// forwardBodyMax bounds the body as it stands in the POST's JSON, which
+	// keeps the whole POST under the handler lane's 64 KiB.
+	forwardBodyMax = 60000
+)
+
+// forwardPost is the POST body: the timeline record as a page holds it,
+// marked when its body was cut.
+type forwardPost struct {
+	Schema string      `json:"schema"`
+	Data   forwardData `json:"data"`
+}
+
+type forwardData struct {
+	*timeline.Record
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// forwardEntry is one record waiting for the next round: the POST's bytes,
+// cut once when the message arrived, and the failures so far. The URL is
+// read from config each round, so a corrected URL takes the waiting records.
+type forwardEntry struct {
+	Peer     string          `json:"peer"`
+	ID       string          `json:"id"`
+	Post     json.RawMessage `json:"post"`
+	Failures int             `json:"failures"`
+	Last     string          `json:"last"`
+}
+
+// cutBody cuts a text body so its JSON form, without the quotes, is at most
+// forwardBodyMax bytes, on a rune boundary. Only a text body can be long.
+func cutBody(body json.RawMessage) (json.RawMessage, bool) {
+	var s string
+	if len(body) <= forwardBodyMax+2 || json.Unmarshal(body, &s) != nil {
+		return body, false
+	}
+	n := sort.Search(len(s)+1, func(i int) bool {
+		b, _ := json.Marshal(s[:i])
+		return len(b)-2 > forwardBodyMax
+	}) - 1
+	if n == len(s) {
+		return body, false
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	cut, err := json.Marshal(s[:n])
+	if err != nil {
+		return body, false
+	}
+	return cut, true
+}
+
+// forwardBytes is the POST body of received message m.
+func forwardBytes(m *session.Message) ([]byte, error) {
+	rec, err := timeline.Of(timeline.In, m)
+	if err != nil {
+		return nil, err
+	}
+	var cut bool
+	rec.Body, cut = cutBody(rec.Body)
+	return json.Marshal(forwardPost{Schema: timeline.Schema, Data: forwardData{Record: rec, Truncated: cut}})
+}
+
+// forwardTimeline POSTs received message m to the peer's forward URL, if it
+// has one. Like the page write it never reaches the message path. A URL that
+// failed earlier in the round is not tried again: the record waits for the
+// next round, its failure count unchanged.
+func (p *party) forwardTimeline(ctx context.Context, name string, m *session.Message) {
+	u := p.cfg.Timelines[name].Forward
+	if u == "" {
+		return
+	}
+	log := p.timelineLog()
+	if !deliver.ValidID(m.ID) {
+		fmt.Fprintf(log, "forward %s: invalid message id\n", name)
+		return
+	}
+	post, err := forwardBytes(m)
+	if err != nil {
+		fmt.Fprintf(log, "forward %s: %s: %v\n", name, m.ID, err)
+		return
+	}
+	e := &forwardEntry{Peer: name, ID: m.ID, Post: post}
+	if p.tl.deadForward[u] {
+		e.Last = "the URL failed earlier this round"
+		fmt.Fprintf(log, "forward %s: %s: waits for the next round\n", name, m.ID)
+		p.keepForward(e)
+		return
+	}
+	if err := p.postForward(ctx, u, post); err != nil {
+		p.tl.deadForward[u] = true
+		p.forwardFailed(e, err)
+	}
+}
+
+// retryForwards tries every waiting record once, in id order. A URL whose
+// POST fails is not tried again in the round, so one that never answers
+// holds the round for one timeout, not one per record.
+func (p *party) retryForwards(ctx context.Context) {
+	log := p.timelineLog()
+	names, err := filepath.Glob(filepath.Join(p.dir, forwardPendingDir, "*.json"))
+	if err != nil {
+		fmt.Fprintf(log, "forward: %v\n", err)
+		return
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		var e forwardEntry
+		b, err := os.ReadFile(n)
+		if err == nil {
+			err = json.Unmarshal(b, &e)
+		}
+		if err == nil && !deliver.ValidID(e.ID) {
+			err = errors.New("invalid message id")
+		}
+		if err != nil {
+			fmt.Fprintf(log, "forward: %s: %v\n", filepath.Base(n), err)
+			continue
+		}
+		u := p.cfg.Timelines[e.Peer].Forward
+		if u == "" {
+			fmt.Fprintf(log, "forward %s: %s: no forward URL in config; dropped\n", e.Peer, e.ID)
+			p.dropForward(&e)
+			continue
+		}
+		if p.tl.deadForward[u] {
+			continue
+		}
+		if err := p.postForward(ctx, u, e.Post); err != nil {
+			p.tl.deadForward[u] = true
+			p.forwardFailed(&e, err)
+			continue
+		}
+		fmt.Fprintf(log, "forward %s: %s: delivered after %d failures\n", e.Peer, e.ID, e.Failures)
+		p.dropForward(&e)
+	}
+}
+
+// forwardFailed counts a failed POST: kept for the next round while retries
+// remain, else dropped with its log line.
+func (p *party) forwardFailed(e *forwardEntry, cause error) {
+	log := p.timelineLog()
+	e.Failures++
+	e.Last = cause.Error()
+	if e.Failures <= forwardRetries {
+		fmt.Fprintf(log, "forward %s: %s: %v; retry %d of %d next round\n", e.Peer, e.ID, cause, e.Failures, forwardRetries)
+		p.keepForward(e)
+		return
+	}
+	fmt.Fprintf(log, "forward %s: %s: %v; dropped after %d retries\n", e.Peer, e.ID, cause, forwardRetries)
+	p.dropForward(e)
+}
+
+func (p *party) forwardPath(id string) string {
+	return filepath.Join(p.dir, forwardPendingDir, id+".json")
+}
+
+func (p *party) keepForward(e *forwardEntry) {
+	if err := writeEntry(p.forwardPath(e.ID), e); err != nil {
+		fmt.Fprintf(p.timelineLog(), "forward %s: %s: not kept for the next round: %v\n", e.Peer, e.ID, err)
+	}
+}
+
+func (p *party) dropForward(e *forwardEntry) {
+	if err := os.Remove(p.forwardPath(e.ID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(p.timelineLog(), "forward %s: %s: %v\n", e.Peer, e.ID, err)
+	}
+}
+
+// postForward is one POST of a record to u. An error never carries the URL:
+// its path is the handler's secret and the error goes to the journal.
+func (p *party) postForward(ctx context.Context, u string, post []byte) error {
+	pu, err := url.Parse(u)
+	if err != nil || pu.Scheme != "https" {
+		return errors.New("the forward URL is not an https URL")
+	}
+	ctx, cancel := context.WithTimeout(ctx, serviceTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(post))
+	if err != nil {
+		return errors.New("the forward URL does not form a request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := serviceClient.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return ue.Err
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("answered %s", resp.Status)
+	}
+	return nil
+}

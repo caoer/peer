@@ -19,14 +19,16 @@ import (
 )
 
 // timelineConfig is one peer's collaboration page (design §8): config.json
-// "timelines": {"<peer name>": {"page", "slug", "login"}}, login defaulting
-// to the config login. It is host-local config like the roster page, not a
-// field of the shared roster record: the login is this host's secret. A peer
-// with no entry gets no timeline writes.
+// "timelines": {"<peer name>": {"page", "slug", "login", "forward"}}, login
+// defaulting to the config login. It is host-local config like the roster
+// page, not a field of the shared roster record: the login is this host's
+// secret, and so is the forward URL (forward.go). A peer with no entry gets
+// no timeline writes.
 type timelineConfig struct {
-	Page  string `json:"page,omitempty"`
-	Slug  string `json:"slug,omitempty"`
-	Login string `json:"login,omitempty"`
+	Page    string `json:"page,omitempty"`
+	Slug    string `json:"slug,omitempty"`
+	Login   string `json:"login,omitempty"`
+	Forward string `json:"forward,omitempty"`
 }
 
 // timelinePendingDir holds, under the peer directory, the timeline record of
@@ -35,16 +37,18 @@ type timelineConfig struct {
 const timelinePendingDir = "timeline-pending"
 
 // timelineState is a party's timeline writes in one round — a serve round or
-// one peer send: where they log, and the peers whose page refused, skipped
-// for the rest of the round so a refusing page costs one log line per round.
+// one peer send: where they log, the peers whose page refused, skipped for
+// the rest of the round so a refusing page costs one log line per round, and
+// the forward URLs whose POST failed in the round.
 type timelineState struct {
-	log     io.Writer
-	refused map[string]bool
+	log         io.Writer
+	refused     map[string]bool
+	deadForward map[string]bool
 }
 
 // timelineRound starts a round of timeline writes logging to log.
 func (p *party) timelineRound(log io.Writer) {
-	p.tl = &timelineState{log: log, refused: map[string]bool{}}
+	p.tl = &timelineState{log: log, refused: map[string]bool{}, deadForward: map[string]bool{}}
 }
 
 func (p *party) timelineLog() io.Writer {
@@ -69,13 +73,22 @@ func (p *party) timelinePage(name string) (*status.Page, error) {
 	return status.NewPage(tc.Page, tc.Slug, tc.Login, nil), nil
 }
 
-// writeTimeline puts message m, relay seq seq in direction dir on the
-// channel, on the peer's collaboration page. It is the last step after the
-// message's birth or commit and never reaches the message path: a failure
-// is logged, and the peer's page is left alone for the rest of the round.
-// The write is create-only (status.Page.Create), so a message written
-// before — a spool replay, another host — is a no-op.
+// writeTimeline is the last step after a message's birth or commit: the
+// record on the peer's collaboration page, then, for a received message, its
+// forward. A page that refused does not stop the forward.
 func (p *party) writeTimeline(ctx context.Context, name, channel, dir string, seq int64, m *session.Message) {
+	p.writeTimelinePage(ctx, name, channel, dir, seq, m)
+	if dir == timeline.In {
+		p.forwardTimeline(ctx, name, m)
+	}
+}
+
+// writeTimelinePage puts message m, relay seq seq in direction dir on the
+// channel, on the peer's collaboration page. It never reaches the message
+// path: a failure is logged, and the peer's page is left alone for the rest
+// of the round. The write is create-only (status.Page.Create), so a message
+// written before — a spool replay, another host — is a no-op.
+func (p *party) writeTimelinePage(ctx context.Context, name, channel, dir string, seq int64, m *session.Message) {
 	log := p.timelineLog()
 	if p.tl.refused[name] {
 		return

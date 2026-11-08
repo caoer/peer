@@ -158,7 +158,7 @@ func (sv *server) serviceFailed(e *serviceEntry, m *session.Message, cause error
 	path := filepath.Join(sv.p.dir, serviceDir, m.ID+".json")
 	if retries := sv.serviceRetries(); e.Failures <= retries {
 		fmt.Fprintf(sv.out, "%s %s → %s: %v; retry %d of %d next round\n", m.Kind, m.ID, e.URL, cause, e.Failures, retries)
-		return writeServiceEntry(path, e)
+		return writeEntry(path, e)
 	}
 	if err := sv.quarantineLocal(m, e.Group, fmt.Sprintf("not delivered to %s: %s", e.URL, e.Last)); err != nil {
 		return err
@@ -221,8 +221,8 @@ func postService(u string, m *session.Message, group string) error {
 	return nil
 }
 
-// writeServiceEntry lands e whole: a temp file, synced, renamed over path.
-func writeServiceEntry(path string, e *serviceEntry) error {
+// writeEntry lands e whole as JSON: a temp file, synced, renamed over path.
+func writeEntry(path string, e any) error {
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err

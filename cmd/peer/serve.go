@@ -210,6 +210,7 @@ func (sv *server) round(ctx context.Context) error {
 		return err
 	}
 	sv.p.timelineRound(sv.out)
+	sv.p.retryForwards(ctx)
 	if sv.seats != nil {
 		sv.retryServices()
 	}
