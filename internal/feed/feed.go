@@ -49,7 +49,8 @@ var (
 )
 
 // ErrRefused is the Object's word that the source secret is not this feed's:
-// the client stops, and a corrected config.json takes a restart.
+// the client stops; a serve dials again with the feed record's secret at its
+// next round.
 var ErrRefused = errors.New("feed: the source secret is not this feed's")
 
 // Replay is the Object's word that a viewer connected: who to replay to, the
@@ -162,6 +163,14 @@ func write(conn *websocket.Conn, b []byte) error {
 	return conn.Write(ctx, websocket.MessageText, b)
 }
 
+// Refused reports whether the Object refused the secret: the client has
+// stopped, and a new one takes the feed record's current secret.
+func (c *Client) Refused() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.refused
+}
+
 // Pending is how many sent records the Object has not acked.
 func (c *Client) Pending() int {
 	c.mu.Lock()
@@ -231,7 +240,7 @@ func (c *Client) hold(ctx context.Context) {
 		case ctx.Err() != nil:
 			return
 		case websocket.CloseStatus(err) == closeBadToken:
-			fmt.Fprintf(c.opt.Log, "feed: %s: the source secret is not this feed's; peer serve takes a corrected feed.secret at its next start\n", c.url)
+			fmt.Fprintf(c.opt.Log, "feed: %s: the source secret is not this feed's; peer serve dials again with the feed record's secret at its next round\n", c.url)
 			c.mu.Lock()
 			c.refused = true
 			c.cond.Broadcast()

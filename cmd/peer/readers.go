@@ -45,7 +45,7 @@ const readersPendingVersion = 1
 var readerHashRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // wakeReaderKey is the journal line a new key raises, for the wake.
-const wakeReaderKey = "peer reader key pending for %s: peer e2e publish on the root machine\n"
+const wakeReaderKey = "peer reader key pending for %s: peer e2e publish where root.json is\n"
 
 // pendingTries bounds the CAS reloads on another host's commit.
 const pendingTries = 5

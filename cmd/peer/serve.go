@@ -60,7 +60,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stderr, sv.p.forwardLine())
-	fmt.Fprintln(stderr, sv.p.feedLine())
+	fmt.Fprintln(stderr, sv.p.feedLine(ctx))
 	if err := sv.start(ctx); err != nil {
 		fmt.Fprintf(stderr, "peer serve: %v\n", err)
 		return 1
@@ -215,6 +215,7 @@ func (sv *server) round(ctx context.Context) error {
 	}
 	sv.p.timelineRound(sv.out)
 	sv.p.retryForwards(ctx)
+	sv.p.feedRound(ctx)
 	sv.p.pruneFeed()
 	if sv.seats != nil {
 		sv.retryServices()

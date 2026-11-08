@@ -24,22 +24,24 @@ import (
 )
 
 // A channel's messages, received and sent, also reach the party's reader
-// pages live through the feed named by config.json feed: a source socket on
-// <url>/feed/<party id> (internal/feed), the host saying hello with the
-// source secret, each record a frame the worker fans out to the pages and
-// stores nowhere (plan-delivery decisions 15, 23, 30, 31). What a page missed
-// it asks for on connect: the host replays the inbox records it holds for
-// received messages and, for sent ones, the local record this file keeps —
+// pages live through the feed named by config.json feed.url: a source socket
+// on <url>/feed/<party id> (internal/feed), the host saying hello with the
+// source secret the shared state record feed holds (feed.go, decision 33),
+// each record a frame the worker fans out to the pages and stores nowhere
+// (plan-delivery decisions 15, 23, 30, 31). What a page missed it asks for on
+// connect: the host replays the inbox records it holds for received messages
+// and, for sent ones, the local record this file keeps —
 // <dir>/feed/<peer name>/out-<seq>.json, the peer-timeline@1 data of the
 // message, 30 days. A page's reader key rides the replay request and lands
 // in readers-pending (readers.go). feed.only "e2e" keeps plain messages off
-// the worker: only encrypted records are fed and replayed.
+// the worker: only encrypted records are fed and replayed. A host with
+// feed.url and no feed record says so once at start and once per round, and
+// feeds nothing.
 
-// feedConfig is config.json "feed": {"url", "secret", "only"?}.
+// feedConfig is config.json "feed": {"url", "only"?} — no secret in the file.
 type feedConfig struct {
-	URL    string `json:"url"`
-	Secret string `json:"secret"`
-	Only   string `json:"only,omitempty"`
+	URL  string `json:"url"`
+	Only string `json:"only,omitempty"`
 }
 
 const (
@@ -52,18 +54,14 @@ const (
 	feedOnlyE2E = "e2e"
 )
 
-// check refuses a feed whose url is not https, whose secret is missing, or
-// whose only is not e2e: on this binary each would leave the feed silently
-// off or wide open.
+// check refuses a feed whose url is not https or whose only is not e2e: on
+// this binary each would leave the feed silently off or wide open.
 func (f *feedConfig) check() error {
 	if f == nil {
 		return nil
 	}
 	if u, err := url.Parse(f.URL); err != nil || u.Scheme != "https" || u.Host == "" {
 		return fmt.Errorf("%s: feed.url is not an https URL", configFile)
-	}
-	if f.Secret == "" {
-		return fmt.Errorf("%s: feed needs secret, the source secret", configFile)
 	}
 	if f.Only != "" && f.Only != feedOnlyE2E {
 		return fmt.Errorf("%s: feed.only %q: the one value is %q", configFile, f.Only, feedOnlyE2E)
@@ -74,16 +72,31 @@ func (f *feedConfig) check() error {
 // e2eOnly reports whether plain records stay off the feed.
 func (f *feedConfig) e2eOnly() bool { return f != nil && f.Only == feedOnlyE2E }
 
-// feedLine is serve's start line on stderr, the journal: the feed's URL, or
-// off.
-func (p *party) feedLine() string {
+// feedLine is serve's start line on stderr, the journal: the feed's URL,
+// off, or not set up while the feed record is absent.
+func (p *party) feedLine(ctx context.Context) string {
 	if p.cfg.Feed == nil {
 		return "feed: off"
+	}
+	if secret, err := p.feedSecret(ctx); err != nil {
+		return "feed: " + err.Error()
+	} else if secret == "" {
+		return feedNotSetUp
 	}
 	if p.cfg.Feed.e2eOnly() {
 		return "feed: " + p.cfg.Feed.URL + " · only e2e"
 	}
 	return "feed: " + p.cfg.Feed.URL
+}
+
+// feedSecret is the source secret the feed record holds; "" while the record
+// is absent.
+func (p *party) feedSecret(ctx context.Context) (string, error) {
+	f, err := p.store.Feed(ctx)
+	if err != nil {
+		return "", err
+	}
+	return f.Source, nil
 }
 
 // feedHost is the name this host says hello with: its hostname, in the
@@ -110,9 +123,9 @@ type feedLog struct{ p *party }
 
 func (l feedLog) Write(b []byte) (int, error) { return l.p.timelineLog().Write(b) }
 
-// feedDial opens a source socket on the party's feed.
-func (p *party) feedDial(ctx context.Context) *feed.Client {
-	return feed.Dial(ctx, p.cfg.Feed.URL, p.partyID(), p.cfg.Feed.Secret, feedHost(), feed.Options{
+// feedDial opens a source socket on the party's feed with the record's secret.
+func (p *party) feedDial(ctx context.Context, secret string) *feed.Client {
+	return feed.Dial(ctx, p.cfg.Feed.URL, p.partyID(), secret, feedHost(), feed.Options{
 		HTTPClient: serviceClient,
 		Log:        feedLog{p},
 		Replay:     p.replayFeed,
@@ -121,13 +134,39 @@ func (p *party) feedDial(ctx context.Context) *feed.Client {
 }
 
 // feedStart opens the party's feed socket for the caller's life — a serve's
-// — replaying the inbox records under inbox; nothing without a feed.
+// — replaying the inbox records under inbox; nothing without a feed, and
+// nothing yet while the feed record is absent (feedRound dials once it is).
 func (p *party) feedStart(ctx context.Context, inbox string) {
-	if p.cfg.Feed == nil || p.feed != nil {
+	if p.cfg.Feed == nil {
 		return
 	}
-	p.feedInbox = inbox
-	p.feed = p.feedDial(ctx)
+	p.feedInbox, p.feedServe = inbox, true
+	p.feedRound(ctx)
+}
+
+// feedRound is a serve round's feed step: a socket not yet open — the record
+// was absent — or one the worker refused is opened again with the record's
+// current secret; while the record is absent the journal says so.
+func (p *party) feedRound(ctx context.Context) {
+	if p.cfg.Feed == nil || !p.feedServe {
+		return
+	}
+	if p.feed != nil {
+		if !p.feed.Refused() {
+			return
+		}
+		p.feed.Close()
+		p.feed = nil
+	}
+	secret, err := p.feedSecret(ctx)
+	switch {
+	case err != nil:
+		fmt.Fprintf(p.timelineLog(), "feed: %v\n", err)
+	case secret == "":
+		fmt.Fprintln(p.timelineLog(), feedNotSetUp)
+	default:
+		p.feed = p.feedDial(ctx, secret)
+	}
 }
 
 // feedStop waits for the acks of what was sent, one timeout at most, and
@@ -184,7 +223,21 @@ func (p *party) feedTimeline(ctx context.Context, name, dir string, seq int64, m
 		p.feed.Send(data, n)
 		return
 	}
-	c := p.feedDial(ctx)
+	if p.feedServe {
+		// A serve whose record is absent: the round said so; the records
+		// wait in the inbox and the local record for the replay.
+		return
+	}
+	secret, err := p.feedSecret(ctx)
+	if err != nil {
+		fmt.Fprintf(log, "feed %s: %s: %v\n", name, m.ID, err)
+		return
+	}
+	if secret == "" {
+		fmt.Fprintln(log, feedNotSetUp)
+		return
+	}
+	c := p.feedDial(ctx, secret)
 	c.Send(data, n)
 	p.feedFlush(c)
 	c.Close()

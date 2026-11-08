@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -13,9 +18,11 @@ import (
 	"time"
 
 	"github.com/caoer/peer/internal/e2e"
+	"github.com/caoer/peer/internal/feed"
 	"github.com/caoer/peer/internal/feed/feedtest"
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay/relaytest"
+	"github.com/caoer/peer/internal/store"
 	"github.com/caoer/peer/internal/timeline"
 )
 
@@ -75,9 +82,10 @@ func trustFeed(t *testing.T, s *feedtest.Server) {
 }
 
 // feedPair is a handshake whose guest ("ancan") feeds its messages to a fake
-// feed admitting feedSecret and the reader token feedToken, its state in a
-// shared directory so a second host can serve it; fwd, when set, is its
-// forward too.
+// feed admitting feedSecret and the reader token feedToken — both seeded on
+// the fake and in the guest's feed record, as peer feed setup and link leave
+// them — its state in a shared directory so a second host can serve it; fwd,
+// when set, is its forward too.
 func feedPair(t *testing.T, only string, fwd *forwardConfig) (*pair, *feedtest.Server) {
 	t.Helper()
 	_, _, base := relaytest.Start(t, login)
@@ -86,12 +94,54 @@ func feedPair(t *testing.T, only string, fwd *forwardConfig) (*pair, *feedtest.S
 	party := keys.PartyID(rootOf(t, guestDir).Public())
 	s := feedtest.Start(t, party, feedSecret, feedToken)
 	trustFeed(t, s)
-	cfg.Feed = &feedConfig{URL: s.URL, Secret: feedSecret, Only: only}
+	cfg.Feed = &feedConfig{URL: s.URL, Only: only}
 	cfg.Forward = fwd
 	if err := os.WriteFile(filepath.Join(guestDir, configFile), mustJSON(t, cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedFeed(t, guestDir, feedSecret, feedToken)
 	return handshake(t, hostDir, guestDir, base), s
+}
+
+// seedFeed writes the feed record under dir as peer feed setup and link
+// leave it: the source secret and one reader per token.
+func seedFeed(t *testing.T, dir, secret string, tokens ...string) {
+	t.Helper()
+	p, err := openParty(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := p.store.Feed(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Source = secret
+	for i, tok := range tokens {
+		f.Readers = append(f.Readers, store.FeedReader{Hash: feedtest.Hash(tok), Label: fmt.Sprintf("reader-%d", i+1), At: feed.At(time.Now())})
+	}
+	if err := f.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fleetHost is another machine of the party under dir as a fleet host is:
+// identity, party keys and config, no root.json.
+func fleetHost(t *testing.T, dir string) string {
+	t.Helper()
+	host := filepath.Join(t.TempDir(), "peer")
+	if err := os.MkdirAll(host, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{identityFile, partyKeysFile, configFile} {
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(host, n), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return host
 }
 
 // liveServer is a serve of dir with its feed socket open, as a running serve
@@ -214,7 +264,7 @@ func TestFeedLiveReplayAndReaderKey(t *testing.T) {
 	if err != nil || len(pending.Keys) != 1 || pending.Keys[0].Key != pub || pending.Keys[0].Reader != feedtest.Hash(feedToken) {
 		t.Fatalf("readers-pending %+v: %v", pending, err)
 	}
-	if n := strings.Count(out1.String()+out2.String(), "peer reader key pending for "+p.guestParty+": peer e2e publish on the root machine"); n != 1 {
+	if n := strings.Count(out1.String()+out2.String(), "peer reader key pending for "+p.guestParty+": peer e2e publish where root.json is"); n != 1 {
 		t.Fatalf("%d wake lines:\n%s%s", n, out1.String(), out2.String())
 	}
 
@@ -309,13 +359,12 @@ func TestFeedOnlyE2E(t *testing.T) {
 	}
 }
 
-// A feed whose url is not https, whose secret is missing, or whose only is
-// not e2e refuses to load, naming the key.
+// A feed whose url is not https or whose only is not e2e refuses to load,
+// naming the key.
 func TestFeedConfigRefuses(t *testing.T) {
 	for name, tc := range map[string]struct{ raw, want string }{
-		"http":      {`{"url":"http://x","secret":"s"}`, "feed.url"},
-		"no secret": {`{"url":"https://x"}`, "secret"},
-		"only":      {`{"url":"https://x","secret":"s","only":"plain"}`, "feed.only"},
+		"http": {`{"url":"http://x"}`, "feed.url"},
+		"only": {`{"url":"https://x","only":"plain"}`, "feed.only"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := newDir(t, config{})
@@ -336,5 +385,282 @@ func TestFeedConfigRefuses(t *testing.T) {
 				t.Fatalf("exit %d: %s", code, errb)
 			}
 		})
+	}
+}
+
+// The U13 check's mint on any machine (decision 33): peer feed setup on one
+// fleet host of the party and peer feed link on another, neither holding
+// root.json, both taken by the fake under the card; show on the first lists
+// the second's link; a serve dials with the record's secret and the link's
+// page receives the frames; revoke refuses the page at its next hello; setup
+// again refuses, --reset mints a new secret the next serve dials with.
+func TestFeedSetupLinkOnAnyMachine(t *testing.T) {
+	ctx := context.Background()
+	_, _, base := relaytest.Start(t, login)
+	cfg := config{State: stateConfig{Dir: filepath.Join(t.TempDir(), "shared-state")}}
+	hostDir, guestDir := newDir(t, hostCfg()), newDir(t, cfg)
+	party := keys.PartyID(rootOf(t, guestDir).Public())
+	s := feedtest.Start(t, party, "")
+	trustFeed(t, s)
+	cfg.Feed = &feedConfig{URL: s.URL}
+	if err := os.WriteFile(filepath.Join(guestDir, configFile), mustJSON(t, cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := handshake(t, hostDir, guestDir, base)
+	h1, h2 := fleetHost(t, guestDir), fleetHost(t, guestDir)
+	for _, h := range []string{h1, h2} {
+		if _, err := os.Stat(filepath.Join(h, rootFile)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s holds %s", h, rootFile)
+		}
+	}
+
+	// Before the setup: a link refuses, show and serve say so, nothing is fed.
+	if code, _, errb := cmd(t, "feed", "link", "--dir", h1); code != 1 || !strings.Contains(errb, "not set up — peer feed setup on any machine of this party") {
+		t.Fatalf("link before setup: exit %d: %s", code, errb)
+	}
+	if out := mustOK(t, "feed", "show", "--dir", h1); !strings.Contains(out, feedNotSetUp) {
+		t.Fatalf("show before setup:\n%s", out)
+	}
+	sendOK(t, p.hostDir, "--text", "early", "ancan")
+	if code, out, errb := cmd(t, "serve", "--dir", h1, "--once"); code != 0 || !strings.Contains(errb, feedNotSetUp+"\n") || !strings.Contains(out, feedNotSetUp+"\n") {
+		t.Fatalf("serve before setup: exit %d\n%s%s", code, out, errb)
+	}
+	if n := len(s.Frames()); n != 0 {
+		t.Fatalf("%d frames before the setup", n)
+	}
+
+	out := mustOK(t, "feed", "setup", "--dir", h1)
+	if !strings.Contains(out, "feed set up for "+party+" at "+s.URL+"\n") {
+		t.Fatalf("setup:\n%s", out)
+	}
+	held := s.Config()
+	if held == nil || held.Party != party || len(held.Readers) != 0 || !strings.HasPrefix(held.Source, "sha256:") {
+		t.Fatalf("held %+v", held)
+	}
+	if code, _, errb := cmd(t, "feed", "setup", "--dir", h2); code != 1 || !strings.Contains(errb, "the feed is set up, 0 reader links") {
+		t.Fatalf("setup again: exit %d: %s", code, errb)
+	}
+
+	out = mustOK(t, "feed", "link", "--dir", h2, "--label", "phone")
+	link, rest, _ := strings.Cut(out, "\n")
+	prefix := s.URL + "/#p=" + party + "&t="
+	if !strings.HasPrefix(link, prefix) {
+		t.Fatalf("link %q", link)
+	}
+	token := strings.TrimPrefix(link, prefix)
+	if len(token) != 43 || strings.Contains(rest, token) {
+		t.Fatalf("token %q, printed once: %q", token, rest)
+	}
+	if !strings.Contains(rest, "reader phone · "+feedtest.Hash(token)) {
+		t.Fatalf("link's second line %q", rest)
+	}
+	if held = s.Config(); len(held.Readers) != 1 || held.Readers[0] != feedtest.Hash(token) {
+		t.Fatalf("held after the link %+v", held)
+	}
+	out = mustOK(t, "feed", "show", "--dir", h1, "--remote")
+	if !strings.Contains(out, "1 reader links\n  phone · "+feedtest.Hash(token)) || !strings.Contains(out, "worker: at "+held.At+" · source "+held.Source+" · 1 readers") || strings.Contains(out, "not on the worker") {
+		t.Fatalf("show --remote:\n%s", out)
+	}
+
+	// A serve on the first host dials with the record's secret; the link's
+	// page gets the frame.
+	v, _, err := s.Connect(ctx, token, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := sendOK(t, p.hostDir, "--text", "hello", "ancan")
+	if code, _, errb := cmd(t, "serve", "--dir", h1, "--once"); code != 0 || !strings.Contains(errb, "feed: "+s.URL+"\n") {
+		t.Fatalf("serve: exit %d, stderr %q", code, errb)
+	}
+	if f := viewerNext(t, v); f.Rec == nil || f.Rec.ID != id || f.Rec.Dir != timeline.In {
+		t.Fatalf("viewer got %+v", f)
+	}
+	v.Close()
+
+	// Revoke on the first host: the page's next hello is refused.
+	if code, _, errb := cmd(t, "feed", "revoke", "--dir", h1, "nobody"); code != 1 || !strings.Contains(errb, `no reader link is "nobody"`) {
+		t.Fatalf("revoke nobody: exit %d: %s", code, errb)
+	}
+	if out := mustOK(t, "feed", "revoke", "--dir", h1, "phone"); !strings.Contains(out, "revoked phone · "+feedtest.Hash(token)) {
+		t.Fatalf("revoke:\n%s", out)
+	}
+	if held = s.Config(); len(held.Readers) != 0 {
+		t.Fatalf("held after the revoke %+v", held)
+	}
+	refused := s.Refused()
+	if _, _, err := s.Connect(ctx, token, ""); err == nil || s.Refused() != refused+1 {
+		t.Fatalf("a revoked token connected: %v", err)
+	}
+	if out := mustOK(t, "feed", "link", "--dir", h1, "--label", "laptop"); !strings.Contains(out, "reader laptop · ") {
+		t.Fatalf("link by hash prefix setup:\n%s", out)
+	}
+	hash := s.Config().Readers[0]
+	if out := mustOK(t, "feed", "revoke", "--dir", h2, strings.TrimPrefix(hash, "sha256:")[:12]); !strings.Contains(out, "revoked laptop · "+hash) {
+		t.Fatalf("revoke by hash prefix:\n%s", out)
+	}
+
+	// --reset: a new source secret the next serve dials with; the old one is
+	// refused.
+	oldSource := s.Config().Source
+	out = mustOK(t, "feed", "setup", "--dir", h2, "--reset")
+	if !strings.Contains(out, "new source secret") || s.Config().Source == oldSource {
+		t.Fatalf("reset:\n%s\nheld %+v", out, s.Config())
+	}
+	refused, before := s.Refused(), len(s.Frames())
+	sendOK(t, p.hostDir, "--text", "after the reset", "ancan")
+	mustOK(t, "serve", "--dir", h1, "--once")
+	if s.Refused() != refused || len(s.Frames()) != before+1 {
+		t.Fatalf("after the reset: %d refused, %d frames", s.Refused()-refused, len(s.Frames())-before)
+	}
+}
+
+// The fake verifies a config request as the worker does: the card under the
+// party id, the body under the card's current identity key. A body signed by
+// the root key, by another identity key, or under another party's card is
+// refused; an equal at is stale; a GET under the delegation reads the config.
+func TestFeedConfigDelegation(t *testing.T) {
+	ctx := context.Background()
+	a, b := newDir(t, config{}), newDir(t, config{})
+	pa, err := openParty(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := openParty(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := feedtest.Start(t, pa.partyID(), "")
+	client := s.Client()
+	cardA, _, _, err := pa.ownCard(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardB, _, _, err := pb.ownCard(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := func(at time.Time) *feed.Config {
+		return &feed.Config{V: 1, Party: pa.partyID(), At: feed.At(at), Source: feedtest.Hash("s"), Readers: []string{feedtest.Hash("t")}}
+	}
+	refused := func(err error, status int, code string) {
+		t.Helper()
+		var r *feed.Refusal
+		if !errors.As(err, &r) || r.Status != status || r.Code != code {
+			t.Fatalf("want %d %s, got %v", status, code, err)
+		}
+	}
+	now := time.Now()
+	dA := feed.NewDelegation(cardA, pa.id)
+	if err := feed.PutConfig(ctx, client, s.URL, pa.partyID(), cfg(now), dA); err != nil {
+		t.Fatal(err)
+	}
+	if h := s.Config(); h == nil || h.Source != feedtest.Hash("s") || len(h.Readers) != 1 || h.At != feed.At(now) {
+		t.Fatalf("held %+v", h)
+	}
+	if err := feed.PutConfig(ctx, client, s.URL, pa.partyID(), cfg(now), dA); !errors.Is(err, feed.ErrStale) {
+		t.Fatalf("the same at again: %v", err)
+	}
+	later := now.Add(time.Second)
+	refused(feed.PutConfig(ctx, client, s.URL, pa.partyID(), cfg(later), feed.NewDelegation(cardA, pb.id)), 401, "bad_signature")
+	refused(feed.PutConfig(ctx, client, s.URL, pa.partyID(), cfg(later), feed.NewDelegation(cardB, pb.id)), 401, "bad_card")
+	refused(feed.PutConfig(ctx, client, s.URL, pa.partyID(), cfg(now.Add(10*time.Minute)), dA), 401, "stale")
+	body := mustJSON(t, cfg(later))
+	req, err := http.NewRequest(http.MethodPut, s.URL+"/feed/"+pa.partyID()+"/config", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(feed.CardHeader, dA.Card())
+	req.Header.Set(feed.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(rootOf(t, a).Key, body)))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a root-signed body: %s", resp.Status)
+	}
+	if s.Puts() != 1 {
+		t.Fatalf("%d configs taken, want the first alone", s.Puts())
+	}
+
+	c, err := feed.GetConfig(ctx, client, s.URL, pa.partyID(), time.Now(), dA)
+	if err != nil || c.Party != pa.partyID() || c.Source != feedtest.Hash("s") || c.At != feed.At(now) {
+		t.Fatalf("GET %+v: %v", c, err)
+	}
+	_, err = feed.GetConfig(ctx, client, s.URL, pa.partyID(), time.Now(), feed.NewDelegation(cardA, pb.id))
+	refused(err, 401, "bad_signature")
+	s2 := feedtest.Start(t, pb.partyID(), "")
+	if _, err := feed.GetConfig(ctx, s2.Client(), s2.URL, pb.partyID(), time.Now(), feed.NewDelegation(cardB, pb.id)); !errors.Is(err, feed.ErrNoConfig) {
+		t.Fatalf("GET with no config: %v", err)
+	}
+}
+
+// updateFixture rewrites the fixture the worker's sign.spec.ts verifies.
+var updateFixture = flag.Bool("update", false, "rewrite worker/test/fixtures/config-signed.json from a test party")
+
+// fixturePath is the one fixture both sides verify (plan-delivery § Identifiers,
+// Feed config; its shape agreed with U18).
+const fixturePath = "../../worker/test/fixtures/config-signed.json"
+
+// configFixture is a PUT body with the identity key's signature over it, the
+// X-Peer-Card value, and a GET's X-Peer-At with its signature.
+type configFixture struct {
+	Party       string `json:"party"`
+	Body        string `json:"body"`
+	Card        string `json:"card"`
+	Signature   string `json:"signature"`
+	At          string `json:"at"`
+	AtSignature string `json:"atSignature"`
+}
+
+// The fixture verifies in Go as it does on the worker: the card under its
+// party, the body and the at under the card's identity key; a changed body
+// does not. -update writes it from a fresh test party.
+func TestFeedConfigFixture(t *testing.T) {
+	if *updateFixture {
+		dir := newDir(t, config{})
+		p, err := openParty(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		public, _, _, err := p.ownCard(context.Background(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := feed.NewDelegation(public, p.id)
+		body := mustJSON(t, feed.Config{V: 1, Party: p.partyID(), At: "2026-11-08T16:00:00.000Z", Source: feedtest.Hash("fixture-source-secret"), Readers: []string{feedtest.Hash("fixture-reader-token-1"), feedtest.Hash("fixture-reader-token-2")}})
+		at := "2026-11-08T16:00:30.000Z"
+		fx := configFixture{Party: p.partyID(), Body: string(body), Card: d.Card(), Signature: d.Sign(body), At: at, AtSignature: d.Sign([]byte(at))}
+		b, err := json.MarshalIndent(fx, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fixturePath, append(b, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fx configFixture
+	if err := json.Unmarshal(b, &fx); err != nil {
+		t.Fatal(err)
+	}
+	if err := feedtest.Verify(fx.Party, fx.Card, fx.Signature, []byte(fx.Body)); err != nil {
+		t.Fatalf("the body's signature: %v", err)
+	}
+	if err := feedtest.Verify(fx.Party, fx.Card, fx.AtSignature, []byte(fx.At)); err != nil {
+		t.Fatalf("the at's signature: %v", err)
+	}
+	var c feed.Config
+	if err := json.Unmarshal([]byte(fx.Body), &c); err != nil || c.V != 1 || c.Party != fx.Party || c.Source == "" || len(c.Readers) == 0 {
+		t.Fatalf("body %+v: %v", c, err)
+	}
+	if err := feedtest.Verify(fx.Party, fx.Card, fx.Signature, []byte(fx.Body+" ")); err == nil {
+		t.Fatal("a changed body verified")
+	}
+	if err := feedtest.Verify(fx.Party, fx.Card, fx.AtSignature, []byte(fx.Body)); err == nil {
+		t.Fatal("the at's signature verified the body")
 	}
 }

@@ -116,8 +116,10 @@ type party struct {
 	// life (feedrecord.go); nil under a command, which opens one per record.
 	feed *feed.Client
 	// feedInbox is the delivery directory whose inbox records the feed
-	// replays — the serve's, else config's.
+	// replays — the serve's, else config's. feedServe marks a serve, which
+	// holds one socket (feedRound) where a command opens one per record.
 	feedInbox string
+	feedServe bool
 	// feedN numbers the frames the feed acks.
 	feedN atomic.Int64
 }

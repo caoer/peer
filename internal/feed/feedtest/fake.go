@@ -2,22 +2,35 @@
 // src/feed.ts) for the host side's tests: the hello check against a source
 // secret and reader tokens, the fan-out of a source's records to every
 // viewer with its ack, the replay request a viewer's connect sends every
-// source with its key, and the frames addressed to one viewer. It serves
-// GET /feed/<party id> alone; the config routes are the worker's own.
+// source with its key, the frames addressed to one viewer, and the signed
+// config at /feed/<party id>/config — verified as the worker verifies it,
+// the card under the party id and the body under the card's current
+// identity key.
 package feedtest
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
+	"go.mau.fi/libsignal/ecc"
+
+	"github.com/caoer/peer/internal/card"
+	"github.com/caoer/peer/internal/keys"
 )
 
 // Hash is a secret or token as the Object stores it.
@@ -26,12 +39,22 @@ func Hash(secret string) string {
 	return "sha256:" + hex.EncodeToString(h[:])
 }
 
+// Held is the config the Object holds, as GET answers it.
+type Held struct {
+	V       int      `json:"v"`
+	Party   string   `json:"party"`
+	At      string   `json:"at"`
+	Source  string   `json:"source"`
+	Readers []string `json:"readers"`
+}
+
 // Server is one party's fake feed.
 type Server struct {
 	*httptest.Server
 	party   string
-	source  string // the source secret's hash
+	source  string // the source secret's hash; "" until a config is put
 	readers map[string]bool
+	at      string // the held config's at; "" until one is put
 
 	mu      sync.Mutex
 	sources map[*conn]bool
@@ -43,6 +66,7 @@ type Server struct {
 	nextID  int
 	// noAck withholds the ack of every rec, as a frame lost on the way does.
 	noAck bool
+	puts  int
 }
 
 // NoAck makes the Object take records without acking them, or acks again.
@@ -64,13 +88,18 @@ type conn struct {
 	host string
 }
 
-// Start serves a feed for party admitting the source secret and the reader
-// tokens, over TLS as the worker is; Client() is the client that trusts it.
+// Start serves a feed for party, over TLS as the worker is; Client() is the
+// client that trusts it. A secret seeds the config as a PUT would — the
+// source secret and the reader tokens admitted — so a test needs no setup;
+// "" starts with no config, as a party's feed is before peer feed setup.
 func Start(t testing.TB, party, secret string, tokens ...string) *Server {
 	t.Helper()
-	s := &Server{party: party, source: Hash(secret), readers: map[string]bool{}, sources: map[*conn]bool{}, viewers: map[*conn]bool{}}
-	for _, tok := range tokens {
-		s.readers[Hash(tok)] = true
+	s := &Server{party: party, readers: map[string]bool{}, sources: map[*conn]bool{}, viewers: map[*conn]bool{}}
+	if secret != "" {
+		s.source, s.at = Hash(secret), "1970-01-01T00:00:00Z"
+		for _, tok := range tokens {
+			s.readers[Hash(tok)] = true
+		}
 	}
 	s.Server = httptest.NewTLSServer(s)
 	t.Cleanup(s.Close)
@@ -96,6 +125,31 @@ func (s *Server) Sources() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.sources)
+}
+
+// Puts is how many configs were taken.
+func (s *Server) Puts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.puts
+}
+
+// Config is the config held, nil before the first PUT.
+func (s *Server) Config() *Held {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.held()
+}
+
+func (s *Server) held() *Held {
+	if s.source == "" {
+		return nil
+	}
+	h := &Held{V: 1, Party: s.party, At: s.at, Source: s.source, Readers: []string{}}
+	for r := range s.readers {
+		h.Readers = append(h.Readers, r)
+	}
+	return h
 }
 
 // CloseSources closes every source socket with 1001, as a deploy does.
@@ -157,6 +211,10 @@ func (s *Server) Connect(ctx context.Context, token, key string) (*Viewer, json.
 func (v *Viewer) Close() { v.ws.CloseNow() }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/feed/"+s.party+"/config" {
+		s.serveConfig(w, r)
+		return
+	}
 	if r.URL.Path != "/feed/"+s.party || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		http.Error(w, `{"error":"no such route","code":"no_such_route"}`, http.StatusNotFound)
 		return
@@ -182,7 +240,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.nextID++
 	c := &conn{ws: ws, id: hexID(s.nextID), host: hello.Host}
 	switch {
-	case hello.Hello == "source" && Hash(hello.Secret) == s.source && hello.Host != "":
+	case hello.Hello == "source" && s.source != "" && Hash(hello.Secret) == s.source && hello.Host != "":
 		s.sources[c] = true
 		n := len(s.sources)
 		s.mu.Unlock()
@@ -210,6 +268,172 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		ws.Close(4401, "bad_token")
 	}
+}
+
+// The config routes, as src/feed.ts and src/sign.ts answer them.
+const (
+	configMax = 16 << 10
+	maxSkew   = 5 * time.Minute
+)
+
+var hashRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func fail(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
+}
+
+// serveConfig is PUT and GET /feed/<party id>/config: the card under the
+// party id, the signature under the card's current identity key — over the
+// body for a PUT, over X-Peer-At for a GET.
+func (s *Server) serveConfig(w http.ResponseWriter, r *http.Request) {
+	cardHdr, sig := r.Header.Get("X-Peer-Card"), r.Header.Get("X-Peer-Signature")
+	switch r.Method {
+	case http.MethodPut:
+		body, err := io.ReadAll(io.LimitReader(r.Body, configMax+1))
+		if err != nil || len(body) > configMax {
+			fail(w, http.StatusRequestEntityTooLarge, "too_large", "a feed config is one JSON object of hashes")
+			return
+		}
+		var c Held
+		if err := json.Unmarshal(body, &c); err != nil {
+			fail(w, http.StatusBadRequest, "bad_request", "config is not JSON")
+			return
+		}
+		if c.V != 1 || c.Party != s.party || !hashRE.MatchString(c.Source) || c.Readers == nil || len(c.Readers) > 64 {
+			fail(w, http.StatusBadRequest, "bad_request", `config is {"v":1,"party":"<this party id>","at":"<RFC 3339 UTC>","source":"sha256:<hex>","readers":["sha256:<hex>",…]}`)
+			return
+		}
+		for _, h := range c.Readers {
+			if !hashRE.MatchString(h) {
+				fail(w, http.StatusBadRequest, "bad_request", "a reader is sha256:<hex>")
+				return
+			}
+		}
+		if err := s.refuse(cardHdr, sig, body); err != nil {
+			fail(w, http.StatusUnauthorized, err.code, err.Error())
+			return
+		}
+		at, err := time.Parse(time.RFC3339Nano, c.At)
+		if err != nil || !strings.HasSuffix(c.At, "Z") || at.Sub(time.Now()).Abs() > maxSkew {
+			fail(w, http.StatusUnauthorized, "stale", "at must be RFC 3339 UTC within 5 minutes of now")
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.at != "" {
+			held, _ := time.Parse(time.RFC3339Nano, s.at)
+			if !at.After(held) {
+				fail(w, http.StatusConflict, "stale", "an equal or newer config is held")
+				return
+			}
+		}
+		s.source, s.at, s.readers, s.puts = c.Source, c.At, map[string]bool{}, s.puts+1
+		for _, h := range c.Readers {
+			s.readers[h] = true
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "at": c.At, "readers": len(s.readers)})
+	case http.MethodGet:
+		at := r.Header.Get("X-Peer-At")
+		if at == "" || sig == "" {
+			fail(w, http.StatusUnauthorized, "bad_signature", "reading the config takes X-Peer-At and X-Peer-Signature")
+			return
+		}
+		if err := s.refuse(cardHdr, sig, []byte(at)); err != nil {
+			fail(w, http.StatusUnauthorized, err.code, err.Error())
+			return
+		}
+		if t, err := time.Parse(time.RFC3339Nano, at); err != nil || !strings.HasSuffix(at, "Z") || t.Sub(time.Now()).Abs() > maxSkew {
+			fail(w, http.StatusUnauthorized, "stale", "X-Peer-At must be RFC 3339 UTC within 5 minutes of now")
+			return
+		}
+		s.mu.Lock()
+		h := s.held()
+		s.mu.Unlock()
+		if h == nil {
+			fail(w, http.StatusNotFound, "no_config", "this party has no feed config yet")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(h)
+	default:
+		fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "PUT or GET")
+	}
+}
+
+// refusal is why a request's delegation does not hold, with the worker's code.
+type refusal struct {
+	code string
+	err  error
+}
+
+func (r *refusal) Error() string { return r.err.Error() }
+
+func (s *Server) refuse(cardHdr, sig string, msg []byte) *refusal {
+	err := Verify(s.party, cardHdr, sig, msg)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrCard):
+		return &refusal{"bad_card", err}
+	}
+	return &refusal{"bad_signature", err}
+}
+
+// Errors Verify returns, matched by the worker's codes.
+var (
+	// ErrCard is a missing X-Peer-Card, one that does not decode, or a card
+	// the party id did not sign.
+	ErrCard = errors.New("X-Peer-Card is not this party's root-signed card")
+	// ErrSignature is a signature the card's current identity key did not make.
+	ErrSignature = errors.New("X-Peer-Signature is not the card's identity key's signature")
+)
+
+// Verify is the check the worker makes on a config request: cardHdr
+// (X-Peer-Card: base64url of signature ‖ card bytes) is party's root-signed
+// card, and sig (X-Peer-Signature, base64url) is the XEdDSA signature of msg
+// by the card's current identity key — the first key with no until. A
+// signature by the root key, by another identity key, or under another
+// party's card is refused.
+func Verify(party, cardHdr, sig string, msg []byte) error {
+	root, err := keys.ParsePartyID(party)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrCard, err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cardHdr)
+	if err != nil || len(raw) <= ed25519.SignatureSize {
+		return ErrCard
+	}
+	c, err := card.Verify(&card.Signed{Sig: raw[:ed25519.SignatureSize], Body: raw[ed25519.SignatureSize:]}, root)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrCard, err)
+	}
+	var current *card.Key
+	for i := range c.Keys {
+		if c.Keys[i].Until == nil {
+			current = &c.Keys[i]
+			break
+		}
+	}
+	if current == nil {
+		return fmt.Errorf("%w: no current key", ErrCard)
+	}
+	idk, err := current.IdentityKey()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrCard, err)
+	}
+	sb, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil || len(sb) != 64 {
+		return ErrSignature
+	}
+	var s [64]byte
+	copy(s[:], sb)
+	if !ecc.VerifySignature(idk.PublicKey(), msg, s) {
+		return ErrSignature
+	}
+	return nil
 }
 
 func hexID(n int) string { return hex.EncodeToString([]byte{byte(n >> 8), byte(n)}) }
