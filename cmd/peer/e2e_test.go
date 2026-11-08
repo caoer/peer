@@ -197,7 +197,8 @@ func TestE2EKeygenHelp(t *testing.T) {
 	}
 }
 
-// publish edits only details.readers, and a second publish replaces the key.
+// publish edits only details.readers, and a second publish adds its key
+// after the first.
 func TestE2EPublishKeepsConfig(t *testing.T) {
 	dir := newDir(t, hostCfg())
 	path := filepath.Join(dir, configFile)
@@ -228,7 +229,7 @@ func TestE2EPublishKeepsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, err := e2e.ParseDetails(cfg.Details)
-	if err != nil || d == nil || len(d.Keys) != 1 || d.Keys[0] != pub2 {
+	if err != nil || d == nil || len(d.Keys) != 2 || d.Keys[0] != pub1 || d.Keys[1] != pub2 {
 		t.Fatalf("details %s: %v", cfg.Details, err)
 	}
 	if !bytes.Contains(cfg.Details, []byte(`"advisor"`)) || len(cfg.Agents) != 1 {

@@ -52,10 +52,12 @@ func (p *party) timelineLog() io.Writer {
 }
 
 // writeTimeline is the last step after a message's birth or commit, under
-// its relay seq in direction dir on the channel: its forward, either way.
-// It never reaches the message path.
+// its relay seq in direction dir on the channel: its forward, either way,
+// then the feed — a sent message's local record and the frame to the party's
+// reader pages (feedrecord.go). It never reaches the message path.
 func (p *party) writeTimeline(ctx context.Context, name, channel, dir string, seq int64, m *session.Message) {
 	p.forwardTimeline(ctx, name, dir, m)
+	p.feedTimeline(ctx, name, dir, seq, m)
 }
 
 // timelineSpooled runs writeTimeline for a spooled message born by a

@@ -28,10 +28,18 @@ serving host. A host that holds it can read every message encrypted to it.
 
 func e2eUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: peer e2e keygen
-       peer e2e publish [--dir D] <public key>
+       peer e2e publish [--dir D] [<public key>]
+       peer e2e revoke [--dir D] <public key>
        peer e2e decrypt --key <secret key> [file]
 `)
 }
+
+// publishNote is in peer e2e publish --help: where a key comes from.
+const publishNote = `The secret never leaves the browser or the person. A key born on the reader
+page waits in the state record readers-pending, which publish with no argument
+folds into details.readers; a key from peer e2e keygen is published by its
+public half. Both append: a party's card lists every key it receives on.
+`
 
 // cmdE2E is message-level encryption on top of the channel: keys a human
 // holds, published on the card, and a decrypt that runs where the secret is.
@@ -45,6 +53,8 @@ func cmdE2E(args []string, stdout, stderr io.Writer) int {
 		return cmdE2EKeygen(args[1:], stdout, stderr)
 	case "publish":
 		return cmdE2EPublish(args[1:], stdout, stderr)
+	case "revoke":
+		return cmdE2ERevoke(args[1:], stdout, stderr)
 	case "decrypt":
 		return cmdE2EDecrypt(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -95,7 +105,34 @@ func cmdE2EPublish(args []string, stdout, stderr io.Writer) int {
 	fl.SetOutput(stderr)
 	dirFlag := fl.String("dir", "", "peer directory (default $PEER_HOME, else <config dir>/peer)")
 	fl.Usage = func() {
-		fmt.Fprintln(stderr, "usage: peer e2e publish [--dir D] <public key>\n\nNames the public key as this party's in config.json details.readers, replacing any\nearlier one, signs the card and sends it on every confirmed channel. Run it\nwhere root.json is; the secret key is not needed and does not belong here.")
+		fmt.Fprintf(stderr, "usage: peer e2e publish [--dir D] [<public key>]\n\nAdds the public key — or, with none, every key waiting in readers-pending — to\nthis party's config.json details.readers, signs the card and sends it on every\nconfirmed channel. Run it where root.json is; the secret key is not needed and\ndoes not belong here.\n\n%s", publishNote)
+	}
+	if code, done := parseFlags(fl, args); done {
+		return code
+	}
+	if fl.NArg() > 1 {
+		fl.Usage()
+		return 2
+	}
+	var err error
+	if fl.NArg() == 1 {
+		err = runE2EPublish(context.Background(), *dirFlag, fl.Arg(0), stdout)
+	} else {
+		err = runE2EFold(context.Background(), *dirFlag, stdout)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "peer e2e publish: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func cmdE2ERevoke(args []string, stdout, stderr io.Writer) int {
+	fl := flag.NewFlagSet("e2e revoke", flag.ContinueOnError)
+	fl.SetOutput(stderr)
+	dirFlag := fl.String("dir", "", "peer directory (default $PEER_HOME, else <config dir>/peer)")
+	fl.Usage = func() {
+		fmt.Fprintln(stderr, "usage: peer e2e revoke [--dir D] <public key>\n\nTakes the public key off this party's config.json details.readers, signs the\ncard and sends it on every confirmed channel. Run it where root.json is.")
 	}
 	if code, done := parseFlags(fl, args); done {
 		return code
@@ -104,38 +141,119 @@ func cmdE2EPublish(args []string, stdout, stderr io.Writer) int {
 		fl.Usage()
 		return 2
 	}
-	if err := runE2EPublish(context.Background(), *dirFlag, fl.Arg(0), stdout); err != nil {
-		fmt.Fprintf(stderr, "peer e2e publish: %v\n", err)
+	if err := runE2ERevoke(context.Background(), *dirFlag, fl.Arg(0), stdout); err != nil {
+		fmt.Fprintf(stderr, "peer e2e revoke: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-// runE2EPublish merges details.readers into config.json, every other key of the
-// file left as it is, and publishes the card it now describes.
+// rootParty opens the party under dir for a command that signs the card.
+func rootParty(dir string) (string, *party, error) {
+	dir, err := peerDir(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	p, err := openParty(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	if p.root == nil {
+		return "", nil, errNoRoot(dir)
+	}
+	return dir, p, nil
+}
+
+// runE2EPublish adds pub to details.readers in config.json, every other key
+// of the file left as it is, and publishes the card it now describes.
 func runE2EPublish(ctx context.Context, dir, pub string, out io.Writer) error {
 	if _, err := e2e.ParsePublic(pub); err != nil {
 		return err
 	}
-	dir, err := peerDir(dir)
+	dir, _, err := rootParty(dir)
 	if err != nil {
 		return err
 	}
-	p, err := openParty(dir)
-	if err != nil {
-		return err
-	}
-	if p.root == nil {
-		return errNoRoot(dir)
-	}
-	if err := writeE2EDetails(filepath.Join(dir, configFile), pub); err != nil {
+	if err := writeE2EDetails(filepath.Join(dir, configFile), func(keys []string) []string { return mergeKeys(keys, []string{pub}) }); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "%s details.readers names %s\n", configFile, pub)
 	return runCardPublish(ctx, dir, out)
 }
 
-func writeE2EDetails(path, pub string) error {
+// runE2EFold adds every key waiting in readers-pending to details.readers,
+// publishes the card, and takes those keys out of the record; one added
+// meanwhile stays for the next publish.
+func runE2EFold(ctx context.Context, dir string, out io.Writer) error {
+	dir, p, err := rootParty(dir)
+	if err != nil {
+		return err
+	}
+	rec, _, err := p.loadPendingReaders(ctx)
+	if err != nil {
+		return err
+	}
+	if len(rec.Keys) == 0 {
+		fmt.Fprintln(out, "no reader key pending; the card is as it was")
+		return nil
+	}
+	var pubs []string
+	for _, k := range rec.Keys {
+		if _, err := e2e.ParsePublic(k.Key); err != nil {
+			return fmt.Errorf("%s: %w", readersPendingKey, err)
+		}
+		pubs = append(pubs, k.Key)
+	}
+	if err := writeE2EDetails(filepath.Join(dir, configFile), func(keys []string) []string { return mergeKeys(keys, pubs) }); err != nil {
+		return err
+	}
+	for _, k := range rec.Keys {
+		fmt.Fprintf(out, "%s details.readers takes %s (reader %s, %s)\n", configFile, k.Key, tail(k.Reader), k.At)
+	}
+	if err := runCardPublish(ctx, dir, out); err != nil {
+		return err
+	}
+	if err := p.dropPendingReaders(ctx, pubs); err != nil {
+		return fmt.Errorf("the card is published; %s not cleared: %w", readersPendingKey, err)
+	}
+	return nil
+}
+
+// runE2ERevoke takes pub off details.readers and publishes the card.
+func runE2ERevoke(ctx context.Context, dir, pub string, out io.Writer) error {
+	if _, err := e2e.ParsePublic(pub); err != nil {
+		return err
+	}
+	dir, _, err := rootParty(dir)
+	if err != nil {
+		return err
+	}
+	found := false
+	err = writeE2EDetails(filepath.Join(dir, configFile), func(keys []string) []string {
+		var kept []string
+		for _, k := range keys {
+			if k == pub {
+				found = true
+				continue
+			}
+			kept = append(kept, k)
+		}
+		return kept
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%s is not in %s details.readers", pub, configFile)
+	}
+	fmt.Fprintf(out, "%s details.readers no longer names %s\n", configFile, pub)
+	return runCardPublish(ctx, dir, out)
+}
+
+// writeE2EDetails rewrites config.json details.readers with edit's keys —
+// the member is removed when none remain — every other key of the file left
+// as it is.
+func writeE2EDetails(path string, edit func(keys []string) []string) error {
 	top := map[string]json.RawMessage{}
 	mode := fs.FileMode(0o600)
 	switch b, err := os.ReadFile(path); {
@@ -157,8 +275,19 @@ func writeE2EDetails(path, pub string) error {
 			return fmt.Errorf("%s: details is not an object", configFile)
 		}
 	}
+	var keys []string
+	if raw := details[e2e.DetailsMember]; len(raw) > 0 {
+		var d e2e.Details
+		if err := json.Unmarshal(raw, &d); err != nil {
+			return fmt.Errorf("%s: details.%s: %w", configFile, e2e.DetailsMember, err)
+		}
+		keys = d.Keys
+	}
+	keys = edit(keys)
 	var err error
-	if details[e2e.DetailsMember], err = json.Marshal(e2e.Details{V: e2e.Version, Suite: e2e.Suite, Keys: []string{pub}}); err != nil {
+	if len(keys) == 0 {
+		delete(details, e2e.DetailsMember)
+	} else if details[e2e.DetailsMember], err = json.Marshal(e2e.Details{V: e2e.Version, Suite: e2e.Suite, Keys: keys}); err != nil {
 		return err
 	}
 	if top["details"], err = json.Marshal(details); err != nil {

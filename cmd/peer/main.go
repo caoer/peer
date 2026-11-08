@@ -156,10 +156,13 @@ commands:
             room inspect [--dir D] <room>
   e2e       message encryption to a key a human holds, on top of the channel:
             keygen prints a key pair (the secret stays with the human, never
-            on a serving host), publish names the public key on your card,
-            decrypt opens an inbox record or envelope
+            on a serving host), publish adds the public key to your card — or,
+            with no key, every key a reader page sent, waiting in the state
+            record readers-pending — revoke takes one off, decrypt opens an
+            inbox record or envelope
                                      e2e keygen
-                                     e2e publish [--dir D] <public key>
+                                     e2e publish [--dir D] [<public key>]
+                                     e2e revoke [--dir D] <public key>
                                      e2e decrypt --key <secret key> [file]
   version   print the version
 
@@ -172,7 +175,11 @@ peer accept --dir D --name N <link>. config.json in the peer directory holds
 relay, login, agents, details, state (dir, or page + slug + login),
 deliver, roster (page + slug + login: the private roster page serve writes
 each round), keys (signedPrekeyEvery, oneTimeMin), push (pullEvery: pull
-a channel after this many pushed messages, default 10) and ucc (root, seats,
+a channel after this many pushed messages, default 10), forward (url, secret:
+the worker every message is POSTed to, both directions), feed (url, secret,
+only: the party's reader feed on the worker, which every message reaches live
+and a reader page's connect has replayed from the inbox and <dir>/feed; only
+"e2e" keeps plain messages off it) and ucc (root, seats,
 serviceRetries: delivery by the fleet's seat map — a seat row's message,
 and a human row's, is an inbox record in the session of the seat the row
 names; a room record that names no agent lands in the session of each row

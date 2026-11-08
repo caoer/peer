@@ -105,15 +105,30 @@ func counterpart(dir string, m *session.Message) string {
 	return party
 }
 
+// timelineData is message m's peer-timeline@1 data in direction dir as it
+// travels — the forward's POST and the feed's frame — its body cut once.
+func timelineData(dir string, m *session.Message) (forwardData, error) {
+	rec, err := timeline.Of(dir, m)
+	if err != nil {
+		return forwardData{}, err
+	}
+	return cutData(rec), nil
+}
+
+// cutData is rec with its body cut, marked when it was.
+func cutData(rec *timeline.Record) forwardData {
+	var cut bool
+	rec.Body, cut = cutBody(rec.Body)
+	return forwardData{Record: rec, Truncated: cut}
+}
+
 // forwardBytes is the POST body of message m in direction dir.
 func forwardBytes(dir string, m *session.Message) ([]byte, error) {
-	rec, err := timeline.Of(dir, m)
+	data, err := timelineData(dir, m)
 	if err != nil {
 		return nil, err
 	}
-	var cut bool
-	rec.Body, cut = cutBody(rec.Body)
-	return json.Marshal(forwardPost{Peer: counterpart(dir, m), Record: forwardRecord{Schema: timeline.Schema, Data: forwardData{Record: rec, Truncated: cut}}})
+	return json.Marshal(forwardPost{Peer: counterpart(dir, m), Record: forwardRecord{Schema: timeline.Schema, Data: data}})
 }
 
 // forwardLine is serve's start line on stderr, the journal: the forward's

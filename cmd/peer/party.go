@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/caoer/peer/internal/card"
 	"github.com/caoer/peer/internal/envelope"
+	"github.com/caoer/peer/internal/feed"
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
@@ -60,6 +62,10 @@ type config struct {
 	// Forward is the worker each message is POSTed to, both directions
 	// (forward.go); nil is no forward.
 	Forward *forwardConfig `json:"forward,omitempty"`
+	// Feed is the party's reader feed on the worker, which each message
+	// reaches live and the host replays its records to (feedrecord.go); nil
+	// is no feed.
+	Feed *feedConfig `json:"feed,omitempty"`
 	// Keys is the key lifecycle: signedPrekeyEvery, oneTimeMin (keys.go).
 	Keys keysConfig `json:"keys,omitempty"`
 	// Push is how a running serve uses the relay's push: pullEvery (push.go).
@@ -106,6 +112,14 @@ type party struct {
 	roomOutbox *store.Journal
 	// tl is the current round of timeline writes (timeline.go).
 	tl *timelineState
+	// feed is the source socket on the party's reader feed for a serve's
+	// life (feedrecord.go); nil under a command, which opens one per record.
+	feed *feed.Client
+	// feedInbox is the delivery directory whose inbox records the feed
+	// replays — the serve's, else config's.
+	feedInbox string
+	// feedN numbers the frames the feed acks.
+	feedN atomic.Int64
 }
 
 // openParty reads the identity, the root key and config when present, and
@@ -352,7 +366,10 @@ func readConfig(path string, cfg *config) error {
 	if err := json.Unmarshal(b, cfg); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	return checkForwardKeys(b)
+	if err := checkForwardKeys(b); err != nil {
+		return err
+	}
+	return cfg.Feed.check()
 }
 
 // checkForwardKeys refuses, naming the key, a config that still carries
