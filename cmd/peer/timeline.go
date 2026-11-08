@@ -19,16 +19,36 @@ import (
 )
 
 // timelineConfig is one peer's collaboration page (design §8): config.json
-// "timelines": {"<peer name>": {"page", "slug", "login", "forward"}}, login
-// defaulting to the config login. It is host-local config like the roster
-// page, not a field of the shared roster record: the login is this host's
-// secret, and so is the forward URL (forward.go). A peer with no entry gets
-// no timeline writes.
+// "timelines": {"<peer name>": {"page", "slug", "login", "forward",
+// "mirror"}}, login defaulting to the config login. It is host-local config
+// like the roster page, not a field of the shared roster record: the login
+// is this host's secret, and so is the forward URL (forward.go). A peer with
+// no entry gets no timeline writes.
 type timelineConfig struct {
 	Page    string `json:"page,omitempty"`
 	Slug    string `json:"slug,omitempty"`
 	Login   string `json:"login,omitempty"`
 	Forward string `json:"forward,omitempty"`
+	// Mirror is what the page holds: mirrorAll (the default) or mirrorE2E,
+	// encrypted records alone, so no plaintext sits in the page store. The
+	// forward is independent of it.
+	Mirror string `json:"mirror,omitempty"`
+}
+
+const (
+	mirrorAll = "all"
+	mirrorE2E = "e2e"
+)
+
+// checkTimelines refuses a mirror value this binary does not know, naming
+// the peer, at config load: the wrong guess would put plaintext on a page.
+func (c config) checkTimelines() error {
+	for name, tc := range c.Timelines {
+		if tc.Mirror != "" && tc.Mirror != mirrorAll && tc.Mirror != mirrorE2E {
+			return fmt.Errorf("%s: timelines.%s.mirror %q: it is %s or %s", configFile, name, tc.Mirror, mirrorAll, mirrorE2E)
+		}
+	}
+	return nil
 }
 
 // timelinePendingDir holds, under the peer directory, the timeline record of
@@ -100,6 +120,9 @@ func (p *party) writeTimelinePage(ctx context.Context, name, channel, dir string
 	var rec *timeline.Record
 	if err == nil {
 		rec, err = timeline.Of(dir, m)
+	}
+	if err == nil && !rec.E2E && p.cfg.Timelines[name].Mirror == mirrorE2E {
+		return
 	}
 	if err == nil {
 		_, err = page.Create(ctx, timeline.Key(channel, dir, seq), timeline.Schema, rec)

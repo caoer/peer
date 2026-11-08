@@ -364,6 +364,12 @@ func TestTimelineSentAfterOutboxReplay(t *testing.T) {
 // gives up). The hook has had the handshake's card by the time it returns.
 func forwardPair(t *testing.T) (p *pair, h *hookServer, code *atomic.Int32, gp *pagestest.Server) {
 	t.Helper()
+	return mirrorPair(t, "")
+}
+
+// mirrorPair is forwardPair with the guest's timelines.zt.mirror set.
+func mirrorPair(t *testing.T, mirror string) (p *pair, h *hookServer, code *atomic.Int32, gp *pagestest.Server) {
+	t.Helper()
 	_, _, base := relaytest.Start(t, login)
 	code = &atomic.Int32{}
 	code.Store(http.StatusOK)
@@ -381,6 +387,7 @@ func forwardPair(t *testing.T) (p *pair, h *hookServer, code *atomic.Int32, gp *
 	cfg := timelineOn(config{}, "zt", gp)
 	tc := cfg.Timelines["zt"]
 	tc.Forward = h.URL + "/peer/path-secret"
+	tc.Mirror = mirror
 	cfg.Timelines["zt"] = tc
 	return handshake(t, newDir(t, hostCfg()), newDir(t, cfg), base), h, code, gp
 }

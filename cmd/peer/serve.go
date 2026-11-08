@@ -917,7 +917,7 @@ func (sv *server) birth(e *store.Entry) (string, error) {
 			return "", err
 		}
 	}
-	path, born, err := deliver.Write(dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body})
+	path, born, err := deliver.Write(dir, place, m.ID, deliver.Record{From: m.From, To: m.To, Kind: m.Kind, At: m.At, Body: m.Body, E2E: e2eSuite(m.Body)})
 	if err != nil {
 		return "", err
 	}

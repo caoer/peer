@@ -59,15 +59,18 @@ func Route(kind string, accepts []string) Place {
 // Record is an inbox or quarantine record: frontmatter from, to, kind,
 // verified, at — exactly those — and the envelope body; a record that came
 // through a room carries group, the room id, as its sixth key (plan v2
-// decision 3). From and To are protocol addresses, <party key>/<agent id>,
-// nothing local: a petname is the reader's to resolve, and so is a room's
-// local name — the record carries the id.
+// decision 3), and an encrypted body carries e2e, its suite, after them.
+// From and To are protocol addresses, <party key>/<agent id>, nothing local:
+// a petname is the reader's to resolve, and so is a room's local name — the
+// record carries the id.
 type Record struct {
 	From, To, Kind string
 	At             time.Time
 	Body           []byte
 	// Group is the room id; "" for a channel message, which has no group key.
 	Group string
+	// E2E is the suite of an encrypted body; "" for a plain one.
+	E2E string
 }
 
 // The record grammar: what a field can be and still sit on its frontmatter
@@ -81,6 +84,7 @@ var (
 	vendorRE = regexp.MustCompile(`^vnd\.ed25519:[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{1,64}$`)
 	idRE     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	groupRE  = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	suiteRE  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 )
 
 // ErrRecord is a record whose own fields cannot be written. No retry fixes
@@ -123,6 +127,9 @@ func (r Record) Bytes() ([]byte, error) {
 	if r.Group != "" && !groupRE.MatchString(r.Group) {
 		return nil, fmt.Errorf("%w: group %q is not a room id", ErrRecord, r.Group)
 	}
+	if r.E2E != "" && !suiteRE.MatchString(r.E2E) {
+		return nil, fmt.Errorf("%w: e2e %q is not a suite id", ErrRecord, r.E2E)
+	}
 	kind := r.Kind
 	if strings.ContainsRune(kind, ':') {
 		kind = `"` + kind + `"`
@@ -131,6 +138,9 @@ func (r Record) Bytes() ([]byte, error) {
 		r.From, r.To, kind, r.At.UTC().Format(time.RFC3339Nano))
 	if r.Group != "" {
 		b = fmt.Appendf(b, "group: %s\n", r.Group)
+	}
+	if r.E2E != "" {
+		b = fmt.Appendf(b, "e2e: %s\n", r.E2E)
 	}
 	b = append(b, "---\n"...)
 	return append(b, r.Body...), nil

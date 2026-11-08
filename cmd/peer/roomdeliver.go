@@ -266,7 +266,7 @@ func (sv *server) birthRoom(e *store.Entry, name string) error {
 			}
 			continue
 		}
-		path, born, err := deliver.Write(t.dir, t.place, m.ID, deliver.Record{From: m.From, To: t.to, Kind: m.Kind, At: m.At, Body: m.Body, Group: m.Group})
+		path, born, err := deliver.Write(t.dir, t.place, m.ID, deliver.Record{From: m.From, To: t.to, Kind: m.Kind, At: m.At, Body: m.Body, Group: m.Group, E2E: e2eSuite(m.Body)})
 		if err != nil {
 			return err
 		}

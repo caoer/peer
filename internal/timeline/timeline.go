@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/caoer/peer/internal/attach"
+	"github.com/caoer/peer/internal/e2e"
 	"github.com/caoer/peer/internal/session"
 )
 
@@ -47,8 +48,10 @@ type Record struct {
 	At   time.Time `json:"at"`
 	// Body is the text for every kind but doc, file and card; the
 	// attachment's descriptor without its key and blob for doc and file;
-	// {"event":"card"} for a card.
+	// {"event":"card"} for a card. An encrypted body is its envelope string.
 	Body json.RawMessage `json:"body"`
+	// E2E marks a body encrypted to the party's published keys (internal/e2e).
+	E2E bool `json:"e2e,omitempty"`
 }
 
 // File is a doc or file message's body on the timeline: what the descriptor
@@ -63,6 +66,7 @@ type File struct {
 // Of is the record of message m in direction dir.
 func Of(dir string, m *session.Message) (*Record, error) {
 	var body any
+	encrypted := false
 	switch m.Kind {
 	case session.KindCard:
 		body = map[string]string{"event": "card"}
@@ -75,10 +79,11 @@ func Of(dir string, m *session.Message) (*Record, error) {
 		body = File{Name: d.Name, Size: d.Size, SHA256: d.SHA256, Mime: d.Mime}
 	default:
 		body = string(m.Body)
+		_, encrypted = e2e.Detect(m.Body)
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	return &Record{ID: m.ID, Dir: dir, Kind: m.Kind, From: m.From, To: m.To, At: m.At.UTC(), Body: b}, nil
+	return &Record{ID: m.ID, Dir: dir, Kind: m.Kind, From: m.From, To: m.To, At: m.At.UTC(), Body: b, E2E: encrypted}, nil
 }

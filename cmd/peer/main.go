@@ -66,6 +66,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdIdentity(args[1:], stdout, stderr)
 	case "room":
 		return cmdRoom(args[1:], stdout, stderr)
+	case "e2e":
+		return cmdE2E(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -89,7 +91,9 @@ commands:
             [--dir D] [--code 8-digits] <name>
   send      encrypt a message and put it on the peer's channel
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F] <name>[/<agent>]
-            (--kind doc|file: --file is attached, encrypted, as a blob)
+            (--kind doc|file: --file is attached, encrypted, as a blob;
+            --encrypt [--to-key PUB]...: the body is also sealed to the peer's
+            published e2e keys, which only the holder of a secret key opens)
             or seal it into a room, to every member or to the --to subset
             [--dir D] [--kind K] [--from AGENT] [--text T | --file F]
             [--to MEMBER[/AGENT],...] <room>
@@ -150,6 +154,13 @@ commands:
             room link [--dir D] [--rotate] <room>
             room follow [--dir D] [--name N] <feed link>
             room inspect [--dir D] <room>
+  e2e       message encryption to a key a human holds, on top of the channel:
+            keygen prints a key pair (the secret stays with the human, never
+            on a serving host), publish names the public key on your card,
+            decrypt opens an inbox record or envelope
+                                     e2e keygen
+                                     e2e publish [--dir D] <public key>
+                                     e2e decrypt --key <secret key> [file]
   version   print the version
 
 the card any command sends is the one on the state (record "card"), signed by

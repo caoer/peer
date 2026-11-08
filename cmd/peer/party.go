@@ -126,6 +126,9 @@ func openParty(dir string) (*party, error) {
 	if err := readJSON(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
+	if err := p.cfg.checkTimelines(); err != nil {
+		return nil, err
+	}
 	if _, err := p.loadSeats(); err != nil {
 		return nil, err
 	}
