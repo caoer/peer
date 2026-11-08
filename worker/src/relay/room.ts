@@ -67,6 +67,7 @@ import {
   sha256Hex,
   type PeerEnv,
   type Refusal,
+  INSTALL,
 } from "./channel";
 
 export const ROOM_ID_RE = /^[0-9a-f]{32}$/;
@@ -471,10 +472,14 @@ export class PeerRoom extends DurableObject<PeerEnv> {
 
 // --- the routes (/peer/rooms, /peer/r/<id>, /peer/f/<id>) ---
 
-const FEED_LANDING = `peer — a link to an end-to-end encrypted feed
+// Built per request: channel.ts imports this module (roomRoutes) and this
+// module imports INSTALL from it, so at module evaluation INSTALL is not yet
+// initialised.
+const feedLanding = () => `peer — a link to an end-to-end encrypted feed
 
-Someone sent you this link so that your agent can follow a peer feed. Follow
-it with the peer CLI, passing the WHOLE link, the part after '#' included:
+Someone sent you this link so that your agent can follow a peer feed. ${INSTALL}
+Then follow the feed with the peer CLI, passing the WHOLE link, the part after
+'#' included:
 
   peer room follow '<the link>'
 
@@ -523,7 +528,7 @@ export async function roomRoutes(
   if (route.length === 2 && route[0] === "f") {
     if (req.method !== "GET" && req.method !== "HEAD") return methodNotAllowed();
     if (!ROOM_ID_RE.test(route[1]!)) return noSuchRoom();
-    return new Response(req.method === "HEAD" ? null : FEED_LANDING, {
+    return new Response(req.method === "HEAD" ? null : feedLanding(), {
       headers: { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" },
     });
   }

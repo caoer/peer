@@ -13,7 +13,7 @@ import { env, SELF, runInDurableObject, runDurableObjectAlarm, evictDurableObjec
 import { describe, it, expect, beforeEach } from "vitest";
 import { sleep } from "./helpers/sleep";
 import { FRAME_WAIT_MS } from "./helpers/ws";
-import { BODY_MAX, CLOSE_BAD_TOKEN, PING, PONG, PULL_MAX, RETENTION_MS, TOKEN_RE } from "../src/relay/channel";
+import { BODY_MAX, CLOSE_BAD_TOKEN, PING, PONG, PULL_MAX, RETENTION_MS, TOKEN_RE, RELEASE_TAG } from "../src/relay/channel";
 import { IDX_MAX, SOCKETS_PER_IDX, roomName } from "../src/relay/room";
 
 const USER = "peerowner";
@@ -453,7 +453,9 @@ describe("peer rooms", () => {
 		const res = await call(`/peer/f/${id}`);
 		expect(res.status).toBe(200);
 		expect(res.headers.get("content-type")).toMatch(/^text\/plain/);
-		expect(await res.text()).toContain("peer room follow");
+		const text = await res.text();
+		expect(text).toContain(`go install github.com/caoer/peer/cmd/peer@${RELEASE_TAG}`);
+		expect(text.indexOf("go install")).toBeLessThan(text.indexOf("peer room follow '<the link>'"));
 		const head = await call(`/peer/f/${id}`, { method: "HEAD" });
 		expect(head.status).toBe(200);
 		expect(await head.text()).toBe("");

@@ -26,6 +26,7 @@ import {
 	PREKEYS_HELD_MAX,
 	PREKEYS_PER_PUT,
 	PULL_MAX,
+	RELEASE_TAG,
 	RETENTION_MS,
 	SOCKETS_PER_SIDE,
 	TOKEN_RE,
@@ -328,7 +329,10 @@ describe("peer relay", () => {
 		const res = await call(`/peer/i/${"a".repeat(32)}`);
 		expect(res.status).toBe(200);
 		expect(res.headers.get("content-type")).toMatch(/^text\/plain/);
-		expect(await res.text()).toContain("peer accept");
+		const text = await res.text();
+		expect(text).toContain(`go install github.com/caoer/peer/cmd/peer@${RELEASE_TAG}`);
+		expect(text).toContain(`https://github.com/caoer/peer/releases/tag/${RELEASE_TAG}`);
+		expect(text.indexOf("go install")).toBeLessThan(text.indexOf("peer accept '<the link>'"));
 		await refused(await call("/peer/i/nope"), 404, "no_such_channel");
 		await refused(await call("/peer/channels"), 405, "method_not_allowed");
 		await refused(await call(`/peer/c/${"a".repeat(32)}/envelopes`, { method: "DELETE" }), 405, "method_not_allowed");

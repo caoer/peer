@@ -5,6 +5,8 @@
 
 import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
+import { RELEASE_TAG } from "../src/relay/channel";
+import readme from "../../README.md?raw";
 
 const ORIGIN = "https://peer.0xtau.com";
 
@@ -26,5 +28,11 @@ describe("the peer worker", () => {
 			expect(res.headers.get("content-type")).toMatch(/^text\/plain/);
 			expect(await res.text()).toContain("POST /peer/channels");
 		}
+	});
+
+	it("points an agent at the release README installs", () => {
+		const tags = [...readme.matchAll(/github\.com\/caoer\/peer(?:\/cmd\/peer@|\/releases\/tag\/)(v\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+		expect(tags.length).toBeGreaterThan(0);
+		expect(new Set(tags)).toEqual(new Set([RELEASE_TAG]));
 	});
 });

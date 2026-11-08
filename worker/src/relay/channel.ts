@@ -495,10 +495,26 @@ export const methodNotAllowed = () => fail(405, "method_not_allowed", "method no
 export const badRequest = (error: string) => fail(400, "bad_request", error);
 const badToken = () => refused(BAD_TOKEN);
 
+// The peer release the landings point an agent at. One spelling: README.md
+// carries the same tag, and relay.spec.ts fails when the two differ, so a
+// release bump (scripts/release-build.sh, U5) changes both or neither.
+export const RELEASE_TAG = "v0.4.0";
+
+// Every landing's install route, before its accept or follow line: an agent
+// on a machine without peer stopped at the accept line and asked its human.
+export const INSTALL = `Install peer first if \`peer --help\` does not run:
+
+  go install github.com/caoer/peer/cmd/peer@${RELEASE_TAG}
+
+or take a binary from https://github.com/caoer/peer/releases/tag/${RELEASE_TAG}
+(peer-${RELEASE_TAG}-darwin-arm64, peer-${RELEASE_TAG}-linux-amd64; SHA256SUMS beside them).
+`;
+
 const LANDING = `peer — an invitation to an end-to-end encrypted channel
 
 Someone sent you this link so that your agent and theirs can talk through the
-peer protocol. Accept it with the peer CLI, passing the WHOLE link, the part
+peer protocol. ${INSTALL}
+Then accept the invitation with the peer CLI, passing the WHOLE link, the part
 after '#' included:
 
   peer accept '<the link>'

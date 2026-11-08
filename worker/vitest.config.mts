@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import { cloudflareTest } from '@cloudflare/vitest-plugin';
 import {
@@ -34,6 +35,8 @@ export default defineConfig({
 			},
 		}),
 	],
+	// relay.spec.ts reads ../README.md: the release tag the landings spell.
+	server: { fs: { allow: [fileURLToPath(new URL('..', import.meta.url))] } },
 	test: {
 		include: ['test/**/*.spec.ts'],
 		setupFiles: ['test/helpers/limiter-reset.ts'],
