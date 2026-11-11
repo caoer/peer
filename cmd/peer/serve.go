@@ -201,7 +201,9 @@ func (sv *server) replaySpool(ctx context.Context) error {
 }
 
 // round replays the spool and the outbox, then pulls every channel that has
-// a session once; one channel's failure does not stop the others. Both
+// a session once — except one whose push socket keeps it current, which
+// then costs the relay nothing — and serves every room the same way; one
+// channel's failure does not stop the others. Both
 // replays are a round's work, not a start's: under serve --every, a
 // long-lived loop is all that runs. A message whose birth failed after its
 // commit — the cursor already past it, so no pull brings it again — is born
@@ -241,7 +243,7 @@ func (sv *server) round(ctx context.Context) error {
 		if !serves(pe) {
 			continue
 		}
-		if err := sv.serveChannel(ctx, pe); err != nil {
+		if err := sv.serveChannelIn(ctx, pe, true); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", pe.Name, err))
 		}
 	}
@@ -295,7 +297,15 @@ type channelServe struct {
 	k  *store.Keys
 }
 
+// serveChannel serves one channel and pulls it to the relay's end.
 func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
+	return sv.serveChannelIn(ctx, pe, false)
+}
+
+// serveChannelIn is serveChannel; a round's (round) leaves the pull out
+// while the channel's push socket keeps it current (pusher.rests), and does
+// the rest of the channel's work as always.
+func (sv *server) serveChannelIn(ctx context.Context, pe roster.Peer, round bool) error {
 	c := &channelServe{sv: sv, pe: pe, rc: relay.New(pe.Relay, nil)}
 	if err := c.load(ctx); err != nil {
 		return err
@@ -309,6 +319,12 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 	if err := c.announce(ctx); err != nil {
 		fmt.Fprintf(sv.out, "%s: card not sent: %v\n", pe.Name, err)
 	}
+	k := pushKey{id: pe.Channel}
+	if round && sv.push.rests(k, c.ch.Cursor()) {
+		return c.restock(ctx)
+	}
+	atHead := false
+	defer func() { sv.push.pulled(k, atHead) }()
 	// asked is the cursor a gap was already pulled again at, so one bad page
 	// costs one extra pull and never loops.
 	asked := int64(-2)
@@ -320,6 +336,7 @@ func (sv *server) serveChannel(ctx context.Context, pe roster.Peer) error {
 		if len(recs) == 0 {
 			// Caught up: the channel's one-time prekeys are restocked here,
 			// where the deposit count is current.
+			atHead = true
 			return c.restock(ctx)
 		}
 		// A page that starts past the cursor's next seq would carry the

@@ -509,7 +509,13 @@ func (c *roomConn) say(seq int64, format string, args ...any) {
 // membership version is taken at head alone. A record whose delivery waits
 // on a seat's session stops nothing: it is committed with the cursor and
 // waits in the room spool (roomdeliver.go).
-func (c *roomConn) pull(ctx context.Context) error { return c.pullBelow(ctx, math.MaxInt64) }
+func (c *roomConn) pull(ctx context.Context) error {
+	err := c.pullBelow(ctx, math.MaxInt64)
+	if c.sv != nil {
+		c.sv.push.pulled(pushKey{room: true, id: c.ref.ID}, err == nil)
+	}
+	return err
+}
 
 // pullBelow is pull stopped at the first record at seq below or past: the
 // fold brought to the room a newcomer reading from below starts at

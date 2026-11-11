@@ -110,6 +110,53 @@ type pushSocket struct {
 	// frames is how many frames were taken since the channel or room was
 	// last pulled.
 	frames int
+	// open is set from the socket's open to its close; atHead says the last
+	// pull of the channel or room, on any path, read the relay to its end;
+	// seen is the highest seq a frame carried. The three together say the
+	// socket has kept the channel or room current (rests).
+	open   bool
+	atHead bool
+	seen   int64
+}
+
+// rests reports whether a round may leave the channel or room k unpulled:
+// its socket is open, its last pull read to the relay's end, and cursor is
+// at or past every frame the socket carried — a frame left untaken (a held
+// card, a seat not yet on the root, a failed step) keeps the round pulling.
+// The open's pull and every gap are pulled by the socket's own path; what
+// the round would read is already here. nil under --once.
+func (ps *pusher) rests(k pushKey, cursor int64) bool {
+	if ps == nil {
+		return false
+	}
+	s := ps.socks[k]
+	return s != nil && s.open && s.atHead && cursor >= s.seen
+}
+
+// pulled records whether a pull of k read the relay to its end.
+func (ps *pusher) pulled(k pushKey, atHead bool) {
+	if ps == nil {
+		return
+	}
+	if s := ps.socks[k]; s != nil {
+		s.atHead = atHead
+	}
+}
+
+// note tracks the socket's state from the event about to be handled.
+func (s *pushSocket) note(ev pushEvent) {
+	switch ev.kind {
+	case pushOpen:
+		s.open = true
+	case pushClosed, pushDown, pushGone:
+		s.open = false
+	case pushFrame:
+		seq := ev.rec.Seq
+		if ev.key.room {
+			seq = ev.roomRec.Seq
+		}
+		s.seen = max(s.seen, seq)
+	}
 }
 
 type pushKind int
@@ -202,7 +249,7 @@ func (ps *pusher) trackChannels(ctx context.Context) {
 // open starts the goroutine that holds socket k.
 func (ps *pusher) open(k pushKey, token string, dial func(context.Context) (*pushStream, error), final func(error) bool) {
 	sctx, cancel := context.WithCancel(ps.ctx)
-	ps.socks[k] = &pushSocket{cancel: cancel, token: token}
+	ps.socks[k] = &pushSocket{cancel: cancel, token: token, seen: -1}
 	ps.wg.Add(1)
 	go func() {
 		defer ps.wg.Done()
@@ -282,6 +329,7 @@ func (ps *pusher) handle(ctx context.Context, ev pushEvent) {
 	if s == nil {
 		return
 	}
+	s.note(ev)
 	if ev.key.room {
 		ps.handleRoom(ctx, ev, s)
 		return

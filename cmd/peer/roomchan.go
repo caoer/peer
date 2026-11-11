@@ -802,7 +802,11 @@ func (sv *server) serveRooms(ctx context.Context) error {
 			continue
 		}
 		c.sv = sv
-		switch err := c.pull(ctx); {
+		// The push socket keeps the room current: no pull (pusher.rests).
+		if !sv.push.rests(pushKey{room: true, id: ref.ID}, c.st.Cursor()) {
+			err = c.pull(ctx)
+		}
+		switch {
 		case errors.Is(err, errGone):
 			fmt.Fprintf(sv.out, "%v\n", err)
 			continue
