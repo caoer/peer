@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/caoer/peer/internal/deliver"
+	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/relay/relaytest"
 )
 
@@ -121,8 +122,14 @@ func waitPulls(t *testing.T, srv *relaytest.Server, p *pair, n int) {
 // the pull's last, empty, GET comes after the line.
 func settle(t *testing.T, srv *relaytest.Server, p *pair) (*syncBuffer, string, int) {
 	t.Helper()
+	return settleEvery(t, srv, p, time.Hour)
+}
+
+// settleEvery is settle with rounds every every.
+func settleEvery(t *testing.T, srv *relaytest.Server, p *pair, every time.Duration) (*syncBuffer, string, int) {
+	t.Helper()
 	pulls := srv.Pulls(p.channel, "g2h") + 2
-	out := runServe(t, p.hostDir, time.Hour)
+	out := runServe(t, p.hostDir, every)
 	waitFor(t, out, "ancan: push socket open", 1)
 	waitPulls(t, srv, p, pulls)
 	id, _ := sendOK(t, p.guestDir, "--text", "warm-up", "zt/advisor")
@@ -228,4 +235,84 @@ func TestPushAbsentServePulls(t *testing.T) {
 		t.Fatalf("serve output without push:\n%s", s)
 	}
 	deliveredOnce(t, out, p.hostDir, id)
+}
+
+// A round leaves a channel its open socket keeps current unpulled: rounds
+// every few milliseconds cost the relay no pull, and a message still arrives
+// by its frame.
+func TestPushRoundRestsAnOpenSocket(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	out, id0, pulls := settleEvery(t, srv, p, 20*time.Millisecond)
+
+	time.Sleep(300 * time.Millisecond) // about fifteen rounds
+	if n := srv.Pulls(p.channel, "g2h") - pulls; n != 0 {
+		t.Fatalf("%d pulls in rounds beside an open socket, want 0", n)
+	}
+	id1, _ := sendOK(t, p.guestDir, "--text", "pushed between rounds", "zt/advisor")
+	waitFor(t, out, "delivered text "+id1, 1)
+	time.Sleep(100 * time.Millisecond)
+	if n := srv.Pulls(p.channel, "g2h") - pulls; n != 0 {
+		t.Fatalf("%d pulls for a pushed frame between rounds, want 0", n)
+	}
+	deliveredOnce(t, out, p.hostDir, id0, id1)
+}
+
+// Once the socket closes and cannot open again, the next round pulls the
+// channel, and what was put after the close is delivered once.
+func TestPushRoundPullsAfterTheSocketCloses(t *testing.T) {
+	srv, _, base := relaytest.Start(t, login)
+	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
+	out, id0, _ := settleEvery(t, srv, p, 50*time.Millisecond)
+
+	srv.NoPush(true)
+	srv.CloseSockets()
+	waitFor(t, out, "ancan: no push socket (", 1)
+	pulls := srv.Pulls(p.channel, "g2h")
+	id1, _ := sendOK(t, p.guestDir, "--text", "after the close", "zt/advisor")
+	waitFor(t, out, "delivered text "+id1, 1)
+	if srv.Pulls(p.channel, "g2h") == pulls {
+		t.Fatal("delivered without a pull, with no socket open")
+	}
+	deliveredOnce(t, out, p.hostDir, id0, id1)
+}
+
+// The rule a round rests by: an open socket, a last pull that read to the
+// relay's end, and a cursor at or past every frame the socket carried.
+func TestPushRests(t *testing.T) {
+	k := pushKey{id: "c"}
+	frame := func(seq int64) pushEvent { return pushEvent{kind: pushFrame, key: k, rec: relay.Record{Seq: seq}} }
+	for _, tc := range []struct {
+		name   string
+		events []pushEvent
+		atHead bool
+		cursor int64
+		want   bool
+	}{
+		{"open, pulled to the end", []pushEvent{{kind: pushOpen}}, true, -1, true},
+		{"not open yet", nil, true, -1, false},
+		{"open, last pull short of the end", []pushEvent{{kind: pushOpen}}, false, -1, false},
+		{"frame taken", []pushEvent{{kind: pushOpen}, frame(4)}, true, 4, true},
+		{"frame left untaken", []pushEvent{{kind: pushOpen}, frame(4)}, true, 3, false},
+		{"closed", []pushEvent{{kind: pushOpen}, {kind: pushClosed}}, true, -1, false},
+		{"down", []pushEvent{{kind: pushOpen}, {kind: pushDown}}, true, -1, false},
+		{"refused for good", []pushEvent{{kind: pushOpen}, {kind: pushGone}}, true, -1, false},
+		{"open again", []pushEvent{{kind: pushOpen}, {kind: pushClosed}, {kind: pushOpen}}, true, -1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := &pusher{socks: map[pushKey]*pushSocket{k: {seen: -1}}}
+			for _, ev := range tc.events {
+				ps.socks[k].note(ev)
+			}
+			ps.pulled(k, tc.atHead)
+			if got := ps.rests(k, tc.cursor); got != tc.want {
+				t.Fatalf("rests = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	var none *pusher
+	if none.rests(k, 0) {
+		t.Fatal("rests without a pusher (--once)")
+	}
+	none.pulled(k, true)
 }
