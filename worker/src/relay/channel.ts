@@ -39,7 +39,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { type PeerRoom, roomRoutes } from "./room";
+import { type PeerRoom, roomRoutes } from "./peer-room";
 
 // What arrived more than this long ago is dropped (the alarm).
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -74,11 +74,20 @@ export const SOCKETS_PER_SIDE = 16;
 // it without waking the object.
 export const PING = "ping";
 export const PONG = "pong";
+// A socket with no ping and no accept for this long is dead: the contract's
+// "a socket silent for about 100 seconds is dropped". A connection lost
+// without a close (the client reads EOF) can stay OPEN in getWebSockets with
+// no close ever delivered, holding its place under the cap; the relay closes
+// it the next time it lists the side's sockets.
+export const SILENT_MS = 100_000;
 // Closing codes of a push socket whose token stopped opening a side of the
 // channel, or whose channel stopped existing — checked on each client frame
 // the runtime does not answer itself.
 export const CLOSE_BAD_TOKEN = 4401;
 export const CLOSE_NO_SUCH_CHANNEL = 4404;
+// The close a socket silent past SILENT_MS gets: going away, so a client
+// that still hears it reconnects.
+export const CLOSE_SILENT = 1001;
 // A prekey's public half, base64: 44 characters for a 33-byte key.
 const PUB_MAX = 256;
 const UINT32_MAX = 0xffff_ffff;
@@ -106,11 +115,18 @@ const NO_SUCH_CHANNEL = refusal(404, "no_such_channel", "no such channel");
 const BAD_TOKEN = refusal(401, "bad_token", "this token opens no side of this channel");
 const NO_SUCH_BLOB = refusal(404, "no_such_blob", "no such blob for this side: never put, put by this side, not finished, or past retention");
 
-// A push socket's attachment: its side (also its tag) and the hash of the
-// token that opened it. `gone` marks a socket this object closed —
+// A push socket's attachment: its side (also its tag), the hash of the
+// token that opened it, and when it was accepted (`at`, the last time heard
+// before its first ping). `gone` marks a socket this object closed —
 // getWebSockets keeps it until the far end answers, and it must receive
 // nothing more.
-type SocketAtt = { side: Side; hash: string; gone?: true };
+type SocketAtt = { side: Side; hash: string; at: number; gone?: true };
+
+// When a socket was last heard: its last ping the runtime answered, or its
+// accept. An attachment without `at` reads as never heard.
+export function heardAt(ctx: DurableObjectState, ws: WebSocket, at: number | undefined): number {
+  return Math.max(ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0, at ?? 0);
+}
 
 const dirOf = (side: Side): Dir => (side === "host" ? "h2g" : "g2h");
 const otherSide = (side: Side): Side => (side === "host" ? "guest" : "host");
@@ -340,7 +356,7 @@ export class PeerChannel extends DurableObject<PeerEnv> {
       return fail(429, "too_many_sockets", `this side already holds ${held} sockets on this channel; the cap is ${SOCKETS_PER_SIDE}`);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server, [side]);
-    server.serializeAttachment({ side, hash } satisfies SocketAtt);
+    server.serializeAttachment({ side, hash, at: Date.now() } satisfies SocketAtt);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -381,13 +397,18 @@ export class PeerChannel extends DurableObject<PeerEnv> {
     }
   }
 
-  // A side's sockets that are OPEN and not closed by this object
-  // (getWebSockets keeps CLOSING sockets).
+  // A side's sockets that are OPEN, not closed by this object
+  // (getWebSockets keeps CLOSING sockets), and heard within SILENT_MS; one
+  // silent longer is closed here.
   private open(side: Side): WebSocket[] {
+    const now = Date.now();
     return this.ctx.getWebSockets(side).filter((ws) => {
       if (ws.readyState !== WebSocket.OPEN) return false;
       const att = ws.deserializeAttachment() as SocketAtt | null;
-      return att !== null && att.gone !== true;
+      if (att === null || att.gone === true) return false;
+      if (now - heardAt(this.ctx, ws, att.at) <= SILENT_MS) return true;
+      this.closeAs(ws, CLOSE_SILENT, "silent");
+      return false;
     });
   }
 
