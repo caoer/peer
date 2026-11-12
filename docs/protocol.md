@@ -414,9 +414,9 @@ A relay deployed on its own also answers `GET /` with its route list.
 - The upgrade is the pull route with `Upgrade: websocket`, authenticated exactly as the pull. Refusals before the upgrade are HTTP answers: `bad_token` 401, `no_such_channel` 404, `rate_limited` 429 (the upgrade counts as one request), `too_many_sockets` 429.
 - At most 16 open sockets per side per channel; the 17th upgrade on a side is refused; a closed socket frees its place.
 - Relay → client: one text frame per envelope the *other* side puts while the socket is open, `{seq, type, body, at}`, the same JSON object a pull answers for that row (the frame is compact, a pull answer indented: compare parsed values, never bytes), in `seq` order, sent after the row is stored.
-- The client pulls from its cursor until `[]` after every connect and reconnect — push never replaces the catch-up. A frame with `seq` at or below the cursor is a duplicate; one above cursor + 1 is a gap, answered by a pull.
+- Resume: an upgrade with `?after=<cursor>` (a whole number, -1 or more; anything else `bad_request` 400) is answered `101` with the header `x-peer-resume: 1`, and the socket carries first the rows a pull from that cursor answers (one page), then `{"synced": <seq>, "more": <bool>}` — `seq` the last row sent, or the cursor when none; `more` when a further page may remain — and from then on each put as above. That is the catch-up: the client pulls only when `more` is true. An upgrade without `after`, or one answered without the header (a relay from before resume), carries no catch-up: the client pulls from its cursor until `[]` after every connect and reconnect. A frame with `seq` at or below the cursor is a duplicate; one above cursor + 1 is a gap, answered by a pull.
 - Client → relay: the text frame `ping` is answered `pong` (send one about every 30 seconds; a socket silent for about 100 seconds is dropped). Any other client frame carries nothing.
-- Close `4401` (`bad_token`) or `4404` (`no_such_channel`): stop reconnecting. Any other close: reconnect with backoff, then pull.
+- Close `4401` (`bad_token`) or `4404` (`no_such_channel`): stop reconnecting. Any other close: reconnect with backoff, resuming from the cursor (or pulling, as above).
 
 **Blobs.**
 

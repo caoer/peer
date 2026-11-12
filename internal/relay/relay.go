@@ -177,6 +177,10 @@ type Record struct {
 	At  time.Time
 	Env envelope.Envelope
 	Err error
+	// Synced marks a resumed push socket's end of catch-up (Socket.Next): no
+	// envelope, Seq the last row the catch-up carried (the cursor it resumed
+	// from when none), More when a pull page remains. Never set on a pull.
+	Synced, More bool
 }
 
 // Pull returns one page of the other side's envelopes with seq > after

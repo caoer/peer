@@ -56,6 +56,9 @@ func serveLoop(t *testing.T, dir string, every time.Duration) *syncBuffer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	servingMu.Lock()
+	servingBackends[dir] = sv.p.backend
+	servingMu.Unlock()
 	if err := sv.start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -113,13 +116,11 @@ func waitPulls(t *testing.T, srv *relaytest.Server, p *pair, n int) {
 	}
 }
 
-// settle runs serve on the host until its socket is open and the open's pull
-// has answered — nothing waits on the relay, so the first round pulls once
-// and the open once more — then sends a warm-up, which only its frame can
-// deliver, and waits for that. It returns serve's output, the warm-up's id
-// and the pulls answered so far. The "delivered" line alone is no sign the
-// open's pull is done: a warm-up put before that pull is read by it, and
-// the pull's last, empty, GET comes after the line.
+// settle runs serve on the host until its socket is open and caught up —
+// the first round pulls once; the socket opens at the cursor that pull left
+// and the relay resumes it there, so the open pulls nothing — then sends a
+// warm-up, which only its frame can deliver, and waits for that. It returns
+// serve's output, the warm-up's id and the pulls answered so far.
 func settle(t *testing.T, srv *relaytest.Server, p *pair) (*syncBuffer, string, int) {
 	t.Helper()
 	return settleEvery(t, srv, p, time.Hour)
@@ -128,10 +129,12 @@ func settle(t *testing.T, srv *relaytest.Server, p *pair) (*syncBuffer, string, 
 // settleEvery is settle with rounds every every.
 func settleEvery(t *testing.T, srv *relaytest.Server, p *pair, every time.Duration) (*syncBuffer, string, int) {
 	t.Helper()
-	pulls := srv.Pulls(p.channel, "g2h") + 2
+	pulls := srv.Pulls(p.channel, "g2h") + 1
 	out := runServe(t, p.hostDir, every)
-	waitFor(t, out, "ancan: push socket open", 1)
-	waitPulls(t, srv, p, pulls)
+	waitFor(t, out, "ancan: push socket caught up", 1)
+	if n := srv.Pulls(p.channel, "g2h"); n != pulls {
+		t.Fatalf("the relay answered %d pulls by the socket's catch-up, want %d (the first round's)", n, pulls)
+	}
 	id, _ := sendOK(t, p.guestDir, "--text", "warm-up", "zt/advisor")
 	waitFor(t, out, "delivered text "+id, 1)
 	return out, id, srv.Pulls(p.channel, "g2h")
@@ -153,10 +156,10 @@ func TestPushDeliversAFrameOnce(t *testing.T) {
 	deliveredOnce(t, out, p.hostDir, id0, id1, id2)
 }
 
-// A socket closed mid-stream — a deploy — is opened again and the pull on
-// the reconnect reads what was put while it was down; a frame lost on an
-// open socket shows as a gap at the next frame and is pulled. Nothing is
-// delivered twice.
+// A socket closed mid-stream — a deploy — is opened again at the cursor and
+// its catch-up carries what was put while it was down, with no pull; a frame
+// lost on an open socket shows as a gap at the next frame and is pulled.
+// Nothing is delivered twice.
 func TestPushReconnectPullsTheGap(t *testing.T) {
 	srv, _, base := relaytest.Start(t, login)
 	p := handshake(t, newDir(t, hostCfg()), newDir(t, config{}), base)
@@ -173,10 +176,14 @@ func TestPushReconnectPullsTheGap(t *testing.T) {
 	waitFor(t, out, "ancan: no push socket (", 1)
 	id2, _ := sendOK(t, p.guestDir, "--text", "during the deploy", "zt/advisor")
 	id3, _ := sendOK(t, p.guestDir, "--text", "still during it", "zt/advisor")
+	pulls := srv.Pulls(p.channel, "g2h")
 	srv.NoPush(false)
-	waitFor(t, out, "ancan: push socket open", 2)
+	waitFor(t, out, "ancan: push socket caught up", 2)
 	waitFor(t, out, "delivered text "+id2, 1)
 	waitFor(t, out, "delivered text "+id3, 1)
+	if n := srv.Pulls(p.channel, "g2h") - pulls; n != 0 {
+		t.Fatalf("%d pulls on the resumed reconnect, want 0", n)
+	}
 
 	// A frame lost on the open socket: the next one is past the cursor's
 	// next seq, and the pull reads both.

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"io"
 
 	"github.com/caoer/peer/internal/keys"
 )
@@ -43,6 +44,20 @@ func Sealed(b Backend, key [32]byte) Backend {
 		panic(err)
 	}
 	return &sealed{b: b, aead: aead}
+}
+
+// Watcher is a Backend that can hold a socket pushing its records' changes
+// (pages.Backend.Watch) until ctx ends; a sealed Backend passes it through,
+// and returns at once over a backend without one.
+type Watcher interface {
+	Watch(ctx context.Context, out io.Writer)
+}
+
+// Watch is the sealed backend's Watcher.
+func (s *sealed) Watch(ctx context.Context, out io.Writer) {
+	if w, ok := s.b.(Watcher); ok {
+		w.Watch(ctx, out)
+	}
 }
 
 type sealed struct {

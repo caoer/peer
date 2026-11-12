@@ -41,13 +41,29 @@ var (
 )
 
 // loop is serve's life after start: a round every interval, and between
-// rounds, unless once, the push socket of every served channel and every
-// room — each frame taken as a pulled row or record is, the channel or room
-// pulled on every connect and after every push.pullEvery frames. A relay
-// that never answers the upgrade leaves the rounds' pull as it was.
+// rounds, unless once, the state page's live socket and the push socket of
+// every served channel and every room — each frame taken as a pulled row or
+// record is, and the channel or room pulled after every push.pullEvery
+// frames and on every connect the relay does not resume (a channel's socket
+// opened at its cursor carries the catch-up itself). A relay that never
+// answers the upgrade leaves the rounds' pull as it was.
 func (sv *server) loop(ctx context.Context, every time.Duration, once bool, stderr io.Writer) int {
 	defer sv.p.feedStop()
 	if !once {
+		// The state page's live socket: the rounds and every push event read
+		// the roster and channel records from its pushes, not from the page.
+		if w, ok := sv.p.backend.(store.Watcher); ok {
+			wctx, stop := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				w.Watch(wctx, sv.out)
+			}()
+			defer func() {
+				stop()
+				<-done
+			}()
+		}
 		sv.push = newPusher(ctx, sv)
 		defer sv.push.stop()
 	}
@@ -107,6 +123,9 @@ type pushSocket struct {
 	// token is the room token the socket was opened with: a room whose
 	// token changes is opened again under the new one.
 	token string
+	// name is the channel's roster name when it was opened, for the lines
+	// an event that reads nothing prints.
+	name string
 	// frames is how many frames were taken since the channel or room was
 	// last pulled.
 	frames int
@@ -162,26 +181,31 @@ func (s *pushSocket) note(ev pushEvent) {
 type pushKind int
 
 const (
-	pushOpen   pushKind = iota // the socket is open: pull first
+	pushOpen   pushKind = iota // the socket is open: pull first, unless resumed
 	pushFrame                  // one envelope or room record pushed
+	pushSynced                 // a resumed socket's catch-up is done
 	pushClosed                 // the socket closed; reconnecting
 	pushDown                   // the upgrade failed, first of a streak; trying again
 	pushGone                   // the relay refused the token, channel or room: no more reconnects
 )
 
 type pushEvent struct {
-	kind    pushKind
-	key     pushKey
-	rec     relay.Record
-	roomRec relay.RoomRecord
-	err     error
+	kind pushKind
+	key  pushKey
+	// resumed: on pushOpen, the socket carries the catch-up from the cursor
+	// and ends it with pushSynced; more: on pushSynced, a pull page remains.
+	resumed, more bool
+	rec           relay.Record
+	roomRec       relay.RoomRecord
+	err           error
 }
 
 // pushStream is one open socket: next blocks for the event its next frame
 // carries.
 type pushStream struct {
-	next  func(context.Context) (pushEvent, error)
-	close func() error
+	next    func(context.Context) (pushEvent, error)
+	close   func() error
+	resumed bool
 }
 
 func newPusher(ctx context.Context, sv *server) *pusher {
@@ -228,17 +252,30 @@ func (ps *pusher) trackChannels(ctx context.Context) {
 			continue
 		}
 		rc := relay.New(pe.Relay, nil)
-		ps.open(k, "", func(ctx context.Context) (*pushStream, error) {
-			s, err := rc.Subscribe(ctx, pe.Channel, pe.Token)
+		ps.open(k, "", pe.Name, func(ctx context.Context) (*pushStream, error) {
+			// Opened at the channel's cursor, the socket brings what was put
+			// since (wire § Push, resume); a cursor that cannot be read opens it
+			// as before, and the open pulls.
+			var s *relay.Socket
+			var err error
+			if ch, cerr := ps.sv.p.store.Channel(ctx, pe.Channel); cerr == nil {
+				s, err = rc.Resume(ctx, pe.Channel, pe.Token, ch.Cursor())
+			} else {
+				s, err = rc.Subscribe(ctx, pe.Channel, pe.Token)
+			}
 			if err != nil {
 				return nil, err
 			}
 			return &pushStream{
 				next: func(ctx context.Context) (pushEvent, error) {
 					rec, err := s.Next(ctx)
+					if rec.Synced {
+						return pushEvent{kind: pushSynced, more: rec.More}, err
+					}
 					return pushEvent{rec: rec}, err
 				},
-				close: s.Close,
+				close:   s.Close,
+				resumed: s.Resumed(),
 			}, nil
 		}, func(err error) bool {
 			return errors.Is(err, relay.ErrBadToken) || errors.Is(err, relay.ErrNoSuchChannel)
@@ -247,9 +284,9 @@ func (ps *pusher) trackChannels(ctx context.Context) {
 }
 
 // open starts the goroutine that holds socket k.
-func (ps *pusher) open(k pushKey, token string, dial func(context.Context) (*pushStream, error), final func(error) bool) {
+func (ps *pusher) open(k pushKey, token, name string, dial func(context.Context) (*pushStream, error), final func(error) bool) {
 	sctx, cancel := context.WithCancel(ps.ctx)
-	ps.socks[k] = &pushSocket{cancel: cancel, token: token, seen: -1}
+	ps.socks[k] = &pushSocket{cancel: cancel, token: token, name: name, seen: -1}
 	ps.wg.Add(1)
 	go func() {
 		defer ps.wg.Done()
@@ -266,7 +303,7 @@ func (ps *pusher) hold(ctx context.Context, k pushKey, dial func(context.Context
 		if err == nil {
 			down = false
 			opened := time.Now()
-			if ps.emit(ctx, pushEvent{kind: pushOpen, key: k}) {
+			if ps.emit(ctx, pushEvent{kind: pushOpen, key: k, resumed: s.resumed}) {
 				err = ps.read(ctx, s, k)
 			}
 			s.close()
@@ -305,7 +342,10 @@ func (ps *pusher) read(ctx context.Context, s *pushStream, k pushKey) error {
 		if err != nil {
 			return err
 		}
-		ev.kind, ev.key = pushFrame, k
+		if ev.kind != pushSynced {
+			ev.kind = pushFrame
+		}
+		ev.key = k
 		if !ps.emit(ctx, ev) {
 			return ctx.Err()
 		}
@@ -321,9 +361,12 @@ func (ps *pusher) emit(ctx context.Context, ev pushEvent) bool {
 	}
 }
 
-// handle acts on one socket event — a room's in handleRoom — with the
-// channel's roster entry as it is now: a frame is taken by the pulled row's path, an open or every
-// push.pullEvery frames pulls the channel.
+// handle acts on one socket event — a room's in handleRoom. A close, a
+// failed upgrade, a resumed open and a catch-up with no page left read
+// nothing; a frame is taken by the pulled row's path with the channel's
+// roster entry as it is now, and an open the relay does not resume, a
+// catch-up that left a page, and every push.pullEvery frames pull the
+// channel.
 func (ps *pusher) handle(ctx context.Context, ev pushEvent) {
 	s := ps.socks[ev.key]
 	if s == nil {
@@ -334,25 +377,48 @@ func (ps *pusher) handle(ctx context.Context, ev pushEvent) {
 		ps.handleRoom(ctx, ev, s)
 		return
 	}
+	out := ps.sv.out
+	switch ev.kind {
+	case pushDown:
+		fmt.Fprintf(out, "%s: no push socket (%v); pulling every round until one opens\n", s.name, ev.err)
+		return
+	case pushGone:
+		fmt.Fprintf(out, "%s: the relay refused the push socket (%v); pulling every round\n", s.name, ev.err)
+		return
+	case pushClosed:
+		fmt.Fprintf(out, "%s: push socket closed (%v); reconnecting\n", s.name, ev.err)
+		return
+	case pushOpen:
+		s.frames = 0
+		if ev.resumed {
+			// The catch-up arrives as frames, then pushSynced.
+			fmt.Fprintf(out, "%s: push socket open, resuming\n", s.name)
+			return
+		}
+	case pushSynced:
+		if !ev.more {
+			// The socket carried every envelope past the cursor it opened at:
+			// the channel is read to the relay's end, as a pull to [] leaves it.
+			fmt.Fprintf(out, "%s: push socket caught up\n", s.name)
+			ps.pulled(ev.key, true)
+			return
+		}
+	}
 	r, err := roster.Load(ctx, ps.sv.p.backend)
 	if err != nil {
-		fmt.Fprintf(ps.sv.out, "push: %v\n", err)
+		fmt.Fprintf(out, "push: %v\n", err)
 		return
 	}
 	pe := r.ByChannel(ev.key.id)
 	if pe == nil || !serves(*pe) {
 		return
 	}
-	out := ps.sv.out
 	switch ev.kind {
-	case pushDown:
-		fmt.Fprintf(out, "%s: no push socket (%v); pulling every round until one opens\n", pe.Name, ev.err)
-	case pushGone:
-		fmt.Fprintf(out, "%s: the relay refused the push socket (%v); pulling every round\n", pe.Name, ev.err)
-	case pushClosed:
-		fmt.Fprintf(out, "%s: push socket closed (%v); reconnecting\n", pe.Name, ev.err)
 	case pushOpen:
 		fmt.Fprintf(out, "%s: push socket open\n", pe.Name)
+		err = ps.sv.serveChannel(ctx, *pe)
+	case pushSynced:
+		// A page is left past the catch-up: a pull reads it.
 		s.frames = 0
 		err = ps.sv.serveChannel(ctx, *pe)
 	case pushFrame:
