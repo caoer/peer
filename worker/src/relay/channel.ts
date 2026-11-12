@@ -39,7 +39,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { type PeerRoom, roomRoutes } from "./peer-room";
+import { type PeerRoom, roomRoutes } from "./room";
 
 // What arrived more than this long ago is dropped (the alarm).
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
