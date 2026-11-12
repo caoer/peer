@@ -22,9 +22,14 @@ type Server struct {
 	// MaxEnvelope is the cap on {"schema","data"}; the real one's is 256 KiB.
 	MaxEnvelope int
 
+	// InlineMax is the largest record data a live frame carries inline;
+	// a larger one is sent as a ref (the real one's is 64 KiB).
+	InlineMax int
+
 	mu      sync.Mutex
 	records map[string]Record
 	puts    int
+	live    live // the live socket (live.go)
 }
 
 // Record is one stored object.
@@ -41,7 +46,7 @@ var (
 
 // New starts a fake serving one page; Close it when done.
 func New(slug, bearer string) *Server {
-	s := &Server{Slug: slug, Bearer: bearer, MaxEnvelope: 256 * 1024, records: map[string]Record{}}
+	s := &Server{Slug: slug, Bearer: bearer, MaxEnvelope: 256 * 1024, InlineMax: 64 * 1024, records: map[string]Record{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
 }
@@ -82,6 +87,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) == 2 && parts[0] == "d" && parts[1] == s.Slug && r.Method == http.MethodGet && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		s.liveUpgrade(w, r)
+		return
+	}
 	if len(parts) != 3 || parts[0] != "d" {
 		refuse(404, "no_such_route", "no such route")
 		return
@@ -98,6 +107,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UnixMilli()
 	switch r.Method {
 	case http.MethodGet:
+		s.mu.Lock()
+		s.countGet(key)
+		s.mu.Unlock()
 		rec, ok := s.Record(key)
 		if !ok {
 			refuse(404, "no_such_object", "no such object")
@@ -150,6 +162,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		next := cur + 1
 		s.records[key] = Record{Schema: schema, Data: append(json.RawMessage(nil), data...), Version: next}
+		s.changed(key, s.records[key])
 		answer(200, map[string]any{"ok": true, "key": key, "version": next, "updated_at": now})
 	default:
 		refuse(405, "method_not_allowed", "method not allowed")

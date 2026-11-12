@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
@@ -42,7 +43,15 @@ var ErrNoPush = errors.New("relay: no WebSocket push on this relay")
 type Socket struct {
 	conn *websocket.Conn
 	stop context.CancelFunc
+	// resumed: the relay answered the upgrade's after (x-peer-resume), so the
+	// socket carries the catch-up and then a Synced record.
+	resumed bool
 }
+
+// Resumed reports whether the socket carries the catch-up from the cursor it
+// was opened at, ended by a Synced record. False on a socket opened without
+// one and on a relay from before resume: its client pulls the catch-up.
+func (s *Socket) Resumed() bool { return s.resumed }
 
 // Subscribe opens the push socket on channel id with this side's token. A
 // refusal before the upgrade is an *Error (bad_token, no_such_channel,
@@ -53,6 +62,19 @@ func (c *Client) Subscribe(ctx context.Context, id, token string) (*Socket, erro
 		return nil, err
 	}
 	return c.dial(ctx, "/c/"+id+"/envelopes", token)
+}
+
+// Resume opens the push socket as Subscribe does, asking the relay to send
+// first every envelope after seq after (-1 for all), one pull page, then a
+// Synced record (Socket.Resumed says whether it will).
+func (c *Client) Resume(ctx context.Context, id, token string, after int64) (*Socket, error) {
+	if err := checkIDs(id, token); err != nil {
+		return nil, err
+	}
+	if after < -1 {
+		return nil, fmt.Errorf("relay: after %d is below -1", after)
+	}
+	return c.dial(ctx, "/c/"+id+"/envelopes?after="+strconv.FormatInt(after, 10), token)
 }
 
 // dial opens a push socket on path with token; Subscribe's refusals.
@@ -77,7 +99,7 @@ func (c *Client) dial(ctx context.Context, path, token string) (*Socket, error) 
 	}
 	conn.SetReadLimit(maxFrame)
 	kctx, stop := context.WithCancel(context.Background())
-	s := &Socket{conn: conn, stop: stop}
+	s := &Socket{conn: conn, stop: stop, resumed: resp != nil && resp.Header.Get("X-Peer-Resume") == "1"}
 	go s.keepalive(kctx)
 	return s, nil
 }
@@ -103,8 +125,10 @@ func (s *Socket) keepalive(ctx context.Context) {
 // is skipped. A close the relay sends for good — 4401, 4404 — is
 // ErrBadToken or ErrNoSuchChannel; any other close or failure, or a socket
 // that carried nothing for three pings, is returned as it is and the
-// caller reconnects. A frame without a seq breaks the contract
-// (ErrAnswer): nothing in it can be placed.
+// caller reconnects. A resumed socket's `synced` frame is a Record with
+// Synced set, Seq the last catch-up row and More when a pull page remains.
+// A frame without a seq breaks the contract (ErrAnswer): nothing in it can
+// be placed.
 func (s *Socket) Next(ctx context.Context) (Record, error) {
 	b, err := s.next(ctx)
 	switch websocket.CloseStatus(err) {
@@ -119,6 +143,12 @@ func (s *Socket) Next(ctx context.Context) (Record, error) {
 	var r wireRow
 	if err := json.Unmarshal(b, &r); err != nil {
 		return Record{}, fmt.Errorf("%w: frame: %v", ErrAnswer, err)
+	}
+	if s.resumed && r.Synced != nil {
+		if *r.Synced < -1 {
+			return Record{}, fmt.Errorf("%w: synced %d", ErrAnswer, *r.Synced)
+		}
+		return Record{Seq: *r.Synced, Synced: true, More: r.More}, nil
 	}
 	if r.Seq == nil || *r.Seq < 0 {
 		return Record{}, fmt.Errorf("%w: frame without a seq", ErrAnswer)
@@ -157,6 +187,9 @@ type wireRow struct {
 	Type string `json:"type"`
 	Body string `json:"body"`
 	At   *int64 `json:"at"`
+	// Synced and More are a resumed socket's end of catch-up.
+	Synced *int64 `json:"synced"`
+	More   bool   `json:"more"`
 }
 
 // record is the row as a Record; its seq is present and checked by the

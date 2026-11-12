@@ -444,6 +444,68 @@ describe("peer push", () => {
 		expect(guest.rows().length).toBe(2);
 	});
 
+	it("resumes a socket opened with after: the rows a pull from there answers, then synced, then each put; without after, nothing and no header", async () => {
+		const c = await open();
+		const guestToken = await join(c);
+		for (const s of ["a", "b", "c"]) await ok(await put(c.id, guestToken, "msg", b64(s)));
+		const resume = async (after: string) => {
+			const res = await call(`/peer/c/${c.id}/envelopes?after=${after}`, { token: c.hostToken, headers: { upgrade: "websocket" } });
+			expect(res.status, res.status === 101 ? "" : await res.clone().text()).toBe(101);
+			const ws = res.webSocket!;
+			const raw: string[] = [];
+			ws.addEventListener("message", (e) => raw.push(e.data as string));
+			ws.accept();
+			const frames = async (count: number) => {
+				const until = Date.now() + FRAME_WAIT_MS;
+				while (raw.length < count && Date.now() < until) await sleep(10);
+				return raw.slice(0, count).map((f) => JSON.parse(f));
+			};
+			return { res, ws, raw, frames };
+		};
+
+		const one = await resume("0");
+		expect(one.res.headers.get("x-peer-resume")).toBe("1");
+		const rows = await pull(c.id, c.hostToken, 0);
+		expect(await one.frames(3)).toEqual([...rows, { synced: 2, more: false }]);
+		await ok(await put(c.id, guestToken, "msg", b64("d")));
+		const [, , , live] = await one.frames(4);
+		expect(live).toEqual({ seq: 3, type: "msg", body: b64("d"), at: expect.any(Number) });
+
+		// At the end: synced at the cursor itself, no row.
+		const atEnd = await resume("3");
+		expect(await atEnd.frames(1)).toEqual([{ synced: 3, more: false }]);
+
+		// Without after, as before: no header, nothing until a put.
+		const plain = await connect(c.id, c.hostToken);
+		await sleep(200);
+		expect(plain.raw).toEqual([]);
+		expect((await upgrade(c.id, c.hostToken)).headers.get("x-peer-resume")).toBeNull();
+
+		await refused(await call(`/peer/c/${c.id}/envelopes?after=x`, { token: c.hostToken, headers: { upgrade: "websocket" } }), 400, "bad_request");
+		for (const s of [one, atEnd]) s.ws.close(1000, "bye");
+		plain.ws.close(1000, "bye");
+	});
+
+	it("resumes at most one pull page, and says more remains", async () => {
+		const c = await open();
+		await join(c);
+		// More small rows than one page holds, written straight into the table.
+		await runInDurableObject(channel(c.id), (_i, state) => {
+			for (let seq = 0; seq <= PULL_MAX; seq++)
+				state.storage.sql.exec("INSERT INTO envelopes (dir, seq, type, body, at) VALUES ('g2h', ?, 'msg', 'AA==', ?)", seq, Date.now());
+		});
+		const res = await call(`/peer/c/${c.id}/envelopes?after=-1`, { token: c.hostToken, headers: { upgrade: "websocket" } });
+		expect(res.status).toBe(101);
+		const raw: string[] = [];
+		res.webSocket!.addEventListener("message", (e) => raw.push(e.data as string));
+		res.webSocket!.accept();
+		const until = Date.now() + FRAME_WAIT_MS;
+		while (raw.length < PULL_MAX + 1 && Date.now() < until) await sleep(10);
+		expect(raw.length).toBe(PULL_MAX + 1);
+		expect(JSON.parse(raw.at(-1)!)).toEqual({ synced: PULL_MAX - 1, more: true });
+		res.webSocket!.close(1000, "bye");
+	});
+
 	it("stores a put with no socket open, and after the only socket closed", async () => {
 		const c = await open();
 		const guestToken = await join(c);

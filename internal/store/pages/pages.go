@@ -41,6 +41,7 @@ func (e *Error) Error() string { return fmt.Sprintf("pages: %d %s: %s", e.Status
 type Backend struct {
 	base, slug, bearer string
 	client             *http.Client
+	liveHolder         // Watch's records (live.go)
 }
 
 // Timeout bounds one record's request when New is given no client of its
@@ -101,11 +102,24 @@ func (b *Backend) do(ctx context.Context, method, url string, body []byte) (int,
 	return res.StatusCode, a, nil
 }
 
-// Load reads the record; an absent key is nil, 0, nil.
+// Load reads the record; an absent key is nil, 0, nil. While Watch's socket
+// is synced, the record it holds, read from nothing.
 func (b *Backend) Load(ctx context.Context, key string) ([]byte, int64, error) {
 	if !store.ValidKey(key) {
 		return nil, 0, fmt.Errorf("pages: %q is not a record key", key)
 	}
+	if data, v, ok := b.cached(key); ok {
+		return data, v, nil
+	}
+	data, v, err := b.get(ctx, key)
+	if err == nil {
+		b.remember(key, data, v)
+	}
+	return data, v, err
+}
+
+// get reads the record from the page.
+func (b *Backend) get(ctx context.Context, key string) ([]byte, int64, error) {
 	status, a, err := b.do(ctx, http.MethodGet, b.url(key), nil)
 	if err != nil {
 		return nil, 0, err
@@ -150,8 +164,10 @@ func (b *Backend) Store(ctx context.Context, key string, data []byte, expect int
 	}
 	switch {
 	case status == http.StatusOK:
+		b.remember(key, data, a.Version)
 		return a.Version, nil
 	case status == http.StatusConflict && a.Code == "version_conflict":
+		b.forget(key)
 		return 0, &store.ConflictError{Key: key, Expected: expect, Found: a.Version}
 	case status == http.StatusRequestEntityTooLarge:
 		return 0, fmt.Errorf("%w: %s: %s", store.ErrTooLarge, key, a.Error)
