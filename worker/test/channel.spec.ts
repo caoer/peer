@@ -21,6 +21,7 @@ import {
 	BODY_MAX,
 	CLOSE_BAD_TOKEN,
 	CLOSE_NO_SUCH_CHANNEL,
+	CLOSE_SILENT,
 	PING,
 	PONG,
 	PREKEYS_HELD_MAX,
@@ -28,6 +29,7 @@ import {
 	PULL_MAX,
 	RELEASE_TAG,
 	RETENTION_MS,
+	SILENT_MS,
 	SOCKETS_PER_SIDE,
 	TOKEN_RE,
 	peerName,
@@ -491,6 +493,31 @@ describe("peer push", () => {
 		// Every held socket still receives.
 		await ok(await put(c.id, guestToken, "msg", b64("all")));
 		for (const s of held.slice(1)) expect((await s.take(1))[0]!.body).toBe(b64("all"));
+	});
+
+	it(`gives a socket silent past ${SILENT_MS / 1000} s its place back, and keeps one that pinged`, async () => {
+		const c = await open();
+		const guestToken = await join(c);
+		const held = [];
+		for (let i = 0; i < SOCKETS_PER_SIDE; i++) held.push(await connect(c.id, c.hostToken));
+		// Connections lost without a close stay OPEN on the relay and fall
+		// silent: every socket last heard before the silence began.
+		await runInDurableObject(channel(c.id), (_i, state) => {
+			for (const ws of state.getWebSockets("host"))
+				ws.serializeAttachment({ ...(ws.deserializeAttachment() as object), at: Date.now() - SILENT_MS - 1 });
+		});
+		// One is alive: its ping is heard after that.
+		const live = held[0]!;
+		live.ws.send(PING);
+		const until = Date.now() + FRAME_WAIT_MS;
+		while (!live.raw.includes(PONG) && Date.now() < until) await sleep(10);
+		expect(live.raw).toEqual([PONG]);
+
+		// The reconnect gets a socket, not too_many_sockets.
+		const again = await connect(c.id, c.hostToken);
+		for (const s of held.slice(1)) expect(await s.closed).toMatchObject({ code: CLOSE_SILENT, reason: "silent" });
+		await ok(await put(c.id, guestToken, "msg", b64("after")));
+		for (const s of [live, again]) expect((await s.take(1))[0]!.body).toBe(b64("after"));
 	});
 
 	it("answers ping with pong, and closes a socket whose token or channel stopped existing", async () => {
