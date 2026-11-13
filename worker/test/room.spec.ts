@@ -13,7 +13,7 @@ import { env, SELF, runInDurableObject, runDurableObjectAlarm, evictDurableObjec
 import { describe, it, expect, beforeEach } from "vitest";
 import { sleep } from "./helpers/sleep";
 import { FRAME_WAIT_MS } from "./helpers/ws";
-import { BODY_MAX, CLOSE_BAD_TOKEN, PING, PONG, PULL_MAX, RETENTION_MS, TOKEN_RE, RELEASE_TAG } from "../src/relay/channel";
+import { BODY_MAX, CLOSE_BAD_TOKEN, CLOSE_SILENT, PING, PONG, PULL_MAX, RETENTION_MS, SILENT_MS, TOKEN_RE, RELEASE_TAG } from "../src/relay/channel";
 import { IDX_MAX, SOCKETS_PER_IDX, roomName } from "../src/relay/room";
 
 const USER = "peerowner";
@@ -604,6 +604,29 @@ describe("peer room push", () => {
 		// Every held socket still receives.
 		await ok(await put(r.id, r.adminToken, b.membership, b64("all")));
 		for (const s of held.slice(1)) expect((await s.take(1))[0]!.body).toBe(b64("all"));
+	});
+
+	it(`gives a socket silent past ${SILENT_MS / 1000} s its place back, and keeps one that pinged`, async () => {
+		const r = await open();
+		const b = await minted(r.id, r.adminToken);
+		const held = [];
+		for (let i = 0; i < SOCKETS_PER_IDX; i++) held.push(await connect(r.id, b.token));
+		// Connections lost without a close stay OPEN on the relay and fall silent.
+		await runInDurableObject(roomOf(r.id), (_i, state) => {
+			for (const ws of state.getWebSockets(`idx:${b.idx}`))
+				ws.serializeAttachment({ ...(ws.deserializeAttachment() as object), at: Date.now() - SILENT_MS - 1 });
+		});
+		const live = held[0]!;
+		live.ws.send(PING);
+		const until = Date.now() + FRAME_WAIT_MS;
+		while (!live.raw.includes(PONG) && Date.now() < until) await sleep(10);
+		expect(live.raw).toEqual([PONG]);
+
+		// The reconnect gets a socket, not too_many_sockets.
+		const again = await connect(r.id, b.token);
+		for (const s of held.slice(1)) expect(await s.closed).toMatchObject({ code: CLOSE_SILENT, reason: "silent" });
+		await ok(await put(r.id, r.adminToken, b.membership, b64("after")));
+		for (const s of [live, again]) expect((await s.take(1))[0]!.body).toBe(b64("after"));
 	});
 
 	it("keeps its sockets, their idx and their token through the object's hibernation", async () => {

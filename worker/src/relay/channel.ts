@@ -23,9 +23,12 @@
  * Push: a side may also hold WebSockets on the envelopes route (hibernatable,
  * tagged by side, the token's hash in the attachment). Each put is stored
  * first and then sent to the other side's open sockets as the row a pull
- * answers; pull stays the source of truth, so a socket starts with a re-pull
- * from the client's cursor and a frame lost to a dropped socket is read by
- * the next pull.
+ * answers; pull stays the source of truth, so a frame lost to a dropped
+ * socket is read by the next pull. A socket opened with `after=<seq>` resumes
+ * there: the upgrade answers `x-peer-resume: 1`, the socket carries first the
+ * rows a pull from that seq would answer, then `{"synced":<seq>,"more":<bool>}`
+ * — `more` when a second page remains to be pulled. A socket opened without
+ * `after` starts with nothing, and its client pulls from its cursor.
  *
  * Nothing lives in memory. Every deploy restarts every Durable Object, so all
  * state is the SQLite tables below, and a client resumes with its last seq.
@@ -74,11 +77,20 @@ export const SOCKETS_PER_SIDE = 16;
 // it without waking the object.
 export const PING = "ping";
 export const PONG = "pong";
+// A socket with no ping and no accept for this long is dead: the contract's
+// "a socket silent for about 100 seconds is dropped". A connection lost
+// without a close (the client reads EOF) can stay OPEN in getWebSockets with
+// no close ever delivered, holding its place under the cap; the relay closes
+// it the next time it lists the side's sockets.
+export const SILENT_MS = 100_000;
 // Closing codes of a push socket whose token stopped opening a side of the
 // channel, or whose channel stopped existing — checked on each client frame
 // the runtime does not answer itself.
 export const CLOSE_BAD_TOKEN = 4401;
 export const CLOSE_NO_SUCH_CHANNEL = 4404;
+// The close a socket silent past SILENT_MS gets: going away, so a client
+// that still hears it reconnects.
+export const CLOSE_SILENT = 1001;
 // A prekey's public half, base64: 44 characters for a 33-byte key.
 const PUB_MAX = 256;
 const UINT32_MAX = 0xffff_ffff;
@@ -106,11 +118,18 @@ const NO_SUCH_CHANNEL = refusal(404, "no_such_channel", "no such channel");
 const BAD_TOKEN = refusal(401, "bad_token", "this token opens no side of this channel");
 const NO_SUCH_BLOB = refusal(404, "no_such_blob", "no such blob for this side: never put, put by this side, not finished, or past retention");
 
-// A push socket's attachment: its side (also its tag) and the hash of the
-// token that opened it. `gone` marks a socket this object closed —
+// A push socket's attachment: its side (also its tag), the hash of the
+// token that opened it, and when it was accepted (`at`, the last time heard
+// before its first ping). `gone` marks a socket this object closed —
 // getWebSockets keeps it until the far end answers, and it must receive
 // nothing more.
-type SocketAtt = { side: Side; hash: string; gone?: true };
+type SocketAtt = { side: Side; hash: string; at: number; gone?: true };
+
+// When a socket was last heard: its last ping the runtime answered, or its
+// accept. An attachment without `at` reads as never heard.
+export function heardAt(ctx: DurableObjectState, ws: WebSocket, at: number | undefined): number {
+  return Math.max(ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0, at ?? 0);
+}
 
 const dirOf = (side: Side): Dir => (side === "host" ? "h2g" : "g2h");
 const otherSide = (side: Side): Side => (side === "host" ? "guest" : "host");
@@ -265,25 +284,33 @@ export class PeerChannel extends DurableObject<PeerEnv> {
     if (!this.created()) return NO_SUCH_CHANNEL;
     const side = await this.sideOf(tokenHash);
     if (side === null) return BAD_TOKEN;
-    const dir = dirOf(otherSide(side));
+    return { envelopes: this.page(dirOf(otherSide(side)), after).envelopes };
+  }
+
+  // One pull page of direction dir after seq `after`: at most PULL_MAX rows
+  // and PULL_BYTES_MAX of bodies (one row at least); `more` when rows past it
+  // may remain. Synchronous: the push upgrade sends it with no await between.
+  private page(dir: Dir, after: number): { envelopes: Envelope[]; more: boolean } {
     const sql = this.ctx.storage.sql;
     // Sizes first, so a page of large bodies is never read whole into memory.
     const sizes = sql
       .exec<{ seq: number; n: number }>("SELECT seq, length(body) AS n FROM envelopes WHERE dir = ? AND seq > ? ORDER BY seq LIMIT ?", dir, after, PULL_MAX)
       .toArray();
     let last: number | null = null;
+    let taken = 0;
     let budget = PULL_BYTES_MAX;
     for (const row of sizes) {
       budget -= row.n;
       if (budget < 0 && last !== null) break;
       last = row.seq;
+      taken++;
     }
-    if (last === null) return { envelopes: [] };
+    if (last === null) return { envelopes: [], more: false };
     const envelopes = sql
       .exec<Envelope>("SELECT seq, type, body, at FROM envelopes WHERE dir = ? AND seq > ? AND seq <= ? ORDER BY seq", dir, after, last)
       .toArray()
       .map((r) => ({ seq: Number(r.seq), type: r.type, body: r.body, at: Number(r.at) }));
-    return { envelopes };
+    return { envelopes, more: taken < sizes.length || sizes.length === PULL_MAX };
   }
 
   // PUT /peer/c/<id>/prekeys: appended to the token's own side. An id the
@@ -328,10 +355,15 @@ export class PeerChannel extends DurableObject<PeerEnv> {
 
   // The push upgrade on GET /peer/c/<id>/envelopes, after the Worker hashed
   // the bearer token (`x-peer-hash`): refused as the pull refuses, or a 101.
-  // The socket is tagged by its side and carries nothing but the hash.
+  // The socket is tagged by its side and carries nothing but the hash. With
+  // `x-peer-after` (the route's `after`) it resumes: the page a pull from
+  // there answers, then `synced`, sent before any later put can be — no await
+  // from the accept to the last send.
   async fetch(req: Request): Promise<Response> {
     if (!this.created()) return refused(NO_SUCH_CHANNEL);
     const hash = req.headers.get("x-peer-hash") ?? "";
+    const rawAfter = req.headers.get("x-peer-after");
+    const after = rawAfter !== null && AFTER_RE.test(rawAfter) && Number(rawAfter) >= -1 ? Number(rawAfter) : null;
     const side = await this.sideOf(hash);
     if (side === null) return refused(BAD_TOKEN);
     // No await from the count to the accept: two upgrades cannot both take the last place.
@@ -340,8 +372,12 @@ export class PeerChannel extends DurableObject<PeerEnv> {
       return fail(429, "too_many_sockets", `this side already holds ${held} sockets on this channel; the cap is ${SOCKETS_PER_SIDE}`);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server, [side]);
-    server.serializeAttachment({ side, hash } satisfies SocketAtt);
-    return new Response(null, { status: 101, webSocket: client });
+    server.serializeAttachment({ side, hash, at: Date.now() } satisfies SocketAtt);
+    if (after === null) return new Response(null, { status: 101, webSocket: client });
+    const { envelopes, more } = this.page(dirOf(otherSide(side)), after);
+    for (const row of envelopes) server.send(JSON.stringify(row));
+    server.send(JSON.stringify({ synced: envelopes.at(-1)?.seq ?? after, more }));
+    return new Response(null, { status: 101, webSocket: client, headers: { "x-peer-resume": "1" } });
   }
 
   // A client frame the runtime did not answer (anything but PING). The relay
@@ -381,13 +417,18 @@ export class PeerChannel extends DurableObject<PeerEnv> {
     }
   }
 
-  // A side's sockets that are OPEN and not closed by this object
-  // (getWebSockets keeps CLOSING sockets).
+  // A side's sockets that are OPEN, not closed by this object
+  // (getWebSockets keeps CLOSING sockets), and heard within SILENT_MS; one
+  // silent longer is closed here.
   private open(side: Side): WebSocket[] {
+    const now = Date.now();
     return this.ctx.getWebSockets(side).filter((ws) => {
       if (ws.readyState !== WebSocket.OPEN) return false;
       const att = ws.deserializeAttachment() as SocketAtt | null;
-      return att !== null && att.gone !== true;
+      if (att === null || att.gone === true) return false;
+      if (now - heardAt(this.ctx, ws, att.at) <= SILENT_MS) return true;
+      this.closeAs(ws, CLOSE_SILENT, "silent");
+      return false;
     });
   }
 
@@ -498,7 +539,7 @@ const badToken = () => refused(BAD_TOKEN);
 // The peer release the landings point an agent at. One spelling: README.md
 // carries the same tag, and relay.spec.ts fails when the two differ, so a
 // release bump (scripts/release-build.sh, U5) changes both or neither.
-export const RELEASE_TAG = "v0.5.3";
+export const RELEASE_TAG = "v0.5.5";
 
 // Every landing's install route, before its accept or follow line: an agent
 // on a machine without peer stopped at the accept line and asked its human.
@@ -661,8 +702,15 @@ async function peerRoutes(
     if (req.method !== "POST" && req.method !== "GET") return methodNotAllowed();
     const hash = await bearerHash(req);
     if (hash === null) return badToken();
-    if (req.method === "GET" && req.headers.get("upgrade")?.toLowerCase() === "websocket")
-      return channel.fetch(new Request("https://peer/push", { headers: { upgrade: "websocket", "x-peer-hash": hash } }));
+    if (req.method === "GET" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      const headers: Record<string, string> = { upgrade: "websocket", "x-peer-hash": hash };
+      const after = new URL(req.url).searchParams.get("after");
+      if (after !== null) {
+        if (!AFTER_RE.test(after) || Number(after) < -1) return badRequest("after is a whole number, -1 or more");
+        headers["x-peer-after"] = after;
+      }
+      return channel.fetch(new Request("https://peer/push", { headers }));
+    }
     if (req.method === "GET") {
       const raw = new URL(req.url).searchParams.get("after");
       if (raw !== null && !AFTER_RE.test(raw)) return badRequest("after is a whole number, -1 or more");

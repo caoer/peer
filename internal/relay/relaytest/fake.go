@@ -52,8 +52,9 @@ type Server struct {
 	// PageSize caps a pull answer (the contract's 100).
 	PageSize int
 	// noPush and push are the WebSocket push (push.go).
-	noPush bool
-	push   push
+	noPush   bool
+	noResume bool
+	push     push
 	// rooms is the room state (room.go).
 	rooms rooms
 }
@@ -252,7 +253,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			after = n
 		}
-		s.countPull(parts[0], other)
+		// An upgrade answered as a pull (NoPush) is no pull of the client's.
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			s.countPull(parts[0], other)
+		}
 		page := []Row{}
 		for _, e := range ch.env[other] {
 			if e.Seq > after && len(page) < s.PageSize {

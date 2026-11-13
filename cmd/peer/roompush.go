@@ -45,7 +45,7 @@ func (ps *pusher) trackRooms(ctx context.Context) {
 			continue
 		}
 		rc := relay.New(ref.Relay, nil)
-		ps.open(k, ref.Token, func(ctx context.Context) (*pushStream, error) {
+		ps.open(k, ref.Token, "", func(ctx context.Context) (*pushStream, error) {
 			s, err := rc.SubscribeRoom(ctx, ref.ID, ref.Token)
 			if err != nil {
 				return nil, err

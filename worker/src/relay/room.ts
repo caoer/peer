@@ -47,8 +47,11 @@ import {
   BODY_MAX,
   CLOSE_BAD_TOKEN,
   CLOSE_NO_SUCH_CHANNEL,
+  CLOSE_SILENT,
   PING,
   PONG,
+  SILENT_MS,
+  heardAt,
   PULL_BYTES_MAX,
   PULL_MAX,
   RETENTION_MS,
@@ -109,11 +112,11 @@ const refusal = (status: number, code: string, error: string): Refusal => ({ ref
 // The member a token opens, with the token's admin flag.
 type Caller = { idx: number; role: Role; from: number; admin: boolean };
 
-// A push socket's attachment: its idx (also its tag) and the hash of the
-// token that opened it. `gone` marks a socket this object closed —
-// getWebSockets keeps it until the far end answers, and it must receive
-// nothing more.
-type SocketAtt = { idx: number; hash: string; gone?: true };
+// A push socket's attachment: its idx (also its tag), the hash of the token
+// that opened it, and when it was accepted (`at`, as PeerChannel's). `gone`
+// marks a socket this object closed — getWebSockets keeps it until the far
+// end answers, and it must receive nothing more.
+type SocketAtt = { idx: number; hash: string; at: number; gone?: true };
 const tagOf = (idx: number) => `idx:${idx}`;
 
 export class PeerRoom extends DurableObject<PeerEnv> {
@@ -396,7 +399,7 @@ export class PeerRoom extends DurableObject<PeerEnv> {
       return fail(429, "too_many_sockets", `this member already holds ${held} sockets on this room; the cap is ${SOCKETS_PER_IDX}`);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server, [tagOf(caller.idx)]);
-    server.serializeAttachment({ idx: caller.idx, hash } satisfies SocketAtt);
+    server.serializeAttachment({ idx: caller.idx, hash, at: Date.now() } satisfies SocketAtt);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -440,13 +443,18 @@ export class PeerRoom extends DurableObject<PeerEnv> {
     }
   }
 
-  // The sockets (of one tag, or all) that are OPEN and not closed by this
-  // object (getWebSockets keeps CLOSING sockets).
+  // The sockets (of one tag, or all) that are OPEN, not closed by this
+  // object (getWebSockets keeps CLOSING sockets), and heard within SILENT_MS;
+  // one silent longer is closed here (as PeerChannel's).
   private open(tag?: string): WebSocket[] {
+    const now = Date.now();
     return this.ctx.getWebSockets(tag).filter((ws) => {
       if (ws.readyState !== WebSocket.OPEN) return false;
       const att = ws.deserializeAttachment() as SocketAtt | null;
-      return att !== null && att.gone !== true;
+      if (att === null || att.gone === true) return false;
+      if (now - heardAt(this.ctx, ws, att.at) <= SILENT_MS) return true;
+      this.closeAs(ws, CLOSE_SILENT, "silent");
+      return false;
     });
   }
 

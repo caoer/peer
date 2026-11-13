@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/coder/websocket"
@@ -19,12 +20,29 @@ type push struct {
 	pulls map[string]int
 	// drop is how many coming pushes are lost, as on a dropped frame.
 	drop int
+	// upgrades counts the answered upgrades per channel and dir ("<id> <dir>").
+	upgrades map[string]int
 }
 
 type sock struct {
 	id, dir string // channel and the dir it receives
 	conn    *websocket.Conn
 	rows    chan Row
+}
+
+// NoResume makes the relay ignore an upgrade's after, as a relay from
+// before resume does: no x-peer-resume header, no catch-up on the socket.
+func (s *Server) NoResume(off bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noResume = off
+}
+
+// Upgrades is how many push upgrades channel id has answered for dir.
+func (s *Server) Upgrades(id, dir string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.push.upgrades[id+" "+dir]
 }
 
 // NoPush makes the relay answer an upgrade as the pull, as a relay without
@@ -75,7 +93,8 @@ func (s *Server) DropPushes(n int) {
 	s.push.drop = n
 }
 
-// Pulls is how many pull GETs channel id has answered for rows in dir.
+// Pulls is how many pull GETs channel id has answered for rows in dir; an
+// upgrade NoPush answers as a pull is not one.
 func (s *Server) Pulls(id, dir string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,18 +158,57 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) bool {
 		fail(w, relay.ErrBadToken)
 		return true
 	}
-	s.mu.Unlock()
-	conn, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		return true
+	// The catch-up and the socket's place are taken under one lock, so a put
+	// lands in exactly one of them.
+	k := &sock{id: id, dir: dir, rows: make(chan Row, 64)}
+	var pre [][]byte
+	if q, set := r.URL.Query()["after"]; set && !s.noResume {
+		after, err := strconv.ParseInt(q[0], 10, 64)
+		if err != nil || after < -1 {
+			s.mu.Unlock()
+			fail(w, relay.ErrBadRequest)
+			return true
+		}
+		last, n := after, 0
+		for _, e := range ch.env[dir] {
+			if e.Seq <= after {
+				continue
+			}
+			if n++; n > s.PageSize {
+				break
+			}
+			b, _ := json.Marshal(e)
+			pre, last = append(pre, b), e.Seq
+		}
+		b, _ := json.Marshal(map[string]any{"synced": last, "more": n > s.PageSize})
+		pre = append(pre, b)
+		w.Header().Set("X-Peer-Resume", "1")
 	}
-	k := &sock{id: id, dir: dir, conn: conn, rows: make(chan Row, 64)}
-	s.mu.Lock()
 	if s.push.socks == nil {
 		s.push.socks = map[*sock]bool{}
 	}
 	s.push.socks[k] = true
+	if s.push.upgrades == nil {
+		s.push.upgrades = map[string]int{}
+	}
+	s.push.upgrades[id+" "+dir]++
 	s.mu.Unlock()
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		s.mu.Lock()
+		delete(s.push.socks, k)
+		s.mu.Unlock()
+		return true
+	}
+	s.mu.Lock()
+	k.conn = conn
+	s.mu.Unlock()
+	for _, b := range pre {
+		if conn.Write(r.Context(), websocket.MessageText, b) != nil {
+			conn.CloseNow()
+			return true
+		}
+	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer func() {
 		cancel()
