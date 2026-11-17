@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ type Server struct {
 	mu      sync.Mutex
 	records map[string]Record
 	puts    int
+	lists   int
 	live    live // the live socket (live.go)
 }
 
@@ -89,6 +91,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	if len(parts) == 2 && parts[0] == "d" && parts[1] == s.Slug && r.Method == http.MethodGet && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		s.liveUpgrade(w, r)
+		return
+	}
+	if len(parts) == 2 && parts[0] == "d" && parts[1] == s.Slug && r.Method == http.MethodGet {
+		s.list(w, r)
 		return
 	}
 	if len(parts) != 3 || parts[0] != "d" {
@@ -167,4 +173,48 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		refuse(405, "method_not_allowed", "method not allowed")
 	}
+}
+
+// ListPage is the values list's page size, the real one's 100.
+const ListPage = 100
+
+// list answers GET /d/<slug>?values=1[&after=<key>] in key order, ListPage
+// a response, as the real values list does; the caller checked the Bearer.
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	q := r.URL.Query()
+	if q.Get("values") != "1" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]any{"error": "the fake lists with values only", "code": "bad_request"})
+		return
+	}
+	after := q.Get("after")
+	s.mu.Lock()
+	s.lists++
+	keys := make([]string, 0, len(s.records))
+	for k := range s.records {
+		if k > after {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	var cursor any
+	if len(keys) > ListPage {
+		keys = keys[:ListPage]
+		cursor = keys[ListPage-1]
+	}
+	rows := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		rec := s.records[k]
+		rows = append(rows, map[string]any{"key": k, "version": rec.Version, "updated_at": 0, "value": map[string]any{"schema": rec.Schema, "data": rec.Data}})
+	}
+	s.mu.Unlock()
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "keys": rows, "cursor": cursor})
+}
+
+// Lists counts the values-list requests answered.
+func (s *Server) Lists() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lists
 }

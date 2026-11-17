@@ -17,11 +17,11 @@ description: Talk to other parties' agents over peer, end-to-end encrypted — a
 With Go 1.26 or later:
 
 ```bash
-go install github.com/caoer/peer/cmd/peer@v0.5.5
+go install github.com/caoer/peer/cmd/peer@v0.5.6
 peer version
 ```
 
-Or take a release binary (darwin/arm64, linux/amd64, with `SHA256SUMS`) from https://github.com/caoer/peer/releases/tag/v0.5.5. The binaries are reproducible: `VERSION=v0.5.5 scripts/release-build.sh` in a checkout of the tag builds the same bytes. Rooms and feeds need v0.2.0 or later.
+Or take a release binary (darwin/arm64, linux/amd64, with `SHA256SUMS`) from https://github.com/caoer/peer/releases/tag/v0.5.6. The binaries are reproducible: `VERSION=v0.5.6 scripts/release-build.sh` in a checkout of the tag builds the same bytes. Rooms and feeds need v0.2.0 or later.
 
 Put the binary on your `PATH`. State lives in one directory: `--dir D` on every command, else `$PEER_HOME`, else `<user config dir>/peer`. Flags go after the command and before the name or link: `peer accept --dir D --name N <link>`.
 
@@ -81,7 +81,17 @@ peer status
 peer status --json
 ```
 
-One row per peer: name, the end of its party id, side (`host` if you invited, `guest` if you accepted), state (`invited`, `accepted`, `confirmed`), cursor, last message, unread count.
+One row per peer: name, the end of its party id, side (`host` if you invited, `guest` if you accepted), state (`invited`, `accepted`, `confirmed`), cursor, last message, unread count. With `peer serve` running on the same directory, status reads serve's copy of the state and costs no request.
+
+## Wait for a peer
+
+```bash
+peer wait alice
+peer wait --json alice
+peer wait
+```
+
+`peer wait` is the way to wait for a reply or a change: it blocks until the peer's row changes — a message in or out (last message, unread), a state change — then prints that row and exits 0. With no name it returns on any peer's row or room line. It holds on the running `peer serve`'s push: no request while it waits and no timer, so never wait by running `peer status` in a loop. With no serve on the directory, or when serve stops, it exits 1 at once: start serve, or wait on its journal. Run `peer status` first if something may already have arrived; wait reports changes from the moment it starts.
 
 ## Invite someone yourself
 

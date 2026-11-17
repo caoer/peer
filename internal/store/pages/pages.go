@@ -102,6 +102,33 @@ func (b *Backend) do(ctx context.Context, method, url string, body []byte) (int,
 	return res.StatusCode, a, nil
 }
 
+// doRaw is a bodiless request's status and body, up to listReadLimit: a
+// values list carries up to 100 records of up to 256 KiB each.
+func (b *Backend) doRaw(ctx context.Context, method, url string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+b.bearer)
+	res, err := b.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, listReadLimit+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(raw) > listReadLimit {
+		return 0, nil, fmt.Errorf("pages: %s %s: answer over %d bytes", method, url, listReadLimit)
+	}
+	return res.StatusCode, raw, nil
+}
+
+// listReadLimit bounds a values list: 100 records at the envelope cap, with
+// room for the JSON around them.
+const listReadLimit = 101 * MaxEnvelope
+
 // Load reads the record; an absent key is nil, 0, nil. While Watch's socket
 // is synced, the record it holds, read from nothing.
 func (b *Backend) Load(ctx context.Context, key string) ([]byte, int64, error) {

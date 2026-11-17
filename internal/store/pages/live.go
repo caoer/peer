@@ -236,6 +236,10 @@ func (b *Backend) apply(f liveFrame) (bool, error) {
 	defer b.mu.Unlock()
 	l := b.live
 	switch f.Type {
+	case "hello", "synced", "put", "del":
+		defer b.notify()
+	}
+	switch f.Type {
 	case "hello":
 		if f.Epoch == nil {
 			// A store with no change yet has no epoch; there is nothing to
@@ -305,6 +309,27 @@ func (b *Backend) remember(key string, data []byte, v int64) {
 	}
 	if cur := l.recs[key]; cur == nil || v > cur.v || (v == cur.v && cur.ref) {
 		l.recs[key] = &liveRec{data: append([]byte(nil), data...), v: v}
+		b.notify()
+	}
+}
+
+// Changed is closed at the next change of what Load answers from: a frame
+// the live socket applies or a record this process read or wrote. Take it
+// before reading Snapshot, then wait on it.
+func (b *Backend) Changed() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.changed == nil {
+		b.changed = make(chan struct{})
+	}
+	return b.changed
+}
+
+// notify closes the channel Changed handed out; b.mu is held.
+func (b *Backend) notify() {
+	if b.changed != nil {
+		close(b.changed)
+		b.changed = nil
 	}
 }
 
@@ -331,6 +356,7 @@ func (b *Backend) Live() bool {
 
 // The live state hangs off Backend; declared here with the code that uses it.
 type liveHolder struct {
-	mu   sync.Mutex
-	live *live
+	mu      sync.Mutex
+	live    *live
+	changed chan struct{} // Changed's, closed by notify
 }

@@ -65,6 +65,15 @@ type sealed struct {
 	aead cipher.AEAD
 }
 
+// Inner is the backend a sealed backend wraps, else b: where its records
+// are held, for a caller that moves them sealed (a page's snapshot).
+func Inner(b Backend) Backend {
+	if s, ok := b.(*sealed); ok {
+		return s.b
+	}
+	return b
+}
+
 func (s *sealed) Load(ctx context.Context, key string) ([]byte, int64, error) {
 	blob, v, err := s.b.Load(ctx, key)
 	if err != nil || blob == nil {

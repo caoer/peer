@@ -56,6 +56,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdForget(args[1:], stdout, stderr)
 	case "status":
 		return cmdStatus(args[1:], stdout, stderr)
+	case "wait":
+		return cmdWait(args[1:], stdout, stderr)
 	case "fetch":
 		return cmdFetch(args[1:], stdout, stderr)
 	case "card":
@@ -113,6 +115,12 @@ commands:
   status    print every peer from the local store, and its roster page row;
             one line per room: idx, members, cursor, dropped, reported
             [--dir D] [--json]
+  wait      the way to wait for a peer: block until its row as status prints
+            it changes — a message in or out, a state change — or, with no
+            name, any peer's row or room line; then print what changed. It
+            holds on the running serve's push: no page read, no timer; with
+            no serve on the directory, or when serve stops, it exits 1
+            [--dir D] [--json] [<name>]
   fetch     fetch a quarantined doc or file's content again
             [--dir D] [--deliver DIR] <message id | record path>
   card      publish: sign your card with the root key, put it on the state

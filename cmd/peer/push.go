@@ -63,6 +63,8 @@ func (sv *server) loop(ctx context.Context, every time.Duration, once bool, stde
 				stop()
 				<-done
 			}()
+			// What the live socket holds, for this host's commands (statecopy.go).
+			defer sv.serveStateCopy()()
 		}
 		sv.push = newPusher(ctx, sv)
 		defer sv.push.stop()

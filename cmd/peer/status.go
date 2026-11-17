@@ -180,7 +180,7 @@ func ago(now, t time.Time) string { return now.Sub(t).Truncate(time.Second).Stri
 
 // cmdStatus prints every peer from the party's store, and its roster page
 // row when config names the page. Read-only: it writes nothing and never
-// asks the relay.
+// asks the relay; a state page is read from serve's copy, else at once.
 func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("status", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -193,7 +193,13 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: peer status [--dir D] [--json]")
 		return 2
 	}
-	rows, err := runStatus(context.Background(), *dirFlag, time.Now())
+	ctx := context.Background()
+	p, err := openStatusParty(ctx, *dirFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "peer status: %v\n", err)
+		return 1
+	}
+	rows, err := runStatus(ctx, p, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "peer status: %v\n", err)
 		return 1
@@ -211,7 +217,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	printStatus(stdout, rows, time.Now())
-	lines, err := runRoomStatus(context.Background(), *dirFlag)
+	lines, err := runRoomStatus(ctx, p)
 	if err != nil {
 		fmt.Fprintf(stderr, "peer status: %v\n", err)
 		return 1
@@ -226,15 +232,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 // idx, member count, cursor, the records the fold dropped and the receiver
 // reported (the room state's counts), and this host's records waiting in
 // the room outbox; a room still joining, its stage.
-func runRoomStatus(ctx context.Context, dir string) ([]string, error) {
-	dir, err := peerDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	p, err := openParty(dir)
-	if err != nil {
-		return nil, err
-	}
+func runRoomStatus(ctx context.Context, p *party) ([]string, error) {
 	l, err := loadRooms(ctx, p.backend)
 	if err != nil {
 		return nil, err
@@ -279,7 +277,9 @@ func runRoomStatus(ctx context.Context, dir string) ([]string, error) {
 	return out, nil
 }
 
-func runStatus(ctx context.Context, dir string, now time.Time) ([]statusJSON, error) {
+// openStatusParty opens the party for status with its state held at once
+// (holdState): serve's copy, else one read of the state page.
+func openStatusParty(ctx context.Context, dir string) (*party, error) {
 	dir, err := peerDir(dir)
 	if err != nil {
 		return nil, err
@@ -288,6 +288,11 @@ func runStatus(ctx context.Context, dir string, now time.Time) ([]statusJSON, er
 	if err != nil {
 		return nil, err
 	}
+	p.holdState(ctx)
+	return p, nil
+}
+
+func runStatus(ctx context.Context, p *party, now time.Time) ([]statusJSON, error) {
 	page, err := rosterPage(p.cfg)
 	if err != nil {
 		return nil, err
