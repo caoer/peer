@@ -311,6 +311,18 @@ func (m *Map) InRoom(name, id string) []Row {
 // Len is the number of rows.
 func (m *Map) Len() int { return len(m.order) }
 
+// LabelsAccepting is the labels of the rows that accept kind, in the map's
+// order — the labels a sender may address a kind message to.
+func (m *Map) LabelsAccepting(kind string) []string {
+	var out []string
+	for _, l := range m.order {
+		if slices.Contains(m.rows[l].Accepts, kind) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // Agents is the map as the card's agent list, in the map's order: every row
 // is an agent of the party with the row's accepts (design §3.3).
 func (m *Map) Agents() []card.Agent {

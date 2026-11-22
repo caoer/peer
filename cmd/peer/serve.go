@@ -88,8 +88,9 @@ type server struct {
 	seats *seats.Map
 	// Test hooks, nil in production: beforeCommit runs once the spool entry
 	// is written and before the CAS commit; beforeBirth once the commit
-	// landed and before the record is born.
-	beforeCommit, beforeBirth func(*store.Entry) error
+	// landed and before the record is born; beforeRefusal once an unlabeled
+	// refusal's commit landed and before its answer and notice run.
+	beforeCommit, beforeBirth, beforeRefusal func(*store.Entry) error
 	// rotationReminded is set once this process has said that the signed
 	// prekey is due and the root to announce a new one is elsewhere.
 	rotationReminded bool
@@ -178,11 +179,20 @@ func (sv *server) start(ctx context.Context) error {
 
 // replaySpool births the spool entries whose commit landed and drops the
 // rest (store.ReplaySpool); a room channel message's entry runs its step
-// instead (receiveRoom). An entry that can never be born — its own address,
-// kind or id refuses — is dropped with its reason, so one such entry cannot
-// stop delivery on every channel.
+// instead (receiveRoom), and an unlabeled refusal's entry runs its answer
+// and notice (replayRefusalStep). An entry that can never be born — its own
+// address, kind or id refuses — is dropped with its reason, so one such
+// entry cannot stop delivery on every channel.
 func (sv *server) replaySpool(ctx context.Context) error {
 	return sv.p.store.ReplaySpool(ctx, sv.spool, func(e *store.Entry) error {
+		if isRefusedType(e.Type) {
+			m, err := session.UnmarshalMessage(e.Body)
+			if err != nil {
+				fmt.Fprintf(sv.out, "dropped %s from the spool: %v\n", e.ID, err)
+				return nil
+			}
+			return sv.replayRefusalStep(ctx, e, m)
+		}
 		if m, err := session.UnmarshalMessage(e.Body); err == nil && session.RoomKind(m.Kind) {
 			return sv.replayRoomStep(ctx, e, m)
 		}
@@ -664,6 +674,15 @@ func (c *channelServe) receive(ctx context.Context, rec relay.Record) error {
 			return nil
 		}
 		fmt.Fprintf(c.sv.out, "skip %s #%d: %v\n", c.pe.Name, rec.Seq, err)
+		// The unlabeled refusal keeps its consume — the grammar rules out a
+		// guessed seat — but not its silence: the owed answer and notice are
+		// spooled with the consume and run once the commit claims it, so a
+		// crash or an error that landed does not bring the silent drop back
+		// (ucc.go).
+		var unlabeled unlabeledError
+		if errors.As(err, &unlabeled) && m != nil {
+			return c.consumeUnlabeled(ctx, rec, m)
+		}
 		return c.commit(ctx, rec)
 	}
 	if m.Kind == session.KindCard {
