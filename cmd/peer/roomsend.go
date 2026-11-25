@@ -461,6 +461,9 @@ func runRoomSend(ctx context.Context, warn io.Writer, dir, name string, to []str
 	if err != nil {
 		return nil, err
 	}
+	if err := p.checkFrom(fromAgent); err != nil {
+		return nil, err
+	}
 	l, err := loadRooms(ctx, p.backend)
 	if err != nil {
 		return nil, err

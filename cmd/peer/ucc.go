@@ -75,6 +75,78 @@ func (p *party) loadSeats() (*seats.Map, error) {
 	return m, nil
 }
 
+// checkFrom refuses a send --from a label the seat map has no row for: the
+// peer answers <party>/<label>, and this party's border refuses a label its
+// map does not carry (seatRow), so the answer would be lost. The error names
+// the map and the labels the calling seat may send from. No --from (the
+// party itself) and a party without ucc pass. Rule 7 (R1250 (4)): a tool
+// checking what it is handed — at its first wrong refusal this check is
+// taken out.
+func (p *party) checkFrom(from string) error {
+	if from == "" || p.seats == nil {
+		return nil
+	}
+	if _, ok := p.seats.Row(from); ok {
+		return nil
+	}
+	path := p.cfg.UCC.seatsPath()
+	head := fmt.Sprintf("--from %q: the seat map %s has no row for it, so an answer to it is refused at this party's border", from, path)
+	seat, err := callingSeat(p.cfg.UCC.Root)
+	if err != nil {
+		return fmt.Errorf("%s; this seat was not resolved (%v) — the map's labels: %s; or omit --from to send as the party", head, err, labelList(p.seats.Labels()))
+	}
+	return fmt.Errorf("%s; this seat (%s) may send from: %s; or omit --from to send as the party", head, seat, labelList(p.seats.LabelsOfSeat(seat)))
+}
+
+func labelList(l []string) string {
+	if len(l) == 0 {
+		return "none"
+	}
+	return strings.Join(l, ", ")
+}
+
+// callingSeat is the seat of the agent running this command: its session id
+// in CLAUDE_CODE_SESSION_ID, whose first eight characters name its card at
+// <root>/agents/<short>/<short>.md, whose seat: is a wikilink to the roster
+// record — the text a seat row's to carries.
+func callingSeat(root string) (string, error) {
+	id := os.Getenv("CLAUDE_CODE_SESSION_ID")
+	if len(id) < 8 {
+		return "", errors.New("CLAUDE_CODE_SESSION_ID is not set")
+	}
+	short := id[:8]
+	if !deliver.ValidAgent(short) {
+		return "", fmt.Errorf("CLAUDE_CODE_SESSION_ID %q is not a session id", id)
+	}
+	card := filepath.Join(root, "agents", short, short+".md")
+	b, err := os.ReadFile(card)
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(string(b), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", fmt.Errorf("%s has no frontmatter", card)
+	}
+	for _, l := range lines[1:] {
+		if strings.TrimSpace(l) == "---" {
+			break
+		}
+		v, ok := strings.CutPrefix(l, "seat:")
+		if !ok {
+			continue
+		}
+		v = strings.Trim(strings.TrimSpace(v), `"'`)
+		v = strings.TrimSuffix(strings.TrimPrefix(v, "[["), "]]")
+		v, _, _ = strings.Cut(v, "|")
+		v = strings.TrimSuffix(v, ".md")
+		if v == "" {
+			break
+		}
+		return v, nil
+	}
+	return "", fmt.Errorf("%s names no seat", card)
+}
+
 // loadSeats is the server's: read again every round, since UCC may change
 // the map while serve runs.
 func (sv *server) loadSeats() error {

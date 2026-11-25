@@ -18,6 +18,7 @@ import (
 	"github.com/caoer/peer/internal/keys"
 	"github.com/caoer/peer/internal/relay"
 	"github.com/caoer/peer/internal/roster"
+	"github.com/caoer/peer/internal/seats"
 	"github.com/caoer/peer/internal/store"
 	"github.com/caoer/peer/internal/store/file"
 	"github.com/caoer/peer/internal/store/pages"
@@ -106,8 +107,10 @@ func openBackend(dir string, cfg config, id *keys.Identity) (store.Backend, erro
 
 // party is an opened peer directory.
 type party struct {
-	dir     string
-	cfg     config
+	dir string
+	cfg config
+	// seats is the seat map read at open; nil without ucc.
+	seats   *seats.Map
 	id      *keys.Identity
 	root    *keys.Root // nil when root.json is not in the directory
 	backend store.Backend
@@ -147,9 +150,11 @@ func openParty(dir string) (*party, error) {
 	if err := readConfig(filepath.Join(dir, configFile), &p.cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	if _, err := p.loadSeats(); err != nil {
+	seatMap, err := p.loadSeats()
+	if err != nil {
 		return nil, err
 	}
+	p.seats = seatMap
 	if _, err := p.cfg.signedPrekeyEvery(); err != nil {
 		return nil, err
 	}

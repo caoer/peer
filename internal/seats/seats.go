@@ -311,6 +311,22 @@ func (m *Map) InRoom(name, id string) []Row {
 // Len is the number of rows.
 func (m *Map) Len() int { return len(m.order) }
 
+// Labels is every label, in the map's order.
+func (m *Map) Labels() []string { return slices.Clone(m.order) }
+
+// LabelsOfSeat is the labels, in the map's order, of the seat and human rows
+// whose to names the seat — the roster record's path under the root, a
+// wikilink's text: the labels that seat answers for.
+func (m *Map) LabelsOfSeat(seat string) []string {
+	var out []string
+	for _, l := range m.order {
+		if r := m.rows[l]; r.Kind != Service && r.Seat == seat {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // LabelsAccepting is the labels of the rows that accept kind, in the map's
 // order — the labels a sender may address a kind message to.
 func (m *Map) LabelsAccepting(kind string) []string {

@@ -51,8 +51,12 @@ func runSendFile(ctx context.Context, warn io.Writer, dir, target, fromAgent, ki
 		return nil, err
 	}
 	name, _ := splitAddr(target)
-	_, pe, _, err := sendTarget(ctx, dir, name)
+	p, pe, _, err := sendTarget(ctx, dir, name)
 	if err != nil {
+		return nil, err
+	}
+	// Before the blob goes up: a refused --from leaves nothing on the relay.
+	if err := p.checkFrom(fromAgent); err != nil {
 		return nil, err
 	}
 	b, err := relay.New(pe.Relay, nil).PutBlob(ctx, pe.Channel, pe.Token, ct)

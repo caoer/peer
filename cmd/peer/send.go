@@ -173,6 +173,9 @@ func runSendEncrypted(ctx context.Context, warn io.Writer, dir, target, fromAgen
 	if err != nil {
 		return nil, err
 	}
+	if err := p.checkFrom(fromAgent); err != nil {
+		return nil, err
+	}
 	p.timelineRound(warn)
 	if err := p.replayOutbox(ctx); err != nil {
 		fmt.Fprintf(warn, "peer send: outbox: %v\n", err)
